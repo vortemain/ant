@@ -54,7 +54,8 @@ pub use error::SandboxError;
 
 #[cfg(windows)]
 mod acl;
-#[cfg(windows)]
+// Pure `std`; compiled on every platform so `SandboxError` (and the
+// fail-closed `UnsupportedPlatform` variant) exists off Windows too.
 mod error;
 /// Job-object memory caps and suspended-start helpers (Windows only).
 #[cfg(windows)]
@@ -72,9 +73,6 @@ mod sid;
 mod token;
 #[cfg(windows)]
 mod winutil;
-
-#[cfg(not(windows))]
-mod stub;
 
 /// A prepared sandbox: a restricted primary token plus a granted workspace
 /// DACL. Owns the token; dropping it closes the handle.
