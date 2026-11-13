@@ -1,0 +1,49 @@
+# Android benchmark (P4): Gradle vs `ant remote run` through a sandboxed
+# Linux worker on a real Android app. Manual, plus pushes to the Android
+# branch. Raw results are uploaded as an artifact and summarized.
+name: bench-android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [p4-android]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Prepare the Linux sandbox
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Build ant (release)
+        run: cargo build --release -p ant-cli
+      - name: Run the benchmark
+        run: bash benchmarks/android/run.sh
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '## Android benchmark (raw)'
+            echo '```'
+            cat benchmarks/android/out/environment.txt || true
+            echo
+            column -s, -t benchmarks/android/out/results.csv || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-benchmark
+          path: benchmarks/android/out

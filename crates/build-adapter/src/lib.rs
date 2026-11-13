@@ -37,6 +37,7 @@
 
 pub mod cargo;
 pub mod cmake;
+pub mod gradle;
 pub mod npm;
 
 use build_graph::{GraphError, PlanFile};
@@ -250,7 +251,12 @@ pub fn declared_file_outputs(plan: &PlanFile) -> Vec<PathBuf> {
 
 /// The adapters compiled into this build, in registry order.
 pub fn available() -> Vec<&'static dyn BuildAdapter> {
-    vec![&cargo::CargoAdapter, &npm::NpmAdapter, &cmake::CmakeAdapter]
+    vec![
+        &cargo::CargoAdapter,
+        &npm::NpmAdapter,
+        &cmake::CmakeAdapter,
+        &gradle::GradleAdapter,
+    ]
 }
 
 /// Look up an adapter by its stable name.
@@ -647,14 +653,15 @@ mod tests {
         let names: Vec<_> = reasons.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            vec!["cargo", "npm", "cmake"],
+            vec!["cargo", "npm", "cmake", "gradle"],
             "one reason per registered adapter"
         );
         let text = error.to_string();
         assert!(
             text.contains("no Cargo.toml")
                 && text.contains("no package.json")
-                && text.contains("no CMakeLists.txt"),
+                && text.contains("no CMakeLists.txt")
+                && text.contains("no settings.gradle"),
             "{text}"
         );
     }

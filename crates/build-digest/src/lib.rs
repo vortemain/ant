@@ -515,7 +515,16 @@ pub fn local_runtime_environment() -> Vec<(std::ffi::OsString, std::ffi::OsStrin
         "PROGRAMW6432",
     ];
     #[cfg(not(windows))]
-    let keys: &[&str] = &["PATH", "HOME", "TMPDIR"];
+    let keys: &[&str] = &[
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        // JDK and Android SDK locations (Gradle/Android, D-024): their
+        // values are key material; the installations are not digested.
+        "JAVA_HOME",
+        "ANDROID_HOME",
+        "ANDROID_SDK_ROOT",
+    ];
 
     keys.iter()
         .filter_map(|key| std::env::var_os(key).map(|value| ((*key).into(), value)))
