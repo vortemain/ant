@@ -36,7 +36,17 @@ Ctrl+C is now handled cooperatively: pressing Ctrl+C while `ant run` executes ca
 
 On Windows, every action's process tree is placed in a kill-on-close job object. When the action finishes — normally, on timeout, or on cancellation — any processes still running in that job (including grandchildren started by the action) are terminated. This prevents cancelled builds from leaving orphaned compilers or daemons behind. Descendant cleanup on non-Windows platforms remains best-effort and only covers the direct child.
 
-## `--sandbox`: Windows restricted-token filesystem confinement
+## `--sandbox` on Linux: bubblewrap, with no network (D-018)
+
+On Linux, `ant run --sandbox` (and `ant worker --sandbox`) runs each action under [bubblewrap](https://github.com/containers/bubblewrap) with every namespace unshared:
+
+- the host filesystem is mounted **read-only**; the workspace is the only writable host path; `/tmp` is a private tmpfs; `/dev` and `/proc` are fresh;
+- the action gets an **empty network namespace** — no routes and no resolver, so connections *and* DNS fail;
+- it runs in its own PID namespace, so cancellation or a timeout ends the whole process tree.
+
+Because it truthfully confines writes and network, this sandbox declares both capabilities, so **proof-based cache reuse works on Linux with `--sandbox` alone** (no per-run admin setup). Requirements: the `bubblewrap` package and unprivileged user namespaces (on Ubuntu 24.04+: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`); Ant checks once per run that it can actually create the sandbox and fails closed with that advice otherwise. Limits: reads of the host filesystem are not confined (the network is, so nothing read can leave), it shares the host kernel (not an adversarial boundary), and `--enforce-memory` is Windows-only.
+
+## `--sandbox` on Windows: restricted-token filesystem confinement
 
 On Windows, `ant run --sandbox` executes each action inside a write-confined sandbox instead of the direct local executor. The design is documented in [docs/sandbox/windows-design.md](../sandbox/windows-design.md).
 
