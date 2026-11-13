@@ -1,0 +1,14 @@
+scenario,rep,seconds,executed,reused,notes
+native-cold,1,24.26,-,-,fresh target dir
+native-no-change,1,0.06,-,-,same checkout
+native-no-change,2,0.06,-,-,same checkout
+native-no-change,3,0.06,-,-,same checkout
+native-fresh-checkout,1,25.23,-,-,second checkout; no cross-checkout reuse
+ant-adapt,1,0.12,-,-,plan generation
+ant-remote-cold,1,33.25,1,0,empty shared cache
+ant-remote-no-change,1,0.54,0,1,same checkout
+ant-remote-no-change,2,0.73,0,1,same checkout
+ant-remote-no-change,3,0.53,0,1,same checkout
+ant-remote-fresh-checkout,1,0.56,0,1,new checkout, other path, new mtimes
+ant-remote-fresh-checkout,2,0.74,0,1,new checkout, other path, new mtimes
+ant-remote-fresh-checkout,3,0.54,0,1,new checkout, other path, new mtimes

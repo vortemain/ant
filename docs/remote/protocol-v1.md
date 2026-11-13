@@ -31,6 +31,10 @@ Blobs are named by Ant's canonical file digest, `sha256:` + hex of `SHA-256("ant
 | POST | `/v1/blobs/missing` | `{"digests":[…]}` → `{"missing":[…]}` |
 | PUT | `/v1/blobs/{digest}` | raw bytes → 201 (413 above `--max-body-mb`, default 512) |
 | GET | `/v1/blobs/{digest}` | → raw bytes, 404 if absent |
+| POST | `/v1/blobs/batch-put` | framed blobs → 201 `{stored}`; every blob re-hashed, one mismatch rejects the whole batch (nothing stored) |
+| POST | `/v1/blobs/batch-get` | `{"digests":[…]}` (≤ 1024) → framed blobs in request order; 404 if any is missing (never a partial set) |
+
+Batch framing (D-023): for each blob, a big-endian `u32` digest length, the digest text, a big-endian `u64` data length, then the data. Senders split batches at 1024 blobs or ~32 MiB; receivers verify every blob against its digest, as with single-blob transfers. Clients upload missing inputs in batches, workers download inputs 256 per batch, and clients fetch outputs in one verified batch.
 
 ## Entries and path safety
 
