@@ -6,7 +6,7 @@ name: bench-android
 on:
   workflow_dispatch:
   push:
-    branches: [p4-android, p4-task-cache]
+    branches: [p4-task-cache]
 
 jobs:
   android:

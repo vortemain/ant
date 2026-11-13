@@ -23,7 +23,8 @@
 //! a Gradle read-only dependency cache at `.gradle-deps/` (Gradle's
 //! `GRADLE_RO_DEP_CACHE` layout, i.e. a copy of `caches/modules-2`) and a
 //! local wrapper distribution (`distributionUrl` not http/https). Then the
-//! action runs `--offline`. Gradle's writable home and Android's user home
+//! action may run in the no-network sandbox (not `--offline`, which would
+//! disable Gradle's remote task cache, D-025). Gradle's writable home and Android's user home
 //! are redirected into the workspace staging area (`.ant/`), so nothing is
 //! written outside the workspace. Known gap: the JDK and Android SDK are
 //! host installations identified only through the environment allowlist
@@ -250,7 +251,9 @@ impl BuildAdapter for GradleAdapter {
         };
         argv.extend(["--no-daemon".to_owned(), "--console=plain".to_owned()]);
         if fully_declared {
-            argv.push("--offline".to_owned());
+            // Not `--offline`: Gradle disables its remote build cache in
+            // offline mode, and the sandbox already has no network, so a
+            // missing dependency fails the build either way (D-025).
             // No Kotlin daemon: it would write under the (read-only) user
             // home and outlive the action.
             argv.push("-Pkotlin.compiler.execution.strategy=in-process".to_owned());
@@ -496,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn vendored_projects_are_cacheable_offline_and_keys_ignore_build_dirs() {
+    fn vendored_projects_are_cacheable_and_keys_ignore_build_dirs() {
         let dir = android_project(false);
         std::fs::create_dir_all(dir.path().join(DEPENDENCY_CACHE_DIR).join("modules-2"))
             .expect("deps");
@@ -505,7 +508,16 @@ mod tests {
             .expect("generate");
         let action = &before.actions[0].action;
         assert_eq!(action.cache_policy, CachePolicy::Eligible);
-        assert!(action.argv.iter().any(|arg| arg == "--offline"));
+        assert!(
+            !action.argv.iter().any(|arg| arg == "--offline"),
+            "offline disables the task cache"
+        );
+        assert!(action.argv.iter().any(|arg| arg == "--build-cache"));
+        assert!(
+            action
+                .environment
+                .contains(&("ANT_GRADLE_TASK_CACHE".to_owned(), "1".to_owned()))
+        );
         assert!(action.environment.contains(&(
             "GRADLE_RO_DEP_CACHE".to_owned(),
             DEPENDENCY_CACHE_DIR.to_owned()
