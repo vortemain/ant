@@ -113,13 +113,13 @@ fn execute_job(
     let workspace = config.work_dir.join(job_id);
     let _ = std::fs::remove_dir_all(&workspace);
     let result = (|| -> Result<JobResult, String> {
+        if caches_results(config) {
+            return run_cacheable(coordinator, config, &workspace, spec);
+        }
         materialize(coordinator, &workspace, &spec.inputs)?;
         let workspace = workspace
             .canonicalize()
             .map_err(|error| error.to_string())?;
-        if caches_results(config) {
-            return run_cacheable(coordinator, config, &workspace, spec);
-        }
         let prepared = local_executor::prepare_with_metadata(&workspace, &spec.action)
             .map_err(|error| error.to_string())?;
         let cancellation = CancellationToken::new();
@@ -170,6 +170,9 @@ fn materialize(
                     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                 }
                 std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
+                if entry.executable {
+                    crate::protocol::make_executable(&target)?;
+                }
                 set_mtime(&target)?;
             }
         }
@@ -252,36 +255,97 @@ fn observe_toolchain(
     })
 }
 
-/// Sandboxed Linux worker path (D-019): compute the path- and
-/// time-independent action key, serve a cache hit without executing, or
-/// execute under the fixed mount and store the proven result.
+/// The declared inputs' content digests computed from the job's entries
+/// alone (no file is read): a file input is its entry's digest, a tree input
+/// is `digest_tree_from_entries` over the entries below it. `None` when an
+/// input is missing from the entries, which keeps the job out of the cache.
+fn input_digests_from_entries(
+    action: &build_action::Action,
+    entries: &[Entry],
+) -> Option<Vec<(PathBuf, build_digest::ContentDigest)>> {
+    let mut digests = Vec::with_capacity(action.inputs.len());
+    for input in &action.inputs {
+        let base = input.path.to_string_lossy().replace('\\', "/");
+        let digest = match input.kind {
+            build_action::InputKind::File => entries
+                .iter()
+                .find(|entry| entry.path == base && entry.kind == EntryKind::File)?
+                .digest
+                .as_deref()?
+                .parse()
+                .ok()?,
+            build_action::InputKind::Tree => {
+                let prefix = format!("{base}/");
+                let mut tree = Vec::new();
+                for entry in entries {
+                    let Some(rel) = entry.path.strip_prefix(&prefix) else {
+                        continue;
+                    };
+                    tree.push(build_digest::TreeEntry {
+                        path: rel.to_owned(),
+                        is_dir: entry.kind == EntryKind::Dir,
+                        digest: match &entry.digest {
+                            Some(text) => Some(text.parse().ok()?),
+                            None => None,
+                        },
+                        metadata: None,
+                    });
+                }
+                if !entries
+                    .iter()
+                    .any(|entry| entry.path == base && entry.kind == EntryKind::Dir)
+                {
+                    return None;
+                }
+                build_digest::digest_tree_from_entries(&tree)
+            }
+        };
+        digests.push((input.path.clone(), digest));
+    }
+    Some(digests)
+}
+
+/// Sandboxed Linux worker path (D-019, D-022): compute the path- and
+/// time-independent action key from the job's own entries *before*
+/// downloading inputs; on a hit return the stored outputs having fetched
+/// only the project's root-level files; on a miss materialize everything,
+/// confirm the files on disk hash to the same key, execute under the fixed
+/// mount, and store the proven result.
 fn run_cacheable(
     coordinator: &Coordinator,
     config: &WorkerConfig,
     workspace: &Path,
     spec: &JobSpec,
 ) -> Result<JobResult, String> {
-    // Content-only digests: with normalized mtimes, metadata is determined
-    // by content, so these keys are complete (see the fingerprint docs).
-    let mut prepared =
-        local_executor::prepare(workspace, &spec.action).map_err(|error| error.to_string())?;
-    prepared.sandbox_mount = Some(PathBuf::from(WORKER_MOUNT));
+    // Root-level files only (manifests, lock files, toolchain pins): enough
+    // for `--version` to see per-project toolchain selection.
+    let root_files: Vec<Entry> = spec
+        .inputs
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::File && !entry.path.contains('/'))
+        .cloned()
+        .collect();
+    materialize(coordinator, workspace, &root_files)?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let fingerprint =
         build_digest::ExecutionFingerprint::remote_worker_sandboxed(Path::new(WORKER_MOUNT));
-    let inputs: Vec<_> = prepared
-        .input_digests
-        .iter()
-        .map(|entry| (entry.path.clone(), entry.digest))
-        .collect();
     // Key with the toolchain this worker will actually run, never the one
     // the client observed when it generated the plan (D-020).
     let mut keyed_action = spec.action.clone();
-    keyed_action.toolchain = observe_toolchain(&spec.action, workspace);
-    let candidate = build_digest::action_key_candidate(&keyed_action, &inputs, &fingerprint)
-        .map_err(|error| error.to_string())?;
-    let key = candidate
-        .cache_eligible
-        .then(|| candidate.digest.to_string());
+    keyed_action.toolchain = observe_toolchain(&spec.action, &workspace);
+    let key = match input_digests_from_entries(&spec.action, &spec.inputs) {
+        Some(inputs) => {
+            let candidate =
+                build_digest::action_key_candidate(&keyed_action, &inputs, &fingerprint)
+                    .map_err(|error| error.to_string())?;
+            candidate
+                .cache_eligible
+                .then(|| candidate.digest.to_string())
+        }
+        None => None,
+    };
     if let Some(key) = &key
         && let Some(entry) = coordinator.cache_lookup(key)?
     {
@@ -295,11 +359,34 @@ fn run_cacheable(
             cache_key: Some(key.clone()),
         });
     }
+
+    // Miss: materialize everything (normalized mtimes), then confirm the
+    // files really hash to the key computed from the entries.
+    materialize(coordinator, &workspace, &spec.inputs)?;
+    let mut prepared =
+        local_executor::prepare(&workspace, &spec.action).map_err(|error| error.to_string())?;
+    prepared.sandbox_mount = Some(PathBuf::from(WORKER_MOUNT));
+    let mut key = key;
+    if let Some(expected) = &key {
+        let on_disk: Vec<_> = prepared
+            .input_digests
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.digest))
+            .collect();
+        let check = build_digest::action_key_candidate(&keyed_action, &on_disk, &fingerprint)
+            .map_err(|error| error.to_string())?;
+        if &check.digest.to_string() != expected {
+            eprintln!(
+                "ant worker: inputs on disk do not match the job's declared digests; not caching this result"
+            );
+            key = None;
+        }
+    }
     let executed = local_executor::execute_sandboxed_prepared(&prepared, &CancellationToken::new())
         .map_err(|error| error.to_string())?;
     let mut outputs = Vec::new();
     if executed.success() {
-        outputs = upload_outputs(coordinator, workspace, &spec.action)?;
+        outputs = upload_outputs(coordinator, &workspace, &spec.action)?;
         if let Some(key) = &key {
             coordinator.cache_store(key, &config.worker_id, &outputs)?;
         }
@@ -331,6 +418,7 @@ fn upload_outputs(
                     path: base.clone(),
                     kind: EntryKind::Dir,
                     digest: None,
+                    executable: false,
                 });
                 for entry in build_digest::tree_entries(&path).map_err(|error| error.to_string())? {
                     let relative = format!("{base}/{}", entry.path);
@@ -339,6 +427,7 @@ fn upload_outputs(
                             path: relative,
                             kind: EntryKind::Dir,
                             digest: None,
+                            executable: false,
                         });
                     } else {
                         entries.push(upload_file(coordinator, &path.join(&entry.path), relative)?);
@@ -361,5 +450,6 @@ fn upload_file(coordinator: &Coordinator, path: &Path, relative: String) -> Resu
         path: relative,
         kind: EntryKind::File,
         digest: Some(digest),
+        executable: crate::protocol::is_executable(path),
     })
 }

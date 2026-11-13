@@ -69,6 +69,7 @@ fn collect_inputs(workspace: &Path, action: &Action) -> Result<Vec<Entry>, Strin
                     path: base,
                     kind: EntryKind::File,
                     digest: Some(digest.to_string()),
+                    executable: crate::protocol::is_executable(&path),
                 });
             }
             InputKind::Tree => {
@@ -76,6 +77,7 @@ fn collect_inputs(workspace: &Path, action: &Action) -> Result<Vec<Entry>, Strin
                     path: base.clone(),
                     kind: EntryKind::Dir,
                     digest: None,
+                    executable: false,
                 });
                 for entry in build_digest::tree_entries(&path)
                     .map_err(|error| format!("input {base}: {error}"))?
@@ -83,6 +85,9 @@ fn collect_inputs(workspace: &Path, action: &Action) -> Result<Vec<Entry>, Strin
                     let path = format!("{base}/{}", entry.path);
                     entries.push(match entry.digest {
                         Some(digest) if !entry.is_dir => Entry {
+                            executable: crate::protocol::is_executable(
+                                &workspace.join(&input.path).join(&entry.path),
+                            ),
                             path,
                             kind: EntryKind::File,
                             digest: Some(digest.to_string()),
@@ -91,6 +96,7 @@ fn collect_inputs(workspace: &Path, action: &Action) -> Result<Vec<Entry>, Strin
                             path,
                             kind: EntryKind::Dir,
                             digest: None,
+                            executable: false,
                         },
                     });
                 }
@@ -262,6 +268,9 @@ fn install_outputs(
                     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                 }
                 std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
+                if entry.executable {
+                    crate::protocol::make_executable(&target)?;
+                }
             }
         }
     }

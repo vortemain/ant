@@ -28,6 +28,45 @@ pub struct Entry {
     pub kind: EntryKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
+    /// Unix executable permission of a file (D-022). Without it, binaries
+    /// and scripts transferred between machines would not run. Always false
+    /// on Windows, which has no such permission. Not part of cache keys.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub executable: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Whether `path` is a file with any Unix execute permission bit set.
+pub fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Give `path` the conventional executable mode (0o755). No-op off Unix.
+pub fn make_executable(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| format!("cannot make {} executable: {error}", path.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 /// A job: one action plus the exact input set it may see. Undeclared inputs
@@ -286,6 +325,7 @@ mod tests {
             path: p.into(),
             kind: EntryKind::File,
             digest: Some(digest.clone()),
+            executable: false,
         };
         assert!(validate_entries(&[file("a"), file("b/c")]).is_ok());
         assert!(
@@ -296,7 +336,8 @@ mod tests {
             validate_entries(&[Entry {
                 path: "a".into(),
                 kind: EntryKind::File,
-                digest: None
+                digest: None,
+                executable: false
             }])
             .is_err()
         );
@@ -304,7 +345,8 @@ mod tests {
             validate_entries(&[Entry {
                 path: "d".into(),
                 kind: EntryKind::Dir,
-                digest: Some(digest.clone())
+                digest: Some(digest.clone()),
+                executable: false
             }])
             .is_err()
         );
@@ -312,7 +354,8 @@ mod tests {
             validate_entries(&[Entry {
                 path: "a".into(),
                 kind: EntryKind::File,
-                digest: Some("sha256:zz".into())
+                digest: Some("sha256:zz".into()),
+                executable: false
             }])
             .is_err()
         );

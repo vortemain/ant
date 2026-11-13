@@ -275,6 +275,16 @@ pub fn digest_tree_with_metadata(root: &Path) -> Result<ContentDigest, DigestErr
     digest_entries(b"ant-tree-meta-v1", &entries)
 }
 
+/// Digest a tree from its entries alone (relative path, file or directory,
+/// content digest; no metadata), without reading any file: identical to
+/// [`digest_tree`] for a directory holding exactly these entries. Remote
+/// workers use it to compute cache keys before downloading inputs (D-022).
+pub fn digest_tree_from_entries(entries: &[TreeEntry]) -> ContentDigest {
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|left, right| left.path.cmp(&right.path));
+    digest_entries(b"ant-tree-v1", &sorted).expect("digesting entries cannot fail")
+}
+
 fn digest_entries(tag: &[u8], entries: &[TreeEntry]) -> Result<ContentDigest, DigestError> {
     let mut hasher = Sha256::new();
     hasher.update(tag);
@@ -1008,6 +1018,21 @@ mod tests {
             inherited_environment: local_runtime_environment(),
             capabilities: ExecutorCapabilities::default(),
         }
+    }
+
+    #[test]
+    fn tree_digest_from_entries_matches_the_directory() {
+        let dir = TempDir::new("tree-entries");
+        dir.write("b.txt", b"bee");
+        std::fs::create_dir_all(dir.path().join("sub").join("empty")).expect("dirs");
+        dir.write("sub/a.txt", b"ay");
+        let entries = tree_entries(dir.path()).expect("entries");
+        let mut shuffled = entries.clone();
+        shuffled.reverse();
+        assert_eq!(
+            digest_tree_from_entries(&shuffled),
+            digest_tree(dir.path()).expect("digest")
+        );
     }
 
     #[test]

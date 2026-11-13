@@ -107,7 +107,10 @@ for rep in $(seq 1 "$REPS"); do
 done
 
 # The remotely built CLI is a working binary.
-BIN=$(find "$WORK/ant-fresh-1/target/release" -maxdepth 1 -name ant -type f | head -1)
+# The remotely built CLI (installed from the shared cache) is executable
+# and runs.
+BIN="$WORK/ant-fresh-1/target/release/ant"
+test -x "$BIN" || { echo "remote-built binary is not executable"; exit 1; }
 "$BIN" --version | sed 's/^/remote-built binary: /'
 
 echo

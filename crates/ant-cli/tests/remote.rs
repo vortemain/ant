@@ -300,6 +300,7 @@ fn coordinator_enforces_auth_roles_and_safe_paths() {
             path: path.to_owned(),
             kind: EntryKind::Dir,
             digest: None,
+            executable: false,
         }],
     };
     let worker = cluster.client(WORKER_TOKEN);

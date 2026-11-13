@@ -375,3 +375,168 @@ fn remote_cache_reuses_across_workspaces_and_timestamps() {
         "different content"
     );
 }
+
+/// A coordinator plus one sandboxed Linux worker on loopback. Returns the
+/// URL, the client token path, and guards that stop both processes.
+fn start_cluster(dir: &Path) -> (String, PathBuf, Guard, Guard) {
+    use std::io::BufRead as _;
+    let token = |name: &str, value: &str| {
+        let path = dir.join(name);
+        fs::write(&path, value).expect("token");
+        path
+    };
+    let client_token = token(
+        "client.token",
+        "client-token-0123456789abcdefghijklmnopqrstuv",
+    );
+    let worker_token = token(
+        "worker.token",
+        "worker-token-0123456789abcdefghijklmnopqrstuv",
+    );
+    let mut coordinator = Command::new(env!("CARGO_BIN_EXE_ant"))
+        .args(["coordinator", "--listen", "127.0.0.1:0", "--data-dir"])
+        .arg(dir.join("coord"))
+        .arg("--client-token-file")
+        .arg(&client_token)
+        .arg("--worker-token-file")
+        .arg(&worker_token)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("coordinator");
+    let mut line = String::new();
+    std::io::BufReader::new(coordinator.stdout.take().expect("stdout"))
+        .read_line(&mut line)
+        .expect("listening line");
+    let coordinator = Guard(coordinator);
+    let url = format!(
+        "http://{}",
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix("listening="))
+            .expect("address")
+    );
+    let worker = Guard(
+        Command::new(env!("CARGO_BIN_EXE_ant"))
+            .args([
+                "worker",
+                "--coordinator",
+                &url,
+                "--id",
+                "exec-worker",
+                "--sandbox",
+                "--token-file",
+            ])
+            .arg(&worker_token)
+            .arg("--work-dir")
+            .arg(dir.join("work"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("worker"),
+    );
+    (url, client_token, coordinator, worker)
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+fn is_exec(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::metadata(path).expect("metadata").permissions().mode() & 0o111 != 0
+}
+
+/// The executable bit survives every leg (D-022): an executable input
+/// script runs on the worker, the executable output arrives executable and
+/// runs, and so does the same output served from the shared cache into a
+/// fresh checkout.
+#[test]
+fn remote_builds_preserve_the_executable_bit() {
+    if !sandbox_ready() {
+        return;
+    }
+    let dir = TempDir::new("exec-bit");
+    let (url, client_token, _coordinator, _worker) = start_cluster(dir.path());
+    let shell = fs::canonicalize("/bin/sh").expect("resolve /bin/sh");
+    let digest = build_digest::digest_file(&shell).expect("digest sh");
+    let plan = json!({
+        "schema_version": 1,
+        "actions": [{
+            "action": {
+                "schema_version": 1, "id": "gen",
+                "argv": [shell.to_string_lossy(), "-c", "./tool.sh > hello && chmod +x hello"],
+                "working_directory": ".",
+                "inputs": [{ "path": "tool.sh", "kind": "file" }],
+                "outputs": [{ "path": "hello", "kind": "file" }],
+                "environment": [], "cache_policy": "eligible",
+                "toolchain": { "name": "sh", "version": "system", "executable_digest": digest.to_string() },
+                "timeout_ms": 60000
+            },
+            "dependencies": []
+        }]
+    });
+    let plan_path = dir.path().join("plan.json");
+    fs::write(&plan_path, serde_json::to_vec_pretty(&plan).expect("json")).expect("plan");
+    let checkout = |name: &str| {
+        let ws = dir.path().join(name);
+        fs::create_dir_all(&ws).expect("ws");
+        // tool.sh writes a tiny script; it must itself be executable to run.
+        fs::write(
+            ws.join("tool.sh"),
+            "#!/bin/sh\nprintf '#!/bin/sh\necho built remotely\n'\n",
+        )
+        .expect("tool");
+        set_mode(&ws.join("tool.sh"), 0o755);
+        ws
+    };
+    let remote_run = |ws: &Path| {
+        run_ant(&[
+            "remote",
+            "run",
+            "--coordinator",
+            &url,
+            "--token-file",
+            &client_token.to_string_lossy(),
+            "--workspace",
+            &ws.to_string_lossy(),
+            "--plan",
+            &plan_path.to_string_lossy(),
+        ])
+    };
+
+    let ws_a = checkout("a");
+    let (code, stdout, stderr) = remote_run(&ws_a);
+    assert_eq!(
+        code, 0,
+        "an executable input must run on the worker: {stdout:?} {stderr:?}"
+    );
+    assert!(stdout.contains("action=gen status=succeeded"), "{stdout:?}");
+    assert!(
+        is_exec(&ws_a.join("hello")),
+        "the installed output keeps its executable bit"
+    );
+    let ran = Command::new(ws_a.join("hello"))
+        .output()
+        .expect("run output");
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout).trim(),
+        "built remotely"
+    );
+
+    let ws_b = checkout("b");
+    let (code, stdout, _) = remote_run(&ws_b);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("action=gen status=reused"), "{stdout:?}");
+    assert!(
+        is_exec(&ws_b.join("hello")),
+        "a cached output keeps its executable bit"
+    );
+    let ran = Command::new(ws_b.join("hello"))
+        .output()
+        .expect("run cached output");
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout).trim(),
+        "built remotely"
+    );
+}
