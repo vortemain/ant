@@ -15,6 +15,8 @@ os_info = "3.15.0"
 # Remote execution transport (D-014): small synchronous HTTP server and
 # client (rustls TLS for https coordinators behind a reverse proxy).
 tiny_http = "0.12.0"
+# Parses the optional ant.toml project file (D-017).
+toml = "1.2"
 ureq = "3.1"
 
 [workspace.lints.rust]

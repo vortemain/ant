@@ -38,6 +38,28 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Whether machine-readable `key=value` status lines are printed. `ant run`
+/// keeps them (scripts and tests parse them); human front-ends such as
+/// `ant build` turn them off and render events instead. Lines starting with
+/// `ant: ` (warnings and notes) are always printed.
+static MACHINE_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_machine_output(enabled: bool) {
+    MACHINE_OUTPUT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn emit_line(line: String) {
+    if MACHINE_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) || line.starts_with("ant: ") {
+        println!("{line}");
+    }
+}
+
+macro_rules! report {
+    ($($arg:tt)*) => {
+        emit_line(format!($($arg)*))
+    };
+}
+
 use crate::cache_runner::{self, ActionRun, CacheParticipant};
 
 /// How the plan stopped. `HardError` aborts the run the way preflight
@@ -100,6 +122,15 @@ impl EventStream {
             )?) as Box<dyn build_events::EventSink>),
         };
         Ok(Self { run_id, sink })
+    }
+
+    /// A stream delivering events to an in-process sink (for example the
+    /// human progress reporter of `ant build`).
+    pub fn with_sink(sink: Box<dyn build_events::EventSink>, run_id: u64) -> Self {
+        Self {
+            run_id,
+            sink: Some(sink),
+        }
     }
 
     pub fn emit(&mut self, kind: EventKind) {
@@ -236,7 +267,7 @@ impl Shared {
 
     fn log(&self, line: String) {
         let _guard = self.output.lock().expect("output lock");
-        println!("{line}");
+        report!("{line}");
     }
 }
 
@@ -276,7 +307,7 @@ pub fn run_plan(
             let (weight, clamped) = clamp_weight(&task.action, capacity);
             if clamped {
                 let request = task.action.resource_request();
-                println!(
+                report!(
                     "ant: note: action={} requests cpu={} memory_mb={} exceeding capacity cpu={} memory_mb={}; clamped to cpu={} memory_mb={} (the whole capacity)",
                     task.action.id,
                     request.cpu,
@@ -365,7 +396,7 @@ fn run_sequential(
             termination = termination.worst(Termination::Cancelled);
             break;
         }
-        println!("action={id} status=started");
+        report!("action={id} status=started");
         events
             .lock()
             .expect("events lock")
@@ -379,11 +410,11 @@ fn run_sequential(
                 input_digests,
                 output_digests,
             }) => {
-                println!("action={id} status=reused");
+                report!("action={id} status=reused");
                 print_digests("input", &input_digests);
                 print_digests("output", &output_digests);
                 // A reused key is blocker-free by definition (D-003 gate).
-                println!(
+                report!(
                     "action={id} key_candidate={} cache_eligible=true blockers=[]",
                     candidate.digest
                 );
@@ -407,10 +438,10 @@ fn run_sequential(
                 store_warning,
             }) => {
                 if let Some(warning) = store_warning {
-                    println!("ant: warning: action={id} {warning}");
+                    report!("ant: warning: action={id} {warning}");
                 }
                 if result.cancelled {
-                    println!("action={} status=cancelled", result.action_id);
+                    report!("action={} status=cancelled", result.action_id);
                     emit_action_finished(
                         events,
                         &result.action_id,
@@ -420,7 +451,7 @@ fn run_sequential(
                     break;
                 }
                 if result.timed_out {
-                    println!("action={} status=timed_out", result.action_id);
+                    report!("action={} status=timed_out", result.action_id);
                     emit_action_finished(
                         events,
                         &result.action_id,
@@ -438,7 +469,7 @@ fn run_sequential(
                     break;
                 }
                 let exit_code = result.status.code();
-                println!(
+                report!(
                     "action={} status={} exit_code={}",
                     result.action_id,
                     if result.success() {
@@ -451,9 +482,12 @@ fn run_sequential(
                 print_digests("input", &result.input_digests);
                 print_digests("output", &result.output_digests);
                 print_memory(&result);
-                println!(
+                report!(
                     "action={} key_candidate={} cache_eligible={} blockers={:?}",
-                    result.action_id, candidate.digest, candidate.cache_eligible, candidate.reasons
+                    result.action_id,
+                    candidate.digest,
+                    candidate.cache_eligible,
+                    candidate.reasons
                 );
                 emit_action_finished(
                     events,
@@ -482,7 +516,7 @@ fn run_sequential(
                 }
             }
             Err(ExecutionError::Cancelled) => {
-                println!("action={id} status=cancelled");
+                report!("action={id} status=cancelled");
                 emit_action_finished(
                     events,
                     &id,
@@ -493,7 +527,7 @@ fn run_sequential(
             }
             Err(error) => {
                 let message = error.to_string();
-                println!("action={id} status=failed error={message}");
+                report!("action={id} status=failed error={message}");
                 emit_action_finished(
                     events,
                     &id,
@@ -652,7 +686,7 @@ fn skipped_ids(shared: &Shared) -> Vec<String> {
 
 fn print_skipped_lines(skipped: &[String]) {
     for id in skipped {
-        println!("action={id} status=skipped");
+        report!("action={id} status=skipped");
     }
 }
 
@@ -791,7 +825,7 @@ fn run_task(
             print_digests("input", &input_digests);
             print_digests("output", &output_digests);
             // A reused key is blocker-free by definition (D-003 gate).
-            println!(
+            report!(
                 "action={id} key_candidate={} cache_eligible=true blockers=[]",
                 candidate.digest
             );
@@ -882,7 +916,7 @@ fn run_task(
             }
             if let Some(warning) = store_warning {
                 let _guard = shared.output.lock().expect("output lock");
-                println!("ant: warning: action={id} {warning}");
+                report!("ant: warning: action={id} {warning}");
             }
             shared.log(format!(
                 "action={id} status=succeeded exit_code={}",
@@ -895,9 +929,11 @@ fn run_task(
                 print_digests("input", &result.input_digests);
                 print_digests("output", &result.output_digests);
                 print_memory(&result);
-                println!(
+                report!(
                     "action={id} key_candidate={} cache_eligible={} blockers={:?}",
-                    candidate.digest, candidate.cache_eligible, candidate.reasons
+                    candidate.digest,
+                    candidate.cache_eligible,
+                    candidate.reasons
                 );
             }
             events
@@ -935,7 +971,7 @@ fn report_skipped(
         .map(|task| task.action.id.clone())
         .collect();
     for id in &skipped {
-        println!("action={id} status=skipped");
+        report!("action={id} status=skipped");
     }
     emit_skipped(events, &skipped);
     skipped
@@ -1008,7 +1044,7 @@ fn print_memory(result: &local_executor::ExecutionResult) {
             Some(limit) => (limit.to_string(), peak > limit),
             None => ("none".to_owned(), false),
         };
-        println!(
+        report!(
             "action={} peak_memory_bytes={peak} memory_limit_bytes={limit} memory_limit_hit={hit}",
             result.action_id
         );
@@ -1017,7 +1053,7 @@ fn print_memory(result: &local_executor::ExecutionResult) {
 
 pub fn print_digests(kind: &str, digests: &[ActionContentDigest]) {
     for entry in digests {
-        println!("{kind}={} digest={}", entry.path.display(), entry.digest);
+        report!("{kind}={} digest={}", entry.path.display(), entry.digest);
     }
 }
 
@@ -1045,9 +1081,12 @@ pub fn print_action_key(
     };
     let candidate = build_digest::action_key_candidate(action, &inputs, &fingerprint)
         .map_err(|error| error.to_string())?;
-    println!(
+    report!(
         "action={} key_candidate={} cache_eligible={} blockers={:?}",
-        action.id, candidate.digest, candidate.cache_eligible, candidate.reasons
+        action.id,
+        candidate.digest,
+        candidate.cache_eligible,
+        candidate.reasons
     );
     Ok(Some((
         candidate.digest.to_string(),

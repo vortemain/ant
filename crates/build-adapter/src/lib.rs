@@ -228,6 +228,24 @@ pub trait BuildAdapter {
         project_root: &Path,
         options: &AdapterOptions,
     ) -> Result<PlanFile, AdapterError>;
+
+    /// The deliverables of a generated plan: workspace-relative declared
+    /// output *files* a user would ship or run (`ant build` copies them into
+    /// the output directory). Defaults to every declared file output;
+    /// adapters narrow this when some outputs are intermediates.
+    fn artifacts(&self, plan: &PlanFile) -> Vec<PathBuf> {
+        declared_file_outputs(plan)
+    }
+}
+
+/// Every declared file output in a plan, in plan order.
+pub fn declared_file_outputs(plan: &PlanFile) -> Vec<PathBuf> {
+    plan.actions
+        .iter()
+        .flat_map(|planned| planned.action.outputs.iter())
+        .filter(|output| output.kind == build_action::OutputKind::File)
+        .map(|output| output.path.clone())
+        .collect()
 }
 
 /// The adapters compiled into this build, in registry order.
@@ -428,6 +446,105 @@ pub(crate) fn executable_version(executable: &Path, root: &Path) -> Result<Strin
     Ok(version)
 }
 
+/// Digest of a toolchain executable, cached per user by (canonical path,
+/// size, modification time). Toolchain binaries are large (node.exe is
+/// ~85 MB) and re-hashing them on every `ant build` cost seconds; the cache
+/// makes plan generation fast. Trust model (same as make): a binary replaced
+/// with identical size *and* preserved modification time is not re-hashed;
+/// the toolchain's reported version is still captured on every run. Any
+/// cache problem falls back to hashing directly.
+pub fn toolchain_digest(
+    path: &Path,
+) -> Result<build_digest::ContentDigest, build_digest::DigestError> {
+    toolchain_digest_cached(path, toolchain_cache_file())
+}
+
+fn toolchain_digest_cached(
+    path: &Path,
+    cache_file: Option<PathBuf>,
+) -> Result<build_digest::ContentDigest, build_digest::DigestError> {
+    let Some(stamp) = file_stamp(path) else {
+        return build_digest::digest_file(path);
+    };
+    let key = path.to_string_lossy().into_owned();
+    let mut entries: std::collections::BTreeMap<String, ToolchainCacheEntry> = cache_file
+        .as_ref()
+        .and_then(|file| std::fs::read(file).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    if let Some(entry) = entries.get(&key)
+        && entry.size == stamp.0
+        && entry.modified_ns == stamp.1
+        && let Ok(digest) = entry.digest.parse::<build_digest::ContentDigest>()
+    {
+        return Ok(digest);
+    }
+    let digest = build_digest::digest_file(path)?;
+    if let Some(file) = cache_file {
+        entries.insert(
+            key,
+            ToolchainCacheEntry {
+                size: stamp.0,
+                modified_ns: stamp.1,
+                digest: digest.to_string(),
+            },
+        );
+        let _ = write_atomically(
+            &file,
+            &serde_json::to_vec_pretty(&entries).unwrap_or_default(),
+        );
+    }
+    Ok(digest)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ToolchainCacheEntry {
+    size: u64,
+    modified_ns: u128,
+    digest: String,
+}
+
+fn file_stamp(path: &Path) -> Option<(u64, u128)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((metadata.len(), modified))
+}
+
+/// `%LOCALAPPDATA%\Ant\cache\toolchains.json` on Windows,
+/// `$XDG_CACHE_HOME/ant/toolchains.json` or `~/.cache/ant/toolchains.json`
+/// elsewhere. `ANT_CACHE_HOME` overrides the directory.
+fn toolchain_cache_file() -> Option<PathBuf> {
+    let dir = if let Some(dir) = std::env::var_os("ANT_CACHE_HOME") {
+        PathBuf::from(dir)
+    } else if cfg!(windows) {
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+            .join("Ant")
+            .join("cache")
+    } else if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+        PathBuf::from(xdg).join("ant")
+    } else {
+        PathBuf::from(std::env::var_os("HOME")?)
+            .join(".cache")
+            .join("ant")
+    };
+    Some(dir.join("toolchains.json"))
+}
+
+fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = target.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let temp = dir.join(format!(".toolchains-{}.tmp", std::process::id()));
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, target).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +575,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn toolchain_digest_is_cached_and_invalidated_by_changes() {
+        let dir = TempDir::new("tcache");
+        let tool = dir.path().join("tool.bin");
+        fs::write(&tool, b"version one").expect("write");
+        let cache = || Some(dir.path().join("cache").join("toolchains.json"));
+        let first = toolchain_digest_cached(&tool, cache()).expect("digest");
+        assert_eq!(first, build_digest::digest_file(&tool).expect("direct"));
+        assert!(
+            dir.path().join("cache").join("toolchains.json").is_file(),
+            "cache written"
+        );
+        assert_eq!(
+            toolchain_digest_cached(&tool, cache()).expect("cached"),
+            first
+        );
+        // A changed binary (different size) is re-hashed.
+        fs::write(&tool, b"version two, longer").expect("rewrite");
+        let second = toolchain_digest_cached(&tool, cache()).expect("digest");
+        assert_ne!(second, first);
+        assert_eq!(second, build_digest::digest_file(&tool).expect("direct"));
     }
 
     #[test]

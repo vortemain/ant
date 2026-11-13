@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 
 mod cache_runner;
+mod front;
 mod isolation;
 mod remote_cli;
 mod scheduler;
@@ -37,6 +38,12 @@ fn run() -> Result<u8, String> {
     if command == "--help" || command == "-h" {
         println!("{}", usage());
         return Ok(0);
+    }
+    if command == "build" {
+        return front::build_command(args);
+    }
+    if command == "init" {
+        return front::init_command(args);
     }
     if command == "plan" {
         return plan_command(args);
@@ -407,7 +414,7 @@ fn emit_single_finish(
 
 /// Derive a per-invocation run identifier from the wall clock and process ID
 /// without external dependencies. It correlates every event of one run.
-fn new_run_id() -> u64 {
+pub(crate) fn new_run_id() -> u64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos() as u64)
@@ -417,7 +424,7 @@ fn new_run_id() -> u64 {
     hasher.finish()
 }
 
-fn install_ctrl_c_handler(cancellation: &CancellationToken) {
+pub(crate) fn install_ctrl_c_handler(cancellation: &CancellationToken) {
     let token = cancellation.clone();
     let installed = ctrlc::set_handler(move || {
         token.cancel();
@@ -803,5 +810,5 @@ pub(crate) fn load_graph(plan_path: &Path) -> Result<BuildGraph, String> {
 }
 
 fn usage() -> &'static str {
-    "Ant - local-first build infrastructure\n\nUsage:\n  ant --version\n  ant run [--workspace PATH] [--cwd RELATIVE_PATH] [--timeout-ms N] [--cancel-file PATH] [--events PATH] [--sandbox] -- PROGRAM [ARG ...]\n  ant run [--workspace PATH] [--cancel-file PATH] [--jobs N] [--memory-mb M] [--keep-going] [--enforce-memory] [--network-isolated] [--events PATH] [--sandbox] [--cache-dir DIR] --plan PLAN.json\n  ant plan validate --plan PLAN.json\n  ant plan describe --plan PLAN.json\n  ant plan explain --plan PLAN.json [--cache-dir DIR] [--workspace PATH]\n  ant adapt [--adapter NAME] [--project PATH] [--option KEY=VALUE ...] --out PLAN.json\n  ant adapt --detect [--project PATH]\n  ant sandbox <setup [--dry-run]|status|teardown>\n\nRuns local actions directly. By default the executor is not a sandbox and does not\nprovide cache reuse. On Windows, --sandbox confines writes to the workspace using a\nrestricted token (still not network-isolated, so cache reuse stays gated);\n--sandbox fails closed on other platforms and never falls back to unsandboxed\nexecution. --jobs N is a CPU-slot capacity and --memory-mb M an optional memory\nbudget: an action starts only when its declared resources (cpu, default 1;\nmemory_mb) fit, in FIFO order; these are admission weights, not runtime limits.\n--keep-going runs every action not downstream of a failure instead of stopping\nnew starts at the first failure; dependents of failed actions are skipped.\n--enforce-memory (Windows) turns each declared memory_mb into a job-wide\ncommitted-memory cap applied before the process starts; it fails closed.\n--network-isolated (Windows) runs each action write-confined as the dedicated\nsandbox account whose network is blocked by firewall rules; requires a one-time\nelevated 'ant sandbox setup' and is verified before every run (fails closed).\n--cache-dir opts a plan run into cache participation: a key is stored or looked\nup only when its candidate reported no blockers, which only --network-isolated\ncan achieve (it is the one executor that truthfully declares network isolation).\n'ant plan explain' reports per-action key candidates and cacheability blockers\nfor inspection only. 'ant adapt' generates a plan for a recognized project using\na build-system adapter (available: cargo, npm, cmake); without --adapter it uses the single\nadapter that recognizes the project and refuses to guess when several do.\n--option passes adapter-specific settings (cargo: profile=dev|release; npm:\noutputs=none|entry-points; cmake: config=Debug|Release); unknown keys or values\nfail before anything is written.\n'ant adapt --detect' reports every adapter's detection result without writing.\nGenerated actions declare what the adapter can honestly cover and default to\ncache_policy never."
+    "Ant - build anything, fast.\n\nEveryday:\n  ant build [--dev]   build this project (auto-detected) and collect deliverables in dist/\n  ant init            record this project's setup in ant.toml (optional)\n  ant --version\n\nSelf-hosting:\n  ant coordinator --data-dir DIR --client-token-file F --worker-token-file F [--viewer-token-file F]\n  ant worker --coordinator URL --token-file F --work-dir DIR [--sandbox]\n  ant remote run --coordinator URL --token-file F --plan PLAN.json\n  ant sandbox <setup [--dry-run]|status|teardown>\n\nEngine (advanced):\n  ant run [--workspace PATH] [--cwd RELATIVE_PATH] [--timeout-ms N] [--cancel-file PATH] [--events PATH] [--sandbox] -- PROGRAM [ARG ...]\n  ant run [--workspace PATH] [--cancel-file PATH] [--jobs N] [--memory-mb M] [--keep-going] [--enforce-memory] [--network-isolated] [--events PATH] [--sandbox] [--cache-dir DIR] --plan PLAN.json\n  ant plan validate --plan PLAN.json\n  ant plan describe --plan PLAN.json\n  ant plan explain --plan PLAN.json [--cache-dir DIR] [--workspace PATH]\n  ant adapt [--adapter NAME] [--project PATH] [--option KEY=VALUE ...] --out PLAN.json\n  ant adapt --detect [--project PATH]\n  ant sandbox <setup [--dry-run]|status|teardown>\n\nRuns local actions directly. By default the executor is not a sandbox and does not\nprovide cache reuse. On Windows, --sandbox confines writes to the workspace using a\nrestricted token (still not network-isolated, so cache reuse stays gated);\n--sandbox fails closed on other platforms and never falls back to unsandboxed\nexecution. --jobs N is a CPU-slot capacity and --memory-mb M an optional memory\nbudget: an action starts only when its declared resources (cpu, default 1;\nmemory_mb) fit, in FIFO order; these are admission weights, not runtime limits.\n--keep-going runs every action not downstream of a failure instead of stopping\nnew starts at the first failure; dependents of failed actions are skipped.\n--enforce-memory (Windows) turns each declared memory_mb into a job-wide\ncommitted-memory cap applied before the process starts; it fails closed.\n--network-isolated (Windows) runs each action write-confined as the dedicated\nsandbox account whose network is blocked by firewall rules; requires a one-time\nelevated 'ant sandbox setup' and is verified before every run (fails closed).\n--cache-dir opts a plan run into cache participation: a key is stored or looked\nup only when its candidate reported no blockers, which only --network-isolated\ncan achieve (it is the one executor that truthfully declares network isolation).\n'ant plan explain' reports per-action key candidates and cacheability blockers\nfor inspection only. 'ant adapt' generates a plan for a recognized project using\na build-system adapter (available: cargo, npm, cmake); without --adapter it uses the single\nadapter that recognizes the project and refuses to guess when several do.\n--option passes adapter-specific settings (cargo: profile=dev|release; npm:\noutputs=none|entry-points; cmake: config=Debug|Release); unknown keys or values\nfail before anything is written.\n'ant adapt --detect' reports every adapter's detection result without writing.\nGenerated actions declare what the adapter can honestly cover and default to\ncache_policy never."
 }

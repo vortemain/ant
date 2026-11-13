@@ -157,7 +157,7 @@ fn node_toolchain(root: &Path) -> Result<ToolchainIdentity, AdapterError> {
         ))
     })?;
     let version = executable_version(&node, root)?;
-    let executable_digest = build_digest::digest_file(&node_digest_target)
+    let executable_digest = crate::toolchain_digest(&node_digest_target)
         .map_err(|error| {
             AdapterError::Toolchain(format!(
                 "cannot digest node executable {}: {error}",

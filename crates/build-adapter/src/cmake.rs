@@ -83,6 +83,13 @@ impl BuildAdapter for CmakeAdapter {
         }
     }
 
+    /// CMake's built targets are only known after configuring (File API is
+    /// future work); the one declared output, `CMakeCache.txt`, is not a
+    /// deliverable. No artifacts are claimed.
+    fn artifacts(&self, _plan: &PlanFile) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
     fn generate(
         &self,
         project_root: &Path,
@@ -115,7 +122,7 @@ impl BuildAdapter for CmakeAdapter {
             })
             .collect();
 
-        let cmake = locate_executable(&format!("cmake{}", std::env::consts::EXE_SUFFIX))?;
+        let (cmake, program) = locate_cmake()?;
         let digest_target = cmake.canonicalize().map_err(|error| {
             AdapterError::Toolchain(format!(
                 "cannot resolve cmake executable {}: {error}",
@@ -128,7 +135,7 @@ impl BuildAdapter for CmakeAdapter {
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let executable_digest = build_digest::digest_file(&digest_target)
+        let executable_digest = crate::toolchain_digest(&digest_target)
             .map_err(|error| {
                 AdapterError::Toolchain(format!(
                     "cannot digest cmake executable {}: {error}",
@@ -180,7 +187,7 @@ impl BuildAdapter for CmakeAdapter {
             action: action(
                 "configure",
                 strings(&[
-                    "cmake",
+                    &program,
                     "-S",
                     ".",
                     "-B",
@@ -197,7 +204,7 @@ impl BuildAdapter for CmakeAdapter {
         file.actions.push(PlanAction {
             action: action(
                 "build",
-                strings(&["cmake", "--build", BUILD_DIR, "--config", config]),
+                strings(&[&program, "--build", BUILD_DIR, "--config", config]),
                 Vec::new(),
             ),
             dependencies: vec!["configure".to_owned()],
@@ -239,6 +246,53 @@ fn collect_cmake_files(
         }
     }
     Ok(())
+}
+
+/// Find `cmake`: PATH first (the plan then calls plain `cmake`, exactly as
+/// before); otherwise, on Windows, the copy Visual Studio bundles, located
+/// through `vswhere` — the plan then records that absolute path so the build
+/// runs without the user editing PATH. Returns the executable and the argv[0]
+/// to put in the plan.
+fn locate_cmake() -> Result<(PathBuf, String), AdapterError> {
+    let name = format!("cmake{}", std::env::consts::EXE_SUFFIX);
+    match locate_executable(&name) {
+        Ok(path) => Ok((path, "cmake".to_owned())),
+        Err(path_error) => match visual_studio_cmake() {
+            Some(path) => {
+                let program = path.to_string_lossy().into_owned();
+                Ok((path, program))
+            }
+            None => Err(path_error),
+        },
+    }
+}
+
+fn visual_studio_cmake() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let vswhere = PathBuf::from(std::env::var_os("ProgramFiles(x86)")?)
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+    let output = std::process::Command::new(vswhere)
+        .args(["-latest", "-products", "*", "-property", "installationPath"])
+        .output()
+        .ok()?;
+    let install = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if install.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(&install)
+        .join("Common7")
+        .join("IDE")
+        .join("CommonExtensions")
+        .join("Microsoft")
+        .join("CMake")
+        .join("CMake")
+        .join("bin")
+        .join("cmake.exe");
+    candidate.is_file().then_some(candidate)
 }
 
 #[cfg(test)]

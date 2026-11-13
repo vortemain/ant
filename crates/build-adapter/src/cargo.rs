@@ -106,6 +106,14 @@ impl BuildAdapter for CargoAdapter {
         }
     }
 
+    /// Binaries are deliverables; `.rlib` library outputs are intermediates.
+    fn artifacts(&self, plan: &PlanFile) -> Vec<PathBuf> {
+        crate::declared_file_outputs(plan)
+            .into_iter()
+            .filter(|path| path.extension().is_none_or(|ext| ext != "rlib"))
+            .collect()
+    }
+
     fn generate(
         &self,
         project_root: &Path,
@@ -129,7 +137,7 @@ impl BuildAdapter for CargoAdapter {
             ))
         })?;
         let version = executable_version(&cargo, &root)?;
-        let toolchain_digest = build_digest::digest_file(&cargo_digest_target)
+        let toolchain_digest = crate::toolchain_digest(&cargo_digest_target)
             .map_err(|error| {
                 AdapterError::Toolchain(format!(
                     "cannot digest cargo executable {}: {error}",

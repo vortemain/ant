@@ -21,6 +21,7 @@ build-graph = { path = "../build-graph" }
 local-executor = { path = "../local-executor" }
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI credential decryption and the sandbox runner's own-token restriction
