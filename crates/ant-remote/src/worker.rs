@@ -200,6 +200,58 @@ fn set_mtime(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("cannot set mtime on {}: {error}", path.display()))
 }
 
+/// Identify the program the action will run *on this worker*: argv[0]
+/// resolved against the worker's PATH, its digest (cached per binary), and
+/// its `--version` line (run in the workspace, so per-project toolchain
+/// files such as `rust-toolchain.toml` take effect). Tools without
+/// `--version` (for example dash) are identified by digest alone. `None`
+/// when the plan declares no toolchain or the program cannot be resolved,
+/// which keeps the action out of the cache.
+fn observe_toolchain(
+    action: &build_action::Action,
+    workspace: &Path,
+) -> Option<build_action::ToolchainIdentity> {
+    action.toolchain.as_ref()?;
+    let program = Path::new(action.argv.first()?);
+    let resolved = if program.is_absolute() {
+        program.to_path_buf()
+    } else {
+        let path = build_digest::local_runtime_environment()
+            .into_iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| value)?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(program))
+            .find(|candidate| candidate.is_file())?
+    };
+    let canonical = resolved.canonicalize().ok()?;
+    let digest = build_adapter::toolchain_digest(&canonical).ok()?;
+    let version = std::process::Command::new(&resolved)
+        .arg("--version")
+        .current_dir(workspace)
+        .env_clear()
+        .envs(build_digest::local_runtime_environment())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .map(|line| line.trim().to_owned())
+        })
+        .filter(|line| !line.is_empty())
+        .unwrap_or_else(|| "(no --version)".to_owned());
+    Some(build_action::ToolchainIdentity {
+        name: canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        version,
+        executable_digest: digest.to_string(),
+    })
+}
+
 /// Sandboxed Linux worker path (D-019): compute the path- and
 /// time-independent action key, serve a cache hit without executing, or
 /// execute under the fixed mount and store the proven result.
@@ -221,7 +273,11 @@ fn run_cacheable(
         .iter()
         .map(|entry| (entry.path.clone(), entry.digest))
         .collect();
-    let candidate = build_digest::action_key_candidate(&spec.action, &inputs, &fingerprint)
+    // Key with the toolchain this worker will actually run, never the one
+    // the client observed when it generated the plan (D-020).
+    let mut keyed_action = spec.action.clone();
+    keyed_action.toolchain = observe_toolchain(&spec.action, workspace);
+    let candidate = build_digest::action_key_candidate(&keyed_action, &inputs, &fingerprint)
         .map_err(|error| error.to_string())?;
     let key = candidate
         .cache_eligible

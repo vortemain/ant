@@ -227,6 +227,17 @@ impl BuildAdapter for CargoAdapter {
             .filter(|path| root.join(path).is_file())
             .collect::<Vec<_>>();
         let local_sources = local_dependency_sources(&metadata, &member_ids, &workspace_root)?;
+        // Cache eligibility (D-020): every non-member package must live
+        // inside the project (vendored or path dependency) so its source is
+        // a declared input, and the lock file must pin the resolution.
+        let fully_declared =
+            lock_exists && all_packages_inside(&metadata, &member_ids, &workspace_root)?;
+        // The toolchain file selects the compiler; declare it when present.
+        let toolchain_files = ["rust-toolchain.toml", "rust-toolchain"]
+            .iter()
+            .map(PathBuf::from)
+            .filter(|path| root.join(path).is_file())
+            .collect::<Vec<_>>();
 
         // Prepare the staging directory generated actions use as TMP/TEMP
         // (see the crate-level contract): toolchain scratch writes land
@@ -267,6 +278,9 @@ impl BuildAdapter for CargoAdapter {
             }
             for config in &cargo_config {
                 declare_input(&mut inputs, config.clone(), InputKind::File);
+            }
+            for file in &toolchain_files {
+                declare_input(&mut inputs, file.clone(), InputKind::File);
             }
             let package_id = package["id"]
                 .as_str()
@@ -343,6 +357,20 @@ impl BuildAdapter for CargoAdapter {
                     target_rel.to_string_lossy().into_owned(),
                 ));
             }
+            if fully_declared {
+                // User-level cargo configuration (~/.cargo/config.toml) is
+                // outside the project and cannot be declared; an empty
+                // workspace-local CARGO_HOME keeps it out of eligible builds.
+                // Every dependency is already in the project, so nothing
+                // needs the registry cache.
+                environment.push((
+                    "CARGO_HOME".to_owned(),
+                    PathBuf::from(".ant")
+                        .join("cargo-home")
+                        .to_string_lossy()
+                        .into_owned(),
+                ));
+            }
             environment.sort();
 
             let mut argv = vec![
@@ -370,9 +398,14 @@ impl BuildAdapter for CargoAdapter {
                     })
                     .collect(),
                 environment,
-                // Dependency source content is undeclared, so these actions
-                // must never claim cache eligibility.
-                cache_policy: CachePolicy::Never,
+                // Eligible only when every dependency source is a declared
+                // input (D-020); otherwise undeclared content would make
+                // reuse unsound.
+                cache_policy: if fully_declared {
+                    CachePolicy::Eligible
+                } else {
+                    CachePolicy::Never
+                },
                 toolchain: Some(ToolchainIdentity {
                     name: "cargo".to_owned(),
                     version: version.clone(),
@@ -415,6 +448,39 @@ fn join_rel(base: &Path, leaf: &str) -> PathBuf {
 /// same path.
 fn declare_input(inputs: &mut BTreeMap<PathBuf, InputKind>, path: PathBuf, kind: InputKind) {
     inputs.entry(path).or_insert(kind);
+}
+
+/// Whether every non-member package's manifest lies inside the workspace,
+/// i.e. no dependency comes from the registry cache, a git checkout, or a
+/// path outside the project.
+fn all_packages_inside(
+    metadata: &serde_json::Value,
+    member_ids: &BTreeSet<&str>,
+    workspace_root: &Path,
+) -> Result<bool, AdapterError> {
+    for package in metadata_value(metadata, "packages")?
+        .as_array()
+        .ok_or_else(|| bad_metadata("packages is not an array"))?
+    {
+        let id = package["id"]
+            .as_str()
+            .ok_or_else(|| bad_metadata("package has no id"))?;
+        if member_ids.contains(id) {
+            continue;
+        }
+        let manifest = Path::new(
+            package["manifest_path"]
+                .as_str()
+                .ok_or_else(|| bad_metadata("package manifest_path is missing"))?,
+        );
+        let inside = manifest
+            .parent()
+            .is_some_and(|dir| relative_to(workspace_root, dir).is_ok());
+        if !inside {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// For each workspace member package id, the workspace-relative directories
@@ -636,8 +702,9 @@ mod tests {
             .find(|input| input.path == Path::new("app/src"))
             .expect("src input");
         assert_eq!(src_input.kind, InputKind::Tree);
-        // Undeclared dependency sources force policy never.
-        assert_eq!(app.cache_policy, CachePolicy::Never);
+        // Every dependency is in the project and the lock file exists, so
+        // the actions are cache-eligible (D-020).
+        assert_eq!(app.cache_policy, CachePolicy::Eligible);
         // Scratch writes are redirected into the workspace staging dir so the
         // plan is runnable under `ant run --sandbox`.
         let staging = PathBuf::from(".ant")
@@ -652,6 +719,15 @@ mod tests {
         if cfg!(not(windows)) {
             expected.push(("TMPDIR".to_owned(), staging.clone()));
         }
+        // Eligible builds keep user-level cargo config out (D-020).
+        expected.push((
+            "CARGO_HOME".to_owned(),
+            PathBuf::from(".ant")
+                .join("cargo-home")
+                .to_string_lossy()
+                .into_owned(),
+        ));
+        expected.sort();
         assert_eq!(app.environment, expected);
         // The staging directory was prepared by generation.
         assert!(dir.path().join(".ant").join("tmp").is_dir());
@@ -1023,8 +1099,56 @@ mod tests {
             "non-dependents declare no foreign sources: {:?}",
             other.inputs
         );
-        // Undeclared external configuration still keeps policy never.
-        assert_eq!(app.cache_policy, CachePolicy::Never);
+        // Every dependency source (vendored crate, non-member path dep) is a
+        // declared input, so the build is cache-eligible (D-020).
+        assert_eq!(app.cache_policy, CachePolicy::Eligible);
+    }
+
+    #[test]
+    fn dependencies_outside_the_project_keep_policy_never() {
+        // A path dependency outside the project cannot be declared.
+        let outer = TempDir::new("outside-dep");
+        write(
+            &outer.path().join("shared/Cargo.toml"),
+            "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(&outer.path().join("shared/src/lib.rs"), "pub fn s() {}\n");
+        write(
+            &outer.path().join("proj/Cargo.toml"),
+            "[package]\nname = \"proj\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nshared = { path = \"../shared\" }\n",
+        );
+        write(&outer.path().join("proj/src/main.rs"), "fn main() {}\n");
+        let plan = CargoAdapter
+            .generate(&outer.path().join("proj"), &AdapterOptions::new())
+            .expect("generate");
+        let action = &plan.actions[0].action;
+        assert_eq!(action.cache_policy, CachePolicy::Never);
+        assert!(
+            action
+                .environment
+                .iter()
+                .all(|(key, _)| key != "CARGO_HOME"),
+            "CARGO_HOME is only pinned for eligible builds"
+        );
+    }
+
+    #[test]
+    fn rust_toolchain_file_is_a_declared_input() {
+        let dir = workspace();
+        write(
+            &dir.path().join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"stable\"\n",
+        );
+        let plan = CargoAdapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        assert!(plan.actions.iter().all(|entry| {
+            entry
+                .action
+                .inputs
+                .iter()
+                .any(|input| input.path == Path::new("rust-toolchain.toml"))
+        }));
     }
 
     /// Write `vendor/tinydep` as a `cargo vendor` directory source and the

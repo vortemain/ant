@@ -42,6 +42,7 @@ name = "ant-remote"
 version = "0.1.0"
 dependencies = [
  "build-action",
+ "build-adapter",
  "build-digest",
  "build-graph",
  "local-executor",

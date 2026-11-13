@@ -8,6 +8,8 @@ description = "Self-hosted remote execution: protocol v1, coordinator, worker, a
 
 [dependencies]
 build-action = { path = "../build-action" }
+# Worker-side toolchain identity uses the cached toolchain digest (D-020).
+build-adapter = { path = "../build-adapter" }
 build-digest = { path = "../build-digest" }
 build-graph = { path = "../build-graph" }
 local-executor = { path = "../local-executor" }
