@@ -53,11 +53,29 @@ use crate::{
 
 pub struct CargoAdapter;
 
-const OPTIONS: &[OptionSpec] = &[OptionSpec {
-    key: "profile",
-    values: "dev|release",
-    description: "cargo build profile; release adds --release and maps outputs to <target-dir>/release",
-}];
+const OPTIONS: &[OptionSpec] = &[
+    OptionSpec {
+        key: "profile",
+        values: "dev|release",
+        description: "cargo build profile; release adds --release and maps outputs to <target-dir>/release",
+    },
+    OptionSpec {
+        key: "granularity",
+        values: "member|workspace",
+        description: "one action per workspace member (default) or a single `cargo build --workspace` action (best for remote builds: dependencies compile once)",
+    },
+];
+
+/// Whether the plan has one action per member or one for the workspace.
+fn workspace_granularity(options: &AdapterOptions) -> Result<bool, AdapterError> {
+    match options.get("granularity") {
+        None | Some("member") => Ok(false),
+        Some("workspace") => Ok(true),
+        Some(other) => Err(AdapterError::Option(format!(
+            "cargo granularity '{other}' is not supported (supported: member, workspace)"
+        ))),
+    }
+}
 
 /// A supported cargo build profile: the extra argv and the profile's output
 /// directory name under the target directory.
@@ -122,6 +140,7 @@ impl BuildAdapter for CargoAdapter {
         // Options are validated before any side effect.
         check_option_keys(self, options)?;
         let profile = profile(options)?;
+        let whole_workspace = workspace_granularity(options)?;
         let root = canonical_root(project_root)?;
         let staging_value = PathBuf::from(".ant")
             .join("tmp")
@@ -239,14 +258,31 @@ impl BuildAdapter for CargoAdapter {
             .filter(|path| root.join(path).is_file())
             .collect::<Vec<_>>();
 
-        // Prepare the staging directory generated actions use as TMP/TEMP
-        // (see the crate-level contract): toolchain scratch writes land
-        // inside the workspace, which is what makes these plans runnable
-        // under `ant run --sandbox`. Idempotent; the one allowed side effect,
-        // performed only after every check above passed.
-        std::fs::create_dir_all(root.join(".ant").join("tmp")).map_err(AdapterError::from)?;
-        let mut file = PlanFile::new();
-        for (name, package) in &members {
+        // The workspace definition (D-021): building any one package makes
+        // cargo load the whole workspace — every member's manifest, the files
+        // it infers each member's targets from, and the manifests of every
+        // locked dependency — so every action declares all of it. Remote
+        // execution (where undeclared files do not exist) found this.
+        let mut workspace_inputs: BTreeMap<PathBuf, InputKind> = BTreeMap::new();
+        declare_input(
+            &mut workspace_inputs,
+            PathBuf::from("Cargo.toml"),
+            InputKind::File,
+        );
+        if lock_exists {
+            declare_input(
+                &mut workspace_inputs,
+                PathBuf::from("Cargo.lock"),
+                InputKind::File,
+            );
+        }
+        for config in &cargo_config {
+            declare_input(&mut workspace_inputs, config.clone(), InputKind::File);
+        }
+        for file in &toolchain_files {
+            declare_input(&mut workspace_inputs, file.clone(), InputKind::File);
+        }
+        for package in members.values() {
             let manifest = PathBuf::from(
                 package["manifest_path"]
                     .as_str()
@@ -256,40 +292,38 @@ impl BuildAdapter for CargoAdapter {
                 &workspace_root,
                 manifest.parent().expect("manifest has a parent"),
             )?;
-            let manifest_rel = join_rel(&package_dir, "Cargo.toml");
-
-            let mut inputs: BTreeMap<PathBuf, InputKind> = BTreeMap::new();
-            declare_input(&mut inputs, manifest_rel.clone(), InputKind::File);
-            let src = join_rel(&package_dir, "src");
-            if root.join(&src).is_dir() {
-                declare_input(&mut inputs, src, InputKind::Tree);
-            }
+            declare_input(
+                &mut workspace_inputs,
+                join_rel(&package_dir, "Cargo.toml"),
+                InputKind::File,
+            );
             let build_script = join_rel(&package_dir, "build.rs");
             if root.join(&build_script).is_file() {
-                declare_input(&mut inputs, build_script, InputKind::File);
+                declare_input(&mut workspace_inputs, build_script, InputKind::File);
             }
-            // The workspace manifest drives profiles and inheritance; declare
-            // it whenever it is not this package's own manifest.
-            if manifest_rel != Path::new("Cargo.toml") {
-                declare_input(&mut inputs, PathBuf::from("Cargo.toml"), InputKind::File);
-            }
-            if lock_exists {
-                declare_input(&mut inputs, PathBuf::from("Cargo.lock"), InputKind::File);
-            }
-            for config in &cargo_config {
-                declare_input(&mut inputs, config.clone(), InputKind::File);
-            }
-            for file in &toolchain_files {
-                declare_input(&mut inputs, file.clone(), InputKind::File);
-            }
-            let package_id = package["id"]
-                .as_str()
-                .ok_or_else(|| bad_metadata("package has no id"))?;
-            if let Some(sources) = local_sources.get(package_id) {
-                for source in sources {
-                    declare_input(&mut inputs, source.clone(), InputKind::Tree);
+            for tree in ["src", "examples", "tests", "benches"] {
+                let dir = join_rel(&package_dir, tree);
+                if root.join(&dir).is_dir() {
+                    declare_input(&mut workspace_inputs, dir, InputKind::Tree);
                 }
             }
+        }
+        for sources in local_sources.values() {
+            for source in sources {
+                declare_input(&mut workspace_inputs, source.clone(), InputKind::Tree);
+            }
+        }
+
+        // Prepare the staging directory generated actions use as TMP/TEMP
+        // (see the crate-level contract): toolchain scratch writes land
+        // inside the workspace, which is what makes these plans runnable
+        // under `ant run --sandbox`. Idempotent; the one allowed side effect,
+        // performed only after every check above passed.
+        std::fs::create_dir_all(root.join(".ant").join("tmp")).map_err(AdapterError::from)?;
+        let mut file = PlanFile::new();
+        let mut all_outputs: BTreeSet<PathBuf> = BTreeSet::new();
+        for (name, package) in &members {
+            let inputs = workspace_inputs.clone();
 
             let mut outputs: BTreeSet<PathBuf> = BTreeSet::new();
             let targets = package["targets"]
@@ -414,10 +448,36 @@ impl BuildAdapter for CargoAdapter {
                 timeout_ms: None,
                 resources: None,
             };
+            all_outputs.extend(action.outputs.iter().map(|output| output.path.clone()));
             file.actions.push(PlanAction {
                 action,
                 dependencies: dependencies.into_iter().collect(),
             });
+        }
+        if whole_workspace {
+            // One action builds every member: dependencies compile once,
+            // which is what a remote job wants (D-021).
+            let mut action = file.actions[0].action.clone();
+            action.id = "workspace".to_owned();
+            action.argv = vec![
+                "cargo".to_owned(),
+                "build".to_owned(),
+                "--workspace".to_owned(),
+            ];
+            action
+                .argv
+                .extend(profile.flags.iter().map(|flag| (*flag).to_owned()));
+            action.outputs = all_outputs
+                .into_iter()
+                .map(|path| Output {
+                    path,
+                    kind: OutputKind::File,
+                })
+                .collect();
+            file.actions = vec![PlanAction {
+                action,
+                dependencies: Vec::new(),
+            }];
         }
         // Validate the full plan through the canonical graph conversion; an
         // adapter must never emit an invalid plan.
@@ -1093,12 +1153,22 @@ mod tests {
         );
         let other = &plan.actions[1].action;
         assert_eq!(other.id, "other");
+        // Building any member makes cargo load the whole workspace,
+        // including every locked dependency's manifest (D-021), so even a
+        // member that does not depend on them declares those sources.
         assert!(
-            other.inputs.iter().all(|input| !input.path.starts_with("vendor")
-                && !input.path.starts_with("helper")),
-            "non-dependents declare no foreign sources: {:?}",
+            other
+                .inputs
+                .iter()
+                .any(|input| input.path == Path::new("vendor").join("tinydep"))
+                && other
+                    .inputs
+                    .iter()
+                    .any(|input| input.path == Path::new("helper")),
+            "every action declares the whole workspace definition: {:?}",
             other.inputs
         );
+        assert_eq!(app.inputs, other.inputs, "one shared workspace definition");
         // Every dependency source (vendored crate, non-member path dep) is a
         // declared input, so the build is cache-eligible (D-020).
         assert_eq!(app.cache_policy, CachePolicy::Eligible);
@@ -1130,6 +1200,30 @@ mod tests {
                 .all(|(key, _)| key != "CARGO_HOME"),
             "CARGO_HOME is only pinned for eligible builds"
         );
+    }
+
+    #[test]
+    fn workspace_granularity_builds_everything_in_one_action() {
+        let dir = workspace();
+        let mut options = AdapterOptions::new();
+        options.insert("granularity", "workspace").expect("option");
+        let plan = CargoAdapter
+            .generate(dir.path(), &options)
+            .expect("generate");
+        assert_eq!(plan.actions.len(), 1);
+        let action = &plan.actions[0].action;
+        assert_eq!(action.id, "workspace");
+        assert_eq!(action.argv, vec!["cargo", "build", "--workspace"]);
+        let outputs: Vec<_> = action.outputs.iter().map(|o| o.path.clone()).collect();
+        assert!(
+            outputs
+                .iter()
+                .any(|p| p.ends_with(format!("app-bin{}", std::env::consts::EXE_SUFFIX)))
+        );
+        assert!(outputs.iter().any(|p| p.ends_with("libcore_lib.rlib")));
+        let mut bad = AdapterOptions::new();
+        bad.insert("granularity", "crate").expect("option");
+        assert!(CargoAdapter.generate(dir.path(), &bad).is_err());
     }
 
     #[test]

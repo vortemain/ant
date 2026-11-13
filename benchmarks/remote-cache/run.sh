@@ -74,7 +74,8 @@ URL="http://$(grep -o 'listening=[^ ]*' "$WORK/coord.out" | cut -d= -f2)"
 "$ANT" worker --coordinator "$URL" --token-file "$WORK/worker.token" --work-dir "$WORK/work" \
   --id bench-worker --sandbox > "$WORK/worker.out" 2>&1 &
 WORKER=$!
-trap 'kill $WORKER $COORD 2>/dev/null || true' EXIT
+# Keep the worker's log (cargo's own output lands there) whatever happens.
+trap 'cp "$WORK/worker.out" "$OUT/worker.log" 2>/dev/null; kill $WORKER $COORD 2>/dev/null || true' EXIT
 
 remote() {
   local ws=$1 log=$2
@@ -85,7 +86,7 @@ counts() { echo "$(grep -c 'status=succeeded' "$1" || true) $(grep -c 'status=re
 
 checkout "$WORK/ant-a"
 s=$(now)
-"$ANT" adapt --adapter cargo --project "$WORK/ant-a" --option profile=release --out "$WORK/plan.json" > /dev/null
+"$ANT" adapt --adapter cargo --project "$WORK/ant-a" --option profile=release   --option granularity=workspace --out "$WORK/plan.json" > /dev/null
 e=$(now)
 record ant-adapt 1 "$(elapsed "$s" "$e")" - - "plan generation"
 grep -c '"cache_policy": "eligible"' "$WORK/plan.json" | xargs echo "eligible actions:"
