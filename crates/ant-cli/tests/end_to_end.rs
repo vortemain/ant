@@ -1333,3 +1333,137 @@ fn enforce_memory_is_plan_only_and_fails_closed_off_windows() {
         assert!(stderr.contains("Windows job objects only") || stderr.contains("plan execution"), "stderr was {stderr:?}");
     }
 }
+
+/// Plans written by Windows PowerShell 5 (`Set-Content -Encoding UTF8`)
+/// start with a UTF-8 BOM; they must load.
+#[test]
+fn plan_with_utf8_bom_loads() {
+    let dir = TempDir::new("plan-bom");
+    let plan = json!({ "schema_version": 1, "actions": [plan_action("bom", "echo ok", &[])] });
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend(serde_json::to_vec(&plan).expect("json"));
+    let path = dir.path().join("plan.json");
+    fs::write(&path, bytes).expect("write");
+    let (code, stdout, stderr) = run_ant(&["plan", "validate", "--plan", &path.to_string_lossy()]);
+    assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
+}
+
+/// Network-isolation tests need the one-time elevated `ant sandbox setup`
+/// on this machine. Without it they skip (printing why) rather than fail:
+/// they prove nothing on machines without the setup.
+#[cfg(windows)]
+fn network_isolation_ready() -> bool {
+    let (code, stdout, _) = run_ant(&["sandbox", "status"]);
+    let ready = code == 0 && stdout.contains("ready=true");
+    if !ready {
+        eprintln!("skipping: network isolation not set up on this machine (run 'ant sandbox setup' elevated)");
+    }
+    ready
+}
+
+#[cfg(windows)]
+fn system_action(id: &str, argv: &[&str], cache_policy: &str) -> serde_json::Value {
+    json!({
+        "action": {
+            "schema_version": 1,
+            "id": id,
+            "argv": argv,
+            "working_directory": ".",
+            "inputs": [], "outputs": [],
+            "environment": [["TEMP", r".ant\tmp"], ["TMP", r".ant\tmp"]],
+            "cache_policy": cache_policy,
+            "timeout_ms": 60000
+        },
+        "dependencies": []
+    })
+}
+
+/// Runs as the sandbox account, and outbound connections are refused by the
+/// account-scoped firewall rules while the same action connects without
+/// isolation (the control; needs outbound internet to 1.1.1.1:443).
+#[cfg(windows)]
+#[test]
+fn network_isolated_runs_as_sandbox_account_and_blocks_connections() {
+    if !network_isolation_ready() {
+        return;
+    }
+    let dir = TempDir::new("net-iso");
+    fs::create_dir_all(dir.path().join(".ant").join("tmp")).expect("staging");
+    let workspace = dir.path().to_string_lossy().into_owned();
+    let mut who = system_action("a-who", &[r"C:\Windows\System32\cmd.exe", "/C", r"C:\Windows\System32\whoami.exe > who.txt"], "never");
+    who["action"]["outputs"] = json!([{ "path": "who.txt", "kind": "file" }]);
+    let curl = system_action(
+        "b-curl",
+        &[r"C:\Windows\System32\curl.exe", "-sS", "-m", "15", "-o", "NUL", "https://1.1.1.1/"],
+        "never",
+    );
+    let plan = write_plan(&dir, &[who, curl]);
+
+    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--keep-going"]);
+    assert_eq!(code, 0, "control: connection must succeed without isolation; stderr {stderr:?} stdout {stdout:?}");
+    assert!(!fs::read_to_string(dir.path().join("who.txt")).expect("who").to_lowercase().contains("antsandboxoffline"));
+
+    let (code, stdout, stderr) =
+        run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--keep-going", "--network-isolated"]);
+    assert_eq!(code, 1, "the connection must fail under isolation; stderr {stderr:?} stdout {stdout:?}");
+    assert!(stdout.contains("action=a-who status=succeeded"), "{stdout:?}");
+    assert!(stdout.contains("action=b-curl status=failed exit_code=7"), "curl exit 7 = connect refused; {stdout:?}");
+    assert!(
+        fs::read_to_string(dir.path().join("who.txt")).expect("who").to_lowercase().contains("antsandboxoffline"),
+        "the action must run as the sandbox account"
+    );
+    assert!(stdout.contains("blockers=[PolicyNever, MissingToolchainIdentity]"), "only plan-level blockers remain; {stdout:?}");
+}
+
+/// The cache gate opens under network isolation: a fully declared action is
+/// stored, reused with its output restored after deletion, and rebuilt when
+/// its input changes. The same plan under `--sandbox` alone stays gated.
+#[cfg(windows)]
+#[test]
+fn network_isolated_cache_reuses_and_invalidates() {
+    if !network_isolation_ready() {
+        return;
+    }
+    let dir = TempDir::new("net-iso-cache");
+    let ws = dir.path().join("ws");
+    fs::create_dir_all(ws.join(".ant").join("tmp")).expect("staging");
+    fs::write(ws.join("in.txt"), "hello cache").expect("input");
+    let cmd = r"C:\Windows\System32\cmd.exe";
+    let digest = build_digest::digest_file(std::path::Path::new(cmd)).expect("digest cmd.exe");
+    let mut action = system_action("copy", &[cmd, "/C", "copy /Y in.txt out.txt >nul"], "eligible");
+    action["action"]["inputs"] = json!([{ "path": "in.txt", "kind": "file" }]);
+    action["action"]["outputs"] = json!([{ "path": "out.txt", "kind": "file" }]);
+    // Truthful identity: the real digest of the executable that runs.
+    action["action"]["toolchain"] = json!({
+        "name": "cmd",
+        "version": "system32",
+        "executable_digest": digest.to_string()
+    });
+    let plan_dir = TempDir::new("net-iso-cache-plan");
+    let plan = write_plan(&plan_dir, &[action]);
+    let workspace = ws.to_string_lossy().into_owned();
+    let cache = dir.path().join("cache").to_string_lossy().into_owned();
+    let run = |extra: &str| {
+        run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--cache-dir", &cache, extra])
+    };
+
+    let (code, stdout, stderr) = run("--sandbox");
+    assert_eq!(code, 0, "stderr {stderr:?}");
+    assert!(stdout.contains("blockers=[NetworkIsolationUnavailable]"), "control stays gated: {stdout:?}");
+
+    let (code, stdout, stderr) = run("--network-isolated");
+    assert_eq!(code, 0, "stderr {stderr:?}; stdout {stdout:?}");
+    assert!(stdout.contains("action=copy status=succeeded") && stdout.contains("cache_eligible=true blockers=[]"), "{stdout:?}");
+
+    fs::remove_file(ws.join("out.txt")).expect("delete output");
+    let (code, stdout, stderr) = run("--network-isolated");
+    assert_eq!(code, 0, "stderr {stderr:?}");
+    assert!(stdout.contains("action=copy status=reused"), "{stdout:?}");
+    assert_eq!(fs::read_to_string(ws.join("out.txt")).expect("restored"), "hello cache");
+
+    fs::write(ws.join("in.txt"), "changed input").expect("change");
+    let (code, stdout, _) = run("--network-isolated");
+    assert_eq!(code, 0);
+    assert!(stdout.contains("action=copy status=succeeded"), "a changed input must rebuild: {stdout:?}");
+    assert_eq!(fs::read_to_string(ws.join("out.txt")).expect("rebuilt"), "changed input");
+}

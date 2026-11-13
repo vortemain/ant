@@ -603,7 +603,11 @@ fn detect_command(project_path: &Path) -> u8 {
 fn load_graph(plan_path: &Path) -> Result<BuildGraph, String> {
     let content = fs::read_to_string(plan_path)
         .map_err(|error| format!("cannot read plan {}: {error}", plan_path.display()))?;
-    let plan: build_graph::PlanFile = serde_json::from_str(&content)
+    // Windows PowerShell 5's `Set-Content -Encoding UTF8` (and other
+    // Windows tools) prefix a UTF-8 BOM; accept it rather than failing with
+    // a confusing "expected value at line 1 column 1".
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    let plan: build_graph::PlanFile = serde_json::from_str(content)
         .map_err(|error| format!("invalid plan {}: {error}", plan_path.display()))?;
     if plan.schema_version != build_graph::PLAN_SCHEMA_VERSION {
         return Err(format!("unsupported plan schema version {}", plan.schema_version));
