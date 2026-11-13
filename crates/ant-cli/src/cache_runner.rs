@@ -114,7 +114,7 @@ pub fn run_action(
     let fingerprint = if isolated.is_some() {
         ExecutionFingerprint::local_network_isolated(workspace)
     } else if sandbox {
-        ExecutionFingerprint::local_sandboxed(workspace)
+        local_executor::sandboxed_fingerprint(workspace)
     } else {
         ExecutionFingerprint::local_metadata_fingerprinting(workspace)
     };

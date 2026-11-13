@@ -446,6 +446,13 @@ impl ExecutionFingerprint {
     /// `network_isolation`. Known residual channel, documented in
     /// `docs/sandbox/network-isolation.md`: name resolution through the
     /// system DNS client service runs as another account and is not blocked.
+    pub fn local_namespace_sandboxed(workspace: &Path) -> Self {
+        // Linux bubblewrap sandbox (D-018): read-only host, workspace the
+        // only writable host path, and an empty network namespace — no
+        // routes and no resolver, so (unlike D-013) DNS is blocked too.
+        Self::local_network_isolated(workspace)
+    }
+
     pub fn local_network_isolated(workspace: &Path) -> Self {
         let mut fingerprint = Self::local_sandboxed(workspace);
         fingerprint.capabilities.network_isolation = true;

@@ -1075,7 +1075,7 @@ pub fn print_action_key(
     // intentionally does NOT pass `sandbox`: its key is executor-agnostic and
     // only the reported blockers differ.
     let fingerprint = if sandbox {
-        build_digest::ExecutionFingerprint::local_sandboxed(workspace)
+        local_executor::sandboxed_fingerprint(workspace)
     } else {
         build_digest::ExecutionFingerprint::local_metadata_fingerprinting(workspace)
     };

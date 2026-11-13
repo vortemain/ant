@@ -972,7 +972,7 @@ fn sandbox_run_write_outside_workspace_fails_closed() {
     let _ = std::fs::remove_file(&outside);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn sandbox_run_fails_closed_on_non_windows() {
     let dir = TempDir::new("sandbox-nonwindows");
@@ -1254,7 +1254,8 @@ fn adapt_plan_runs_sandboxed_for_a_path_dep_workspace() {
         "--plan",
         &plan_str,
     ]);
-    if cfg!(windows) {
+    // Windows: restricted-token sandbox; Linux: bubblewrap sandbox (D-018).
+    if cfg!(any(windows, target_os = "linux")) {
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
         // Both members built in DAG order under confinement.
         assert!(
@@ -1279,8 +1280,8 @@ fn adapt_plan_runs_sandboxed_for_a_path_dep_workspace() {
         // response files. (The linker deletes those files after use, so the
         // staging directory may legitimately be empty afterwards.)
     } else {
-        // Non-Windows: `--sandbox` fails closed before any action runs.
-        assert_ne!(code, 0, "sandbox must fail closed on non-Windows");
+        // Other platforms: `--sandbox` fails closed before any action runs.
+        assert_ne!(code, 0, "sandbox must fail closed without a sandbox");
         assert!(
             stderr.contains("sandbox unavailable"),
             "stderr was {stderr:?}"

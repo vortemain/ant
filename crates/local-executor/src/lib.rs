@@ -580,6 +580,18 @@ pub struct IsolatedAccount {
     _private: (),
 }
 
+/// The execution fingerprint the `--sandbox` path truthfully declares on
+/// this platform: Windows' restricted token confines writes but not the
+/// network (D-009); Linux's bubblewrap sandbox confines writes *and* runs in
+/// an empty network namespace (D-018), so it declares network isolation too.
+pub fn sandboxed_fingerprint(workspace: &Path) -> build_digest::ExecutionFingerprint {
+    if cfg!(target_os = "linux") {
+        build_digest::ExecutionFingerprint::local_namespace_sandboxed(workspace)
+    } else {
+        build_digest::ExecutionFingerprint::local_sandboxed(workspace)
+    }
+}
+
 /// Execute a prepared action write-confined *and* network-isolated: the
 /// workspace is granted to the sandbox account (and the per-workspace
 /// capability SID), then Ant's runner is started as that account via
@@ -717,9 +729,138 @@ fn wait_sandboxed_child(
     }
 }
 
-/// Non-Windows stub: the restricted-token sandbox is Windows-only (decision
-/// D-007). Fails closed rather than executing unsandboxed.
-#[cfg(not(windows))]
+/// Linux sandbox (decision D-018): run the action under bubblewrap with
+/// every namespace unshared. The whole host filesystem is mounted
+/// read-only, the workspace is the only writable host path, `/tmp` is a
+/// private tmpfs, `/dev` and `/proc` are fresh, and the network namespace is
+/// empty (loopback only; no routes, no DNS). The process tree lives in its
+/// own PID namespace, so killing bwrap (cancel/timeout) ends every
+/// descendant. Inputs and outputs are verified exactly as on the other
+/// paths. Fails closed when bwrap is missing or cannot create namespaces.
+#[cfg(target_os = "linux")]
+pub fn execute_sandboxed_cancellable(
+    workspace: &Path,
+    action: &Action,
+    cancellation: &CancellationToken,
+) -> Result<ExecutionResult, ExecutionError> {
+    let prepared = prepare_with_metadata(workspace, action)?;
+    execute_sandboxed_prepared(&prepared, cancellation)
+}
+
+#[cfg(target_os = "linux")]
+pub fn execute_sandboxed_prepared(
+    prepared: &PreparedAction,
+    cancellation: &CancellationToken,
+) -> Result<ExecutionResult, ExecutionError> {
+    let action = &prepared.action;
+    if cancellation.is_cancelled() {
+        return Err(ExecutionError::Cancelled);
+    }
+    if prepared.memory_limit_bytes.is_some() {
+        return Err(ExecutionError::ResourceLimit(
+            "memory limits are enforced with Windows job objects only".to_owned(),
+        ));
+    }
+    let bwrap = linux_sandbox::ready_bwrap().map_err(ExecutionError::Sandbox)?;
+    let requested_cwd = prepared.workspace.join(&action.working_directory);
+    let cwd =
+        requested_cwd
+            .canonicalize()
+            .map_err(|source| ExecutionError::WorkspaceUnavailable {
+                path: requested_cwd.clone(),
+                source,
+            })?;
+    let mut command = Command::new(bwrap);
+    command.args(linux_sandbox::BASE_ARGS);
+    // After the private /tmp so a workspace under /tmp stays visible.
+    command
+        .arg("--bind")
+        .arg(&prepared.workspace)
+        .arg(&prepared.workspace)
+        .arg("--chdir")
+        .arg(&cwd)
+        .arg("--")
+        .args(&action.argv)
+        .env_clear();
+    command.envs(build_digest::local_runtime_environment());
+    command.envs(action.environment.iter().map(|(key, value)| (key, value)));
+    let mut child = command.spawn().map_err(ExecutionError::Spawn)?;
+    let timeout = action.timeout_ms.map(Duration::from_millis);
+    let (status, cancelled, timed_out) = wait_for_child(&mut child, cancellation, timeout)?;
+    let mut output_digests = Vec::new();
+    if status.success() && !cancelled && !timed_out {
+        output_digests = verify_inputs_and_digest_outputs(prepared)?;
+    }
+    Ok(ExecutionResult {
+        action_id: action.id.clone(),
+        status,
+        cancelled,
+        timed_out,
+        input_digests: prepared.input_digests.clone(),
+        output_digests,
+        memory_limit_bytes: None,
+        peak_memory_bytes: None,
+    })
+}
+
+#[cfg(target_os = "linux")]
+mod linux_sandbox {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    /// Namespaces, read-only host, private /tmp, fresh /dev and /proc.
+    pub(super) const BASE_ARGS: &[&str] = &[
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+    ];
+
+    /// Locate bwrap and prove once per process that it can actually create
+    /// the sandbox here (user namespaces may be disabled by the kernel or by
+    /// AppArmor); the result is cached.
+    pub(super) fn ready_bwrap() -> Result<PathBuf, String> {
+        static READY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+        READY
+            .get_or_init(|| {
+                let path = std::env::var_os("PATH").unwrap_or_default();
+                let bwrap = std::env::split_paths(&path)
+                    .map(|dir| dir.join("bwrap"))
+                    .find(|candidate| candidate.is_file())
+                    .ok_or_else(|| {
+                        "bubblewrap (bwrap) is not installed; install the `bubblewrap` package"
+                            .to_owned()
+                    })?;
+                let probe = std::process::Command::new(&bwrap)
+                    .args(BASE_ARGS)
+                    .args(["--", "true"])
+                    .output()
+                    .map_err(|error| format!("cannot run {}: {error}", bwrap.display()))?;
+                if !probe.status.success() {
+                    return Err(format!(
+                        "bubblewrap cannot create a sandbox on this host ({}); unprivileged user \
+                         namespaces may be disabled (on Ubuntu 24.04+: \
+                         sysctl kernel.apparmor_restrict_unprivileged_userns=0)",
+                        String::from_utf8_lossy(&probe.stderr).trim()
+                    ));
+                }
+                Ok(bwrap)
+            })
+            .clone()
+    }
+}
+
+/// Non-Windows, non-Linux stub: no sandbox is implemented (decisions D-007,
+/// D-018). Fails closed rather than executing unsandboxed.
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn execute_sandboxed_cancellable(
     _workspace: &Path,
     _action: &Action,
@@ -730,8 +871,8 @@ pub fn execute_sandboxed_cancellable(
     ))
 }
 
-/// Non-Windows stub for the prepared variant; same fail-closed contract.
-#[cfg(not(windows))]
+/// Stub for the prepared variant; same fail-closed contract.
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn execute_sandboxed_prepared(
     _prepared: &PreparedAction,
     _cancellation: &CancellationToken,

@@ -21,6 +21,20 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/check.ps1
+      - name: Prepare the Linux sandbox (bubblewrap + user namespaces)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor;
+          # Ant's Linux sandbox (D-018) needs them. Workers need the same.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-all --ro-bind / / --dev /dev --proc /proc -- true && echo "bwrap sandbox OK"
       - name: Quality gate (POSIX)
         if: runner.os != 'Windows'
+        env:
+          # Linux sandbox tests must fail, not skip, when the sandbox is missing.
+          ANT_REQUIRE_BWRAP: "1"
         run: sh ./scripts/check.sh

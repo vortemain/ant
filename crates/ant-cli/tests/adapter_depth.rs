@@ -309,7 +309,8 @@ fn cargo_vendored_registry_dependency_builds_sandboxed() {
         "--plan",
         &plan,
     ]);
-    if cfg!(windows) {
+    // Windows: restricted-token sandbox; Linux: bubblewrap sandbox (D-018).
+    if cfg!(any(windows, target_os = "linux")) {
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
         assert!(
             stdout.contains("action=vend-app status=succeeded"),
@@ -341,7 +342,7 @@ fn cargo_vendored_registry_dependency_builds_sandboxed() {
             .expect("run built artifact");
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "v=7");
     } else {
-        assert_ne!(code, 0, "sandbox must fail closed on non-Windows");
+        assert_ne!(code, 0, "sandbox must fail closed without a sandbox");
         assert!(
             stderr.contains("sandbox unavailable"),
             "stderr was {stderr:?}"
@@ -413,7 +414,8 @@ fn npm_workspaces_adapt_and_run_in_dependency_order() {
         "--plan",
         &plan,
     ]);
-    if cfg!(windows) {
+    // Windows: restricted-token sandbox; Linux: bubblewrap sandbox (D-018).
+    if cfg!(any(windows, target_os = "linux")) {
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
         let core_done = stdout
             .find("action=@demo/core status=succeeded")
@@ -436,7 +438,7 @@ fn npm_workspaces_adapt_and_run_in_dependency_order() {
         let built = fs::read_to_string(dir.path().join(&app_out)).expect("app artifact");
         assert_eq!(built, "console.log(42);");
     } else {
-        assert_ne!(code, 0, "sandbox must fail closed on non-Windows");
+        assert_ne!(code, 0, "sandbox must fail closed without a sandbox");
     }
 
     // Deterministic re-adaptation.

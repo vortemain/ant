@@ -155,8 +155,8 @@ pub fn worker_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
         once: flags.has("--once"),
         poll_interval: Duration::from_millis(250),
     };
-    if config.sandbox && !cfg!(windows) {
-        return Err("--sandbox is implemented for Windows only".to_owned());
+    if config.sandbox && !cfg!(any(windows, target_os = "linux")) {
+        return Err("--sandbox is implemented for Windows and Linux only".to_owned());
     }
     ant_remote::worker::run(&coordinator, &config)?;
     Ok(0)
