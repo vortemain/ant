@@ -59,6 +59,11 @@ mod error;
 /// Job-object memory caps and suspended-start helpers (Windows only).
 #[cfg(windows)]
 pub mod job;
+/// Launch-as-sandbox-account and DPAPI credential helpers (Windows only).
+#[cfg(windows)]
+mod logon;
+#[cfg(windows)]
+pub use logon::{Secret, unprotect_secure_string_hex};
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
@@ -118,6 +123,51 @@ impl Sandbox {
         }
     }
 
+    /// Build the restricted token for `workspace` from the *current* process
+    /// token without touching any ACL. Used by Ant's runner when it already
+    /// executes as the sandbox account: the workspace grants were applied by
+    /// the workspace owner beforehand (see [`Sandbox::grant_workspace_to_sid`]),
+    /// and the runner could not change the DACL anyway.
+    pub fn from_existing_grant(workspace: &std::path::Path) -> Result<Self, SandboxError> {
+        #[cfg(not(windows))]
+        {
+            let _ = workspace;
+            Err(SandboxError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            let workspace = workspace.canonicalize().map_err(|error| SandboxError::WorkspaceUnavailable {
+                path: workspace.to_path_buf(),
+                reason: error.to_string(),
+            })?;
+            let sid_string = sid::capability_sid_for_workspace(&workspace);
+            let capability = token::LocalSid::from_string(&sid_string)?;
+            let token = token::create_workspace_write_restricted_token(&capability)?;
+            Ok(Self { token, workspace, capability_sid: sid_string })
+        }
+    }
+
+    /// Grant `sid` (for example the sandbox account) the same write mask on
+    /// the workspace root that the capability SID gets. Idempotent; run by
+    /// the workspace owner before launching the runner as that account.
+    pub fn grant_workspace_to_sid(workspace: &std::path::Path, sid: &str) -> Result<(), SandboxError> {
+        #[cfg(not(windows))]
+        {
+            let _ = (workspace, sid);
+            Err(SandboxError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            let workspace = workspace.canonicalize().map_err(|error| SandboxError::WorkspaceUnavailable {
+                path: workspace.to_path_buf(),
+                reason: error.to_string(),
+            })?;
+            let principal = token::LocalSid::from_string(sid)?;
+            acl::grant_mask(&workspace, principal.as_ptr(), acl::WRITE_ALLOW_MASK)?;
+            acl::grant_null_device(principal.as_ptr())
+        }
+    }
+
     /// Spawn `argv` inside the sandbox in `cwd` with the given environment
     /// (already reduced to Ant's allowlist plus declared values by the
     /// caller). Standard handles are inherited from this process.
@@ -157,6 +207,31 @@ impl Sandbox {
             process::spawn(self.token.0, argv, cwd, environment, memory_limit_bytes)
                 .map(|inner| Child { inner })
         }
+    }
+}
+
+/// Start `argv` as the local sandbox account `user` (Secondary Logon,
+/// profile loaded), created suspended and resumed only after it joined a
+/// kill-on-close job and the optional memory cap applied. Fails closed.
+pub fn spawn_as_user(
+    user: &str,
+    #[cfg(windows)] password: &Secret,
+    #[cfg(not(windows))] password: &(),
+    argv: &[String],
+    cwd: &std::path::Path,
+    environment: &[(String, String)],
+    memory_limit_bytes: Option<u64>,
+) -> Result<Child, SandboxError> {
+    #[cfg(not(windows))]
+    {
+        let _ = (user, password, argv, cwd, environment, memory_limit_bytes);
+        Err(SandboxError::UnsupportedPlatform)
+    }
+    #[cfg(windows)]
+    {
+        let command_line = winutil::argv_to_command_line(argv);
+        logon::spawn_as_user(user, password, &command_line, cwd, environment, memory_limit_bytes)
+            .map(|inner| Child { inner })
     }
 }
 

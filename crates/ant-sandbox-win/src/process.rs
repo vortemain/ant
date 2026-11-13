@@ -191,9 +191,25 @@ pub(crate) fn spawn(
         });
     }
 
+    finish_spawn(process_info, cwd, memory_limit_bytes, memory_limit_bytes.is_some())
+}
+
+
+/// Shared tail for every spawn path: join a kill-on-close job, apply an
+/// optional memory cap, and resume the process if it was created suspended.
+/// When `suspended` is true the job assignment is mandatory (the process has
+/// run no code yet, so it must be confined before it starts); any failure
+/// terminates the never-resumed process.
+pub(crate) fn finish_spawn(
+    process_info: PROCESS_INFORMATION,
+    cwd: &Path,
+    memory_limit_bytes: Option<u64>,
+    suspended: bool,
+) -> Result<Child, SandboxError> {
     // Kill-on-close job: closing our ends terminates every process in the
-    // tree, including grandchildren. Assigned right after spawn; if the
-    // process already exited, assignment fails and cleanup is best-effort.
+    // tree, including grandchildren. For a non-suspended spawn it is assigned
+    // right after creation; if the process already exited, assignment fails
+    // and cleanup is best-effort.
     let mut job = None;
     let mut descendants_tracked = false;
     let mut info = win32job::ExtendedLimitInfo::new();
@@ -214,28 +230,55 @@ pub(crate) fn spawn(
         descendants_tracked,
         job,
     };
-    if let Some(limit) = memory_limit_bytes {
-        // Fail closed: a requested cap that cannot be applied means the
-        // (still suspended) process is terminated, never run uncapped.
-        let applied = match child.job.as_ref() {
-            Some(job) => crate::job::set_job_memory_limit(job, limit),
-            None => Err(SandboxError::ConfinementUnavailable {
-                path: cwd.to_path_buf(),
-                reason: "memory limit requested but the process could not join a job object".to_owned(),
-            }),
-        };
-        if let Err(error) = applied {
-            // SAFETY: handle is open; the process never ran user code.
-            unsafe { TerminateProcess(child.process.hProcess, 1) };
-            return Err(error);
-        }
-        // SAFETY: `hThread` is the owned primary-thread handle of the
-        // suspended process.
-        if unsafe { ResumeThread(child.process.hThread) } == u32::MAX {
-            let code = unsafe { GetLastError() };
-            unsafe { TerminateProcess(child.process.hProcess, 1) };
-            return Err(SandboxError::Windows { call: "ResumeThread", code });
-        }
+    if !suspended {
+        return Ok(child);
+    }
+    // Fail closed: a suspended process that cannot be confined (job, and
+    // memory cap when requested) is terminated and never runs.
+    let applied = match (child.job.as_ref(), memory_limit_bytes) {
+        (None, _) => Err(SandboxError::ConfinementUnavailable {
+            path: cwd.to_path_buf(),
+            reason: "the suspended process could not join a job object".to_owned(),
+        }),
+        (Some(job), Some(limit)) => crate::job::set_job_memory_limit(job, limit),
+        (Some(_), None) => Ok(()),
+    };
+    if let Err(error) = applied {
+        // SAFETY: handle is open; the process never ran user code.
+        unsafe { TerminateProcess(child.process.hProcess, 1) };
+        return Err(error);
+    }
+    // SAFETY: `hThread` is the owned primary-thread handle of the suspended
+    // process.
+    if unsafe { ResumeThread(child.process.hThread) } == u32::MAX {
+        let code = unsafe { GetLastError() };
+        unsafe { TerminateProcess(child.process.hProcess, 1) };
+        return Err(SandboxError::Windows { call: "ResumeThread", code });
     }
     Ok(child)
+}
+
+/// Point `startup`'s standard handles at this process's own (made
+/// inheritable) so the child's output stays visible and capturable.
+pub(crate) fn attach_std_handles(startup: &mut STARTUPINFOW) -> Result<(), SandboxError> {
+    startup.dwFlags |= STARTF_USESTDHANDLES;
+    let mut std_handles: [(u32, *mut HANDLE); 3] = [
+        (STD_INPUT_HANDLE, &mut startup.hStdInput),
+        (STD_OUTPUT_HANDLE, &mut startup.hStdOutput),
+        (STD_ERROR_HANDLE, &mut startup.hStdError),
+    ];
+    for (kind, target) in std_handles.iter_mut() {
+        // SAFETY: `kind` is a valid std-handle id.
+        let handle = unsafe { GetStdHandle(*kind) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(SandboxError::Windows { call: "GetStdHandle", code: unsafe { GetLastError() } });
+        }
+        // SAFETY: `handle` is owned by this process.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+            return Err(SandboxError::Windows { call: "SetHandleInformation", code: unsafe { GetLastError() } });
+        }
+        // SAFETY: `target` points at a live field of `startup`.
+        unsafe { **target = handle };
+    }
+    Ok(())
 }

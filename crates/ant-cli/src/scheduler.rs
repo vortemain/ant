@@ -164,13 +164,13 @@ pub struct Capacity {
 }
 
 /// Plan-run settings chosen on the command line.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct RunOptions {
     pub capacity: Capacity,
     pub keep_going: bool,
-    pub sandbox: bool,
-    /// Enforce each action's declared `memory_mb` as a job-wide cap.
-    pub enforce_memory: bool,
+    /// How each action executes (direct, sandboxed, network-isolated) and
+    /// whether declared memory is enforced.
+    pub exec: cache_runner::ExecConfig,
 }
 
 /// Clamp an action's request to the run capacity. Returns the weight and
@@ -207,13 +207,10 @@ struct Shared {
     first_error: Mutex<Option<String>>,
     /// Serializes human-readable status lines so lines do not interleave.
     output: Mutex<()>,
-    /// Whether actions run inside the restricted-token sandbox. Read by
-    /// workers to choose the executor path; set once at plan start.
-    sandbox: bool,
+    /// How actions execute; read by workers, set once at plan start.
+    exec: cache_runner::ExecConfig,
     /// Cache participation (`--cache-dir`); mechanics behind the D-003 gate.
     participant: CacheParticipant,
-    /// `--enforce-memory`: declared `memory_mb` becomes a job-wide cap.
-    enforce_memory: bool,
 }
 
 impl Shared {
@@ -321,7 +318,7 @@ fn run_sequential(
     participant: &CacheParticipant,
     events: &Mutex<EventStream>,
 ) -> PlanResult {
-    let RunOptions { keep_going, sandbox, enforce_memory, .. } = options;
+    let RunOptions { keep_going, exec, .. } = options;
     let mut executed_ids = BTreeSet::new();
     let mut termination = Termination::Success;
     // Actions that did not succeed (failed or never ran); with keep-going,
@@ -340,7 +337,7 @@ fn run_sequential(
         println!("action={id} status=started");
         events.lock().expect("events lock").emit(EventKind::ActionStarted { action_id: id.clone() });
         executed_ids.insert(id.clone());
-        match cache_runner::run_action(participant, workspace, &task.action, cancellation, sandbox, enforce_memory) {
+        match cache_runner::run_action(participant, workspace, &task.action, cancellation, exec) {
             Ok(ActionRun::Reused { candidate, input_digests, output_digests }) => {
                 println!("action={id} status=reused");
                 print_digests("input", &input_digests);
@@ -500,9 +497,8 @@ fn run_parallel(
         cancelled: AtomicBool::new(false),
         first_error: Mutex::new(None),
         output: Mutex::new(()),
-        sandbox: options.sandbox,
+        exec: options.exec,
         participant,
-        enforce_memory: options.enforce_memory,
     });
     let workspace = workspace.to_path_buf();
     let cancellation = cancellation.clone();
@@ -636,8 +632,7 @@ fn run_task(
         workspace,
         &shared.tasks[index].action,
         cancellation,
-        shared.sandbox,
-        shared.enforce_memory,
+        shared.exec,
     ) {
         Ok(run) => run,
         Err(ExecutionError::Cancelled) => {

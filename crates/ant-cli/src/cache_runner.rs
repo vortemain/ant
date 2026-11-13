@@ -12,6 +12,7 @@
 use build_action::{Action, OutputKind};
 use build_cache::Cache;
 use build_digest::{ActionKeyCandidate, ContentDigest, ExecutionFingerprint};
+use local_executor::IsolatedAccount;
 use local_executor::{self, ActionContentDigest, CancellationToken, ExecutionError, ExecutionResult, PreparedAction};
 use std::path::Path;
 
@@ -80,19 +81,33 @@ impl CacheParticipant {
 /// Cache failures never fail the build: a failed lookup or restore is a miss
 /// and the action executes; a failed store is reported as a warning. Only
 /// preparation, key computation, and execution errors are fatal.
+/// How actions execute: direct, write-confined (`--sandbox`), or
+/// write-confined and network-isolated as the sandbox account
+/// (`--network-isolated`, which implies `sandbox`).
+#[derive(Clone, Copy)]
+pub struct ExecConfig {
+    pub sandbox: bool,
+    pub enforce_memory: bool,
+    pub isolated: Option<&'static IsolatedAccount>,
+}
+
 pub fn run_action(
     participant: &CacheParticipant,
     workspace: &Path,
     action: &Action,
     cancellation: &CancellationToken,
-    sandbox: bool,
-    enforce_memory: bool,
+    exec: ExecConfig,
 ) -> Result<ActionRun, ExecutionError> {
+    let ExecConfig { sandbox, enforce_memory, isolated } = exec;
     let mut prepared = local_executor::prepare_with_metadata(workspace, action)?;
     if enforce_memory {
         prepared.enforce_memory_limit();
     }
-    let fingerprint = if sandbox {
+    // Only the executor that runs as the verified, firewall-scoped sandbox
+    // account may declare network isolation (D-013).
+    let fingerprint = if isolated.is_some() {
+        ExecutionFingerprint::local_network_isolated(workspace)
+    } else if sandbox {
         ExecutionFingerprint::local_sandboxed(workspace)
     } else {
         ExecutionFingerprint::local_metadata_fingerprinting(workspace)
@@ -118,7 +133,7 @@ pub fn run_action(
         });
     }
 
-    let result = execute_prepared_choice(&prepared, cancellation, sandbox)?;
+    let result = execute_prepared_choice(&prepared, cancellation, sandbox, isolated)?;
     let mut store_warning = None;
     if result.success()
         && !result.cancelled
@@ -148,8 +163,11 @@ fn execute_prepared_choice(
     prepared: &PreparedAction,
     cancellation: &CancellationToken,
     sandbox: bool,
+    isolated: Option<&IsolatedAccount>,
 ) -> Result<ExecutionResult, ExecutionError> {
-    if sandbox {
+    if let Some(account) = isolated {
+        local_executor::execute_network_isolated_prepared(prepared, cancellation, account)
+    } else if sandbox {
         local_executor::execute_sandboxed_prepared(prepared, cancellation)
     } else {
         local_executor::execute_prepared(prepared, cancellation)

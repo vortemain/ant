@@ -21,6 +21,11 @@ local-executor = { path = "../local-executor" }
 serde.workspace = true
 serde_json.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# DPAPI credential decryption and the sandbox runner's own-token restriction
+# for network isolation (D-013). Safe API; the FFI lives in that crate.
+ant-sandbox-win = { path = "../ant-sandbox-win" }
+
 [dependencies.ctrlc]
 # Installs a cooperative Ctrl+C handler that cancels running actions instead of
 # terminating the process without cleanup. Justified in docs/plan.md.

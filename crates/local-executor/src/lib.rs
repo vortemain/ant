@@ -492,6 +492,146 @@ pub fn execute_sandboxed_prepared(
     })
 }
 
+/// The dedicated, firewall-scoped sandbox account an action runs as for
+/// network isolation (decision D-013), plus the path of Ant's own runner
+/// executable that is launched as that account.
+#[cfg(windows)]
+pub struct IsolatedAccount {
+    pub user: String,
+    pub user_sid: String,
+    pub password: ant_sandbox_win::Secret,
+    pub runner: PathBuf,
+}
+
+/// Placeholder so callers compile on every platform; network isolation is
+/// Windows-only and fails closed elsewhere.
+#[cfg(not(windows))]
+pub struct IsolatedAccount {
+    _private: (),
+}
+
+/// Execute a prepared action write-confined *and* network-isolated: the
+/// workspace is granted to the sandbox account (and the per-workspace
+/// capability SID), then Ant's runner is started as that account via
+/// Secondary Logon — suspended, joined to a kill-on-close job (plus the
+/// optional memory cap), then resumed. The runner restricts its own token and
+/// runs the action. The firewall rules scoped to the account apply to the
+/// runner and every descendant. Cancellation/timeout terminate the job;
+/// inputs and outputs are verified exactly as on the other paths.
+#[cfg(windows)]
+pub fn execute_network_isolated_prepared(
+    prepared: &PreparedAction,
+    cancellation: &CancellationToken,
+    account: &IsolatedAccount,
+) -> Result<ExecutionResult, ExecutionError> {
+    use std::os::windows::process::ExitStatusExt as _;
+
+    let action = &prepared.action;
+    if cancellation.is_cancelled() {
+        return Err(ExecutionError::Cancelled);
+    }
+    // Workspace owner applies both grants; the runner cannot change the DACL.
+    ant_sandbox_win::Sandbox::prepare(&prepared.workspace)
+        .map_err(|error| ExecutionError::Sandbox(error.to_string()))?;
+    ant_sandbox_win::Sandbox::grant_workspace_to_sid(&prepared.workspace, &account.user_sid)
+        .map_err(|error| ExecutionError::Sandbox(error.to_string()))?;
+    let requested_cwd = prepared.workspace.join(&action.working_directory);
+    let cwd = requested_cwd.canonicalize().map_err(|source| {
+        ExecutionError::WorkspaceUnavailable { path: requested_cwd.clone(), source }
+    })?;
+    let cwd = strip_verbatim_prefix(&cwd);
+    let workspace = strip_verbatim_prefix(&prepared.workspace);
+
+    let mut environment: Vec<(String, String)> = build_digest::local_runtime_environment()
+        .into_iter()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+        .collect();
+    environment.extend(action.environment.iter().cloned());
+
+    let mut runner_argv = vec![
+        account.runner.to_string_lossy().into_owned(),
+        "__sandbox-runner".to_owned(),
+        "--workspace".to_owned(),
+        workspace.to_string_lossy().into_owned(),
+        "--".to_owned(),
+    ];
+    runner_argv.extend(action.argv.iter().cloned());
+    let mut child = ant_sandbox_win::spawn_as_user(
+        &account.user,
+        &account.password,
+        &runner_argv,
+        &cwd,
+        &environment,
+        prepared.memory_limit_bytes,
+    )
+    .map_err(|error| match prepared.memory_limit_bytes {
+        Some(_) => ExecutionError::ResourceLimit(error.to_string()),
+        None => ExecutionError::Sandbox(error.to_string()),
+    })?;
+    let timeout = action.timeout_ms.map(Duration::from_millis);
+    let (code, cancelled, timed_out) = wait_sandboxed_child(&mut child, cancellation, timeout)?;
+    let status = ExitStatus::from_raw(code);
+    let mut output_digests = Vec::new();
+    if status.success() && !cancelled && !timed_out {
+        output_digests = verify_inputs_and_digest_outputs(prepared)?;
+    }
+    Ok(ExecutionResult {
+        action_id: action.id.clone(),
+        status,
+        cancelled,
+        timed_out,
+        input_digests: prepared.input_digests.clone(),
+        output_digests,
+        memory_limit_bytes: prepared.memory_limit_bytes,
+        peak_memory_bytes: child.peak_memory_bytes(),
+    })
+}
+
+/// Non-Windows stub: network isolation is Windows-only; fails closed.
+#[cfg(not(windows))]
+pub fn execute_network_isolated_prepared(
+    _prepared: &PreparedAction,
+    _cancellation: &CancellationToken,
+    _account: &IsolatedAccount,
+) -> Result<ExecutionResult, ExecutionError> {
+    Err(ExecutionError::Sandbox(
+        "network isolation is implemented for Windows only".to_owned(),
+    ))
+}
+
+/// Poll a sandbox child every 40ms for exit, cancellation, or timeout;
+/// returns `(exit_code, cancelled, timed_out)`.
+#[cfg(windows)]
+fn wait_sandboxed_child(
+    child: &mut ant_sandbox_win::Child,
+    cancellation: &CancellationToken,
+    timeout: Option<Duration>,
+) -> Result<(u32, bool, bool), ExecutionError> {
+    let start = Instant::now();
+    let drain = |child: &mut ant_sandbox_win::Child| -> Result<u32, ExecutionError> {
+        loop {
+            match child.try_wait().map_err(|error| ExecutionError::Sandbox(error.to_string()))? {
+                Some(code) => return Ok(code),
+                None => std::thread::sleep(Duration::from_millis(40)),
+            }
+        }
+    };
+    loop {
+        if cancellation.is_cancelled() {
+            child.terminate();
+            return Ok((drain(child)?, true, false));
+        }
+        if let Some(code) = child.try_wait().map_err(|error| ExecutionError::Sandbox(error.to_string()))? {
+            return Ok((code, false, false));
+        }
+        if timeout.is_some_and(|limit| start.elapsed() >= limit) {
+            child.terminate();
+            return Ok((drain(child)?, false, true));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
 /// Non-Windows stub: the restricted-token sandbox is Windows-only (decision
 /// D-007). Fails closed rather than executing unsandboxed.
 #[cfg(not(windows))]

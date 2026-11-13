@@ -386,6 +386,20 @@ impl ExecutionFingerprint {
         fingerprint.capabilities.sandboxed = true;
         fingerprint
     }
+
+    /// Fingerprint for the network-isolated sandbox (decision D-013): the
+    /// action runs write-confined *as the dedicated sandbox account*, whose
+    /// SID is the only scope of block-all firewall rules verified (by
+    /// `ant sandbox status`) immediately before the run. Only that executor
+    /// may use this constructor; it is the one that truthfully declares
+    /// `network_isolation`. Known residual channel, documented in
+    /// `docs/sandbox/network-isolation.md`: name resolution through the
+    /// system DNS client service runs as another account and is not blocked.
+    pub fn local_network_isolated(workspace: &Path) -> Self {
+        let mut fingerprint = Self::local_sandboxed(workspace);
+        fingerprint.capabilities.network_isolation = true;
+        fingerprint
+    }
 }
 
 /// The actual OS version reported by the running system. Captured so the key

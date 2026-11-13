@@ -15,6 +15,7 @@ dependencies = [
 name = "ant-cli"
 version = "0.1.0"
 dependencies = [
+ "ant-sandbox-win",
  "build-action",
  "build-adapter",
  "build-cache",
