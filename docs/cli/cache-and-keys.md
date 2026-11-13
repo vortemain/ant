@@ -62,6 +62,6 @@ plan=C:\dev\proj\plan.json explain=complete result=prepared
 - `status=prepared` — every declared input exists, has the declared type, and is inside the workspace; the digests shown are exactly what a subsequent `ant run` would verify against.
 - `status=prepare_failed error=…` — the action could not be prepared (typically a missing input). The command exits 1 after reporting all actions.
 - `blocker=…` — one line per cacheability blocker, with stable labels.
-- `cache_entry=present|absent` — reported only when `--cache-dir` is given, and only a fact about that directory: **Ant does not perform cache lookup, storage, or reuse in `ant run` yet.** The local content-addressed cache library exists and is unit-tested, but wiring reuse into the run path is deferred until an executor can truthfully report sandboxing, network isolation, and metadata fingerprinting, because those capabilities gate eligibility.
+- `cache_entry=present|absent` — reported only when `--cache-dir` is given, and only a fact about that directory: `ant run --plan --cache-dir` performs lookup, storage, and reuse only for blocker-free keys; the only executor that can produce them is `--network-isolated` (decision D-013; see [local execution](local-execution.md)). `plan explain` itself never stores or reuses.
 
 `--cache-dir` and `--workspace` are accepted only by `plan explain` and are rejected elsewhere.

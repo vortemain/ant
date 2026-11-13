@@ -1,6 +1,6 @@
 # Benchmark plan (baseline)
 
-**Status:** Method defined; workloads and results not yet available. No performance claims are made.
+**Status:** Method defined. First synthetic results: [2026-11-13 cold vs. warm cache under network isolation](2026-11-13-cache-cold-warm.md) (single machine; characterizes overheads; no speedup claims). No real-project workloads yet.
 
 ## Workload selection
 

@@ -1,6 +1,34 @@
 # Network isolation options (Windows)
 
-**Status:** investigation complete (2026-11-13). Decision recorded in `docs/plan.md` D-009: Ant keeps `network_isolation = false`, so cache reuse cannot happen (D-003; since the T2.8 addendum the lookup/store/restore mechanics are wired behind the blocker gate, and the gate stays closed exactly because this blocker is live). No mechanism evaluated here can be truthfully declared by the current restricted-token executor, and no code was added that pretends otherwise.
+**Status:** option A **implemented and verified on Windows 11** (2026-11-13, T2.9–T2.10, decision D-013) as the opt-in `ant run --plan --network-isolated` mode. The plain restricted-token executor (`--sandbox`) still cannot declare network isolation and stays gated. The investigation below (D-009) is kept as the rationale.
+
+## Implementation (D-013)
+
+**One-time elevated setup** — `ant sandbox setup` (embeds `scripts/sandbox/setup.ps1`; `--dry-run` lists the changes without admin; `ant sandbox teardown` reverts everything):
+
+- local group `AntSandboxUsers` and local account `AntSandboxOffline` (CSPRNG 32-char password, never expires, member of Users so it may log on, hidden from the sign-in screen via `SpecialAccounts\UserList`);
+- Windows Firewall rules `AntSandbox-BlockOutbound` / `AntSandbox-BlockInbound`: block, all protocols, all profiles, scoped with `-LocalUser "O:LSD:(A;;CC;;;<account SID>)"` so they match **only** that account's traffic; read back after creation;
+- refuses to proceed when a group policy overrides local rules (`LocalPolicyModifyState != 0`) or any firewall profile is disabled;
+- the password is stored only as a current-user DPAPI blob (`%LOCALAPPDATA%\Ant\sandbox\offline.cred`, via `ConvertFrom-SecureString`) — never printed, logged, or put in plans, keys, or events; a versioned marker (`setup.json`) records the account SID and the Windows user it was installed for.
+
+**Per-run verification (fail closed)** — every `--network-isolated` run first executes the embedded `status.ps1` (non-elevated): marker version, installed-for-this-user, account present and enabled with the recorded SID, credential decryptable, no policy override, all profiles enabled, both rules present as enabled blocks scoped to the SID. Any failure aborts the run before an action starts.
+
+**Run path** — a non-elevated process cannot hand another user's token to `CreateProcessAsUserW` (needs `SeAssignPrimaryTokenPrivilege`), so Ant starts **its own runner** (`ant __sandbox-runner`) as the account through the Secondary Logon service (`CreateProcessWithLogonW`, profile loaded), **suspended**, joins it to a kill-on-close job (plus the `--enforce-memory` cap when requested), and only then resumes it. The runner restricts *its own* token for the workspace (the same `WRITE_RESTRICT` capability-SID token as `--sandbox`; allowed for any caller) and runs the action. Before launch, the workspace owner grants the per-workspace capability SID and the account SID write access to the workspace root. The action's key is computed with `ExecutionFingerprint::local_network_isolated` (sandboxed + network-isolated + metadata fingerprinting).
+
+**Verified on this machine** (end-to-end tests skip with a printed reason when the setup is absent):
+
+- `whoami` inside the action reports `antsandboxoffline`; the same plan without the flag reports the real user;
+- `curl.exe https://1.1.1.1/` connects without the flag (HTTP 301) and fails under it in ~1 ms with `WSAEACCES` ("Bad access") — a local firewall refusal, not a timeout;
+- write confinement still holds (writing `C:\Projects\…` outside the workspace is denied even though `Authenticated Users` may write there);
+- the action key reports no executor blockers, so the cache gate opens: store → delete output → `status=reused` with the output restored and integrity-checked → changed input rebuilds; the same plan under `--sandbox` alone stays gated on `network-isolation-unavailable`.
+
+**Honest limits**
+
+- **DNS resolution still leaves the machine.** Name lookups go through the system DNS Client service, which runs as another account and is not matched by the account-scoped rules (verified: `example.com` resolves under isolation, then the connect is refused). Data could be exfiltrated or fetched through DNS queries/responses. D-013 accepts this residual channel for cache gating because it requires deliberately crafted DNS tunnelling; it is not an adversarial boundary (consistent with `windows-design.md`).
+- **Loopback traffic is not verified as blocked** (Windows Firewall does not filter loopback by default); local services on the machine may be reachable.
+- **Toolchains in the user profile are unreadable** to the account (for example `~/.cargo`, `~/.rustup`, per-user Node installs), so most adapter-generated plans fail under this mode unless their toolchains are installed machine-wide. Proven workloads use System32 tools.
+- **Windows PowerShell falls into Constrained Language Mode** as the account unless `TEMP`/`TMP` point at a writable location (declare workspace-relative `TEMP`/`TMP`, as adapter plans do).
+- Network granularity is **per machine** (one shared account); write granularity stays per workspace. Single-command `ant run` does not support the mode yet.
 
 ## The requirement
 
@@ -47,7 +75,7 @@ The `ALE_USER_ID` / `LocalUserAuthorizedList` scope matches the **user SID of th
 2. Run path (only when setup is present and valid): `LogonUser(offline)` → `CreateRestrictedToken` from that token with the workspace capability SID (filesystem confinement unchanged) → `CreateProcessAsUserW`; grant the workspace ACL to a SID the sandbox token contains (already deterministic per workspace).
 3. Honest consequences to design for: the offline user's profile/TEMP are different paths (environment allowlist must not leak the real user's TEMP); the same offline user is shared across workspaces, so network granularity is per-machine, while write granularity stays per-workspace; uninstall/teardown must remove users and rules; `LogonUser` failure or a missing/invalid setup marker fails closed.
 
-None of this is implemented. Until it is — or option B/C matures — `network_isolation` stays false, `network-isolation-unavailable` remains a live blocker, and the cache gate stays closed per D-003.
+This sketch is now implemented as described in the Implementation section above (D-013). For every executor other than `--network-isolated`, `network_isolation` stays false and the cache gate stays closed per D-003.
 
 ## References
 
