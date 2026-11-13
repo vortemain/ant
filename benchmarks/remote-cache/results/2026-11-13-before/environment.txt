@@ -1,0 +1,9 @@
+date_utc=2026-11-13T15:23:52Z
+commit=e503db9
+cpu=AMD EPYC 9V74 80-Core Processor
+cores=4
+ram_gib=15.6
+os=Ubuntu 26.04.1 LTS kernel 7.0.0-1019-azure
+rustc=rustc 1.95.0 (59807616e 2026-04-14)
+bwrap=bubblewrap 0.11.1
+reps=3
