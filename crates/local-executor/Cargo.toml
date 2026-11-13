@@ -1,0 +1,23 @@
+[package]
+name = "local-executor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Direct local process executor for declared build actions"
+
+[dependencies]
+build-action = { path = "../build-action" }
+build-digest = { path = "../build-digest" }
+
+[target.'cfg(windows)'.dependencies]
+# Safe wrapper for Windows job objects; used to terminate descendant processes
+# of a cancelled or timed-out action. Justified in docs/plan.md decision log.
+win32job = "2.1.0"
+# Windows restricted-token filesystem sandbox. Justified in docs/plan.md
+# decision D-007 and docs/sandbox/windows-design.md. The crate exposes a safe
+# Rust API; the FFI boundary lives entirely inside it.
+ant-sandbox-win = { path = "../ant-sandbox-win" }
+
+[lints]
+workspace = true

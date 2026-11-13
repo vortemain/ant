@@ -1,0 +1,30 @@
+[package]
+name = "ant-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Local-first universal build infrastructure command line"
+
+[[bin]]
+name = "ant"
+path = "src/main.rs"
+
+[dependencies]
+build-action = { path = "../build-action" }
+build-adapter = { path = "../build-adapter" }
+build-cache = { path = "../build-cache" }
+build-digest = { path = "../build-digest" }
+build-events = { path = "../build-events" }
+build-graph = { path = "../build-graph" }
+local-executor = { path = "../local-executor" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dependencies.ctrlc]
+# Installs a cooperative Ctrl+C handler that cancels running actions instead of
+# terminating the process without cleanup. Justified in docs/plan.md.
+version = "3.5.2"
+
+[lints]
+workspace = true

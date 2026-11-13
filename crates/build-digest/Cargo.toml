@@ -1,0 +1,18 @@
+[package]
+name = "build-digest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Stable SHA-256 content and action digests"
+
+[dependencies]
+build-action = { path = "../build-action" }
+sha2.workspace = true
+# Reports the running OS name/version so the platform version in the action
+# key is a captured fact rather than a permanent blocker. Justified in
+# docs/plan.md (D-007); the same crate Cargo itself uses for its user agent.
+os_info.workspace = true
+
+[lints]
+workspace = true

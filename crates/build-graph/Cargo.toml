@@ -1,0 +1,17 @@
+[package]
+name = "build-graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Deterministic dependency graph for build actions"
+
+[dependencies]
+build-action = { path = "../build-action" }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

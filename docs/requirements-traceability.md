@@ -1,0 +1,42 @@
+# Requirements traceability (initial)
+
+This matrix groups requirements from the user-provided master specification by section. It is a navigation and ownership map, not a claim of completion. Detailed acceptance criteria are staged in `plan.md`; a future owner should split rows as implementation begins.
+
+| Spec section | Requirement group | Architecture owner | Work item / validation evidence | Acceptance condition |
+|---|---|---|---|---|
+| 1 | Local-first, common execution semantics, security, measured claims, openness | Core domain + all modes | M0 architecture; M1 local slice; later mode milestones | One versioned request/action model; no false support/performance claims |
+| 2.1 | Local daemon, watch, incremental cache, resource-aware parallelism, offline, diagnostics | local runtime, scheduler, cache | M1-M2; offline and constrained-machine scenarios; M2 foundation (T2.1-T2.8): executor prepare split, capability-driven key blockers, `build-cache` CAS library, `ant plan explain`, truthful platform/metadata fingerprinting, the Windows restricted-token filesystem sandbox (`ant-sandbox-win`) wired into `ant run --sandbox` (confinement integration tests + e2e verify inside-write success, outside-write fails closed, exit codes propagate), and cache lookup/store/reuse wired behind the blocker gate via `ant run --plan --cache-dir` (gate-closed e2e test) | Local workflow usable without account; limits and invalidation explained; cache mechanics wired but reuse gated on network isolation, which no executor truthfully provides yet (restricted tokens cannot block network, D-003 addendum + D-009) |
+| 2.2 | Self-hosted VPS, auth, queue, worker lifecycle, storage, operations | coordinator, worker, API, storage | M4 integration/security/operations acceptance | Remote real build and verified artifact; backup/upgrade procedures |
+| 2.3 | Hybrid placement and policy | hybrid planner + scheduler | M6 transfer/queue/runtime measurement | Placement explains decision and honors constraints |
+| 2.4 | Multi-tenant managed service, elastic workers, metering | managed control plane | M8, only if product pursued | Isolation, quota, region, cost and operational controls validated |
+| 2.5 | Enterprise identity, governance, provenance, HA, air-gap | control plane/security/ops | M7 | Deployment model and controls exercised and documented |
+| 3 | Competitive research across build systems, bundlers, infrastructure, CI | research | T0.4 dossiers in `research.md` | Each candidate gets dated evidence, confidence, strengths/tradeoffs and implications |
+| 4, 4.1 | Modular Rust architecture, clear dependencies, no empty-crate sprawl | workspace/domain | T0.3, T1.1 | Crate boundaries justify ownership and dependency direction |
+| 4.2 | Language-agnostic actions; declared inputs/outputs; secrets; constraints; cautious cacheability | build-action | T1.2 schema/validation review | Versioned contract rejects invalid declarations; secret values absent; cache default safe |
+| 4.3 | DAG, incremental update, cycle detection, critical path, serialization | build-graph | Future graph slice | Correct graph invariants, deterministic debug representation, bounded large-graph cost |
+| 4.4 | Resource/policy/fair scheduling, backpressure, cancellation | scheduler | local then remote load tests; T1.17: local resource-weighted admission (`resources` requests vs `--jobs`/`--memory-mb` capacity, strict FIFO no-starvation, clamping; unit + overlap-probe e2e evidence, D-011); runtime enforcement, cross-run fairness and remote load tests remain | End-to-end successful completion and fairness measured; starvation/cancel tested |
+| 4.5 | Unified execution, transfer, cancellation, retries, compatibility | executor API/protocol | M1/M4/M6 | Local/remote results map to common model; REAPI claims limited to conformance |
+| 4.6 | Rust safety, errors, bounded async, fuzz/property tests, audits | all Rust crates | CI/quality work | Stable toolchain; explicit errors; unsafe justified; quality gates recorded |
+| 5 | Local efficiency, incremental correctness, cache integrity and explainability | scheduler/cache/watch | M2 + benchmark lab; T2.3-T2.8 evidence (CAS change-scenario unit tests, explain diagnostics e2e, metadata-sensitive key proof, sandbox confinement integration + e2e tests, gate-closed cache-participation e2e) | Input changes invalidate correctly; cache identity complete; measured resource profile |
+| 6 | Dependencies/toolchains, versions, provenance, signatures, SBOM | dependency/toolchain/security/artifact | M3/M7 | Reproducible toolchain identity; verified output metadata |
+| 7 | Sandboxing, secret management, policies, threat model | security/sandbox | `docs/sandbox/windows-design.md` (design + implementation + honest limitations); M1/M4 controls; first-line write confinement implemented and verified (T2.6); adversarial hardening and network enforcement remain open | Threats map to enforced controls and security validation; current sandbox is first-line write confinement only, not an adversarial boundary |
+| 8 | CLI UX and command structure | CLI | T0.3 IA; M1 | Local discover/plan/run/inspect workflows with actionable errors |
+| 9 | Desktop/web app | GUI/control plane | M5 | Real API data, working workflows, accessibility, no fake production states |
+| 10 | Installation, deployment, updates and operations | packaging/operations | M4/M7 | Reproducible install, health, backup, restore, rollback docs tested |
+| 11 | GUI information architecture and design quality | GUI/design system | M5 | Live/historical/estimated data distinguished; keyboard/accessibility states |
+| 12 | Event model, telemetry, build intelligence | event-model/observability | M1 foundation, expanded M4+ | Structured correlated events; measured facts distinct from estimates |
+| 13 | Versioned APIs, SDKs, plugin boundaries, integrations | protocol/plugin API | M3 started (T3.1-T3.5): in-process adapter contract (`build-adapter` trait → canonical `build-graph::PlanFile`) with two real adapters (Cargo and npm) and the `ant adapt` CLI (including single-match auto-selection and `--detect` per-adapter diagnostics, T3.5), both proven end-to-end adapt → run → real artifact, and generated plans now run under `ant run --sandbox` (workspace-relative scratch-directory redirect); external plugin protocol and REAPI conformance remain M4/M8 work | M4/M8 | Compatibility and permission model; conformance suite for claimed support |
+| 14 | Persistence, tenancy, migrations, export, retention | local DB/server DB/object store | M2/M4/M7 | Tested migrations, isolation, retention and restore; no plaintext secrets |
+| 15 | Unit through chaos tests; correctness scenarios; benchmark laboratory; gates | quality/benchmark | `benchmarks/methodology.md`; every milestone | Applicable validation passes; raw reproducible benchmark data retained |
+| 16 | Reliability, shutdown, retries, incident response, DR | runtime/operations | M4/M7 | Failure paths, SLO evidence, runbooks and recovery exercised |
+| 17 | License, governance, commercial options | project governance | M0 decision; revisit pre-release | License chosen with dependency and business implications documented |
+| 18 | Dependency-aware stage roadmap | program plan | `plan.md` | Exit criteria met before claiming milestone done |
+| 19 | Required docs | documentation owners | per milestone | Docs describe current behavior and limitations |
+| 20 | Agent operating procedure, safe work, multi-agent coordination | repository governance | `AGENTS.md` | Successor can identify owned work, contracts, state, risks and validation |
+| 21 | Definition of done | release process | all milestones | Capability has relevant implementation, tests, security, observability, docs, compatibility evidence |
+| 22 | Immediate initial assignment | architecture/research/implementation | T0.1-T1.2 | Repo baseline, research, traceability, diagrams/contracts, benchmark plan and first real slice |
+| 23 | Product outcome across users/modes | product architecture | roadmap | Scope expands only with validated workloads and honest capability support |
+
+## Cross-cutting acceptance checklist
+
+For every capability: documented requirements; owned contract; implementation integrated; success and failure behavior; security boundary; observable events/diagnostics; tests appropriate to risk; API/compatibility notes; performance evidence where relevant; user/operator docs; disclosed limitations. Do not mark done based on scaffolding alone.

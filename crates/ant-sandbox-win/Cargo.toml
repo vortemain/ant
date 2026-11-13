@@ -1,0 +1,33 @@
+[package]
+name = "ant-sandbox-win"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Windows restricted-token filesystem sandbox for the local executor"
+
+[dependencies]
+# Hashes the canonical workspace path into a deterministic capability SID.
+sha2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Raw Win32 bindings. All `unsafe` in this crate lives behind the small,
+# documented API in this crate only; see the crate-level audit notes in
+# src/lib.rs and docs/sandbox/windows-design.md.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+] }
+# Safe wrapper for Windows job objects (descendant cleanup), shared with the
+# direct local executor. Justified in docs/plan.md decision D-006.
+win32job = "2.1.0"
+
+# NOTE: this crate deliberately does NOT inherit `[lints] workspace = true`.
+# The workspace-wide `unsafe_code = "forbid"` discipline cannot express the
+# audited FFI boundary this crate owns. Every unsafe block must satisfy the
+# audit contract documented in docs/sandbox/windows-design.md; the API surface
+# exposed to the rest of the workspace is safe Rust.

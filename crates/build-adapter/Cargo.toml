@@ -1,0 +1,17 @@
+[package]
+name = "build-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Adapter contract that turns real build systems into Ant plans"
+
+[dependencies]
+build-action = { path = "../build-action" }
+build-digest = { path = "../build-digest" }
+build-graph = { path = "../build-graph" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "build-action"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Canonical build action contract for the universal build infrastructure"
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "build-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Content-addressed local cache for verified build action outputs"
+
+[dependencies]
+build-action = { path = "../build-action" }
+build-digest = { path = "../build-digest" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
