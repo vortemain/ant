@@ -90,6 +90,16 @@ pub struct Sandbox {
     pub capability_sid: String,
 }
 
+impl std::fmt::Debug for Sandbox {
+    /// Shows where the sandbox is scoped, never the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sandbox")
+            .field("workspace", &self.workspace)
+            .field("capability_sid", &self.capability_sid)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Sandbox {
     /// Prepare a write-confined sandbox for `workspace`:
     /// canonicalize, derive the capability SID, grant it write access on the

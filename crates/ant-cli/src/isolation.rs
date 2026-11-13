@@ -11,6 +11,7 @@
 //!   *as the sandbox account*: it restricts its own token for the workspace
 //!   and runs the action, exiting with the action's exit code.
 
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -103,7 +104,9 @@ pub fn sandbox_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Re
     Ok(if ok { 0 } else { 1 })
 }
 
-/// Facts parsed from a passing status check.
+/// Facts parsed from a passing status check. Only consumed on Windows (the
+/// parser is unit-tested on every platform).
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Status {
     pub user: String,
@@ -112,6 +115,7 @@ pub struct Status {
 
 /// Parse status-script output; `None` unless it reported `ready=true` with a
 /// user and SID and no `failed=` line.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn parse_status(text: &str) -> Option<Status> {
     let mut user = None;
     let mut user_sid = None;
@@ -137,6 +141,7 @@ pub fn parse_status(text: &str) -> Option<Status> {
     }
 }
 
+#[cfg(windows)]
 fn credential_path() -> Result<PathBuf, String> {
     let base = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
     Ok(Path::new(&base)
