@@ -261,8 +261,11 @@ wrapper task (`--option task=assembleDebug|assembleRelease`, default
   Gradle home's `caches/modules-2` without lock files; passed as
   `GRADLE_RO_DEP_CACHE`) and a local `distributionUrl` (for example the
   distribution zip next to `gradle-wrapper.properties`). Then the action runs
-  `--offline` with the Kotlin compiler in-process. Otherwise it is
-  `cache_policy: never`.
+  with the Kotlin compiler in-process and `--build-cache`, and asks workers
+  for the shared Gradle task cache (`ANT_GRADLE_TASK_CACHE=1`, D-025). It
+  does not pass `--offline` (Gradle turns its remote cache off in offline
+  mode); the sandbox has no network, so a missing dependency still fails.
+  Otherwise it is `cache_policy: never`.
 - **Honest limits:** the JDK and Android SDK are host installations,
   identified only by the environment values above (not digested); the
   toolchain identity is the wrapper jar digest, the distribution, and
