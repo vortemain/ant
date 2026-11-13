@@ -644,13 +644,15 @@ mod tests {
             .join("tmp")
             .to_string_lossy()
             .into_owned();
-        assert_eq!(
-            app.environment,
-            vec![
-                ("TEMP".to_owned(), staging.clone()),
-                ("TMP".to_owned(), staging.clone()),
-            ]
-        );
+        // TMPDIR is added off Windows (the Unix convention), as documented.
+        let mut expected = vec![
+            ("TEMP".to_owned(), staging.clone()),
+            ("TMP".to_owned(), staging.clone()),
+        ];
+        if cfg!(not(windows)) {
+            expected.push(("TMPDIR".to_owned(), staging.clone()));
+        }
+        assert_eq!(app.environment, expected);
         // The staging directory was prepared by generation.
         assert!(dir.path().join(".ant").join("tmp").is_dir());
         // Truthful toolchain identity from the real cargo.

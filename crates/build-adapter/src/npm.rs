@@ -803,13 +803,15 @@ mod tests {
             .join("tmp")
             .to_string_lossy()
             .into_owned();
-        assert_eq!(
-            action.environment,
-            vec![
-                ("TEMP".to_owned(), staging.clone()),
-                ("TMP".to_owned(), staging.clone()),
-            ]
-        );
+        // TMPDIR is added off Windows (the Unix convention), as documented.
+        let mut expected = vec![
+            ("TEMP".to_owned(), staging.clone()),
+            ("TMP".to_owned(), staging.clone()),
+        ];
+        if cfg!(not(windows)) {
+            expected.push(("TMPDIR".to_owned(), staging.clone()));
+        }
+        assert_eq!(action.environment, expected);
         assert!(dir.path().join(".ant").join("tmp").is_dir());
 
         // Truthful node toolchain identity.
