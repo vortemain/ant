@@ -1,0 +1,26 @@
+# Ant CI. Not yet exercised: the repository has no GitHub remote (see
+# docs/plan.md T1.18). The toolchain comes from rust-toolchain.toml.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality-gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Quality gate (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check.ps1
+      - name: Quality gate (POSIX)
+        if: runner.os != 'Windows'
+        run: sh ./scripts/check.sh
