@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "actions": [
+    {
+      "action": {
+        "schema_version": 1,
+        "id": "assembleDebug",
+        "argv": [
+          "sh",
+          "-c",
+          "for v in GRADLE_USER_HOME ANDROID_USER_HOME GRADLE_RO_DEP_CACHE TMPDIR TMP TEMP; do eval \"x=\\${$v:-}\"; case \"$x\" in \"\"|/*) ;; *) export \"$v=$PWD/$x\" ;; esac; done; exec ./gradlew \"$@\"",
+          "gradlew",
+          "--no-daemon",
+          "--console=plain",
+          "-Pkotlin.compiler.execution.strategy=in-process",
+          "--build-cache",
+          "assembleDebug"
+        ],
+        "working_directory": ".",
+        "inputs": [
+          {
+            "path": ".editorconfig",
+            "kind": "file"
+          },
+          {
+            "path": ".gitignore",
+            "kind": "file"
+          },
+          {
+            "path": ".google",
+            "kind": "tree"
+          },
+          {
+            "path": ".gradle-deps",
+            "kind": "tree"
+          },
+          {
+            "path": ".run",
+            "kind": "tree"
+          },
+          {
+            "path": "ASSETS_LICENSE",
+            "kind": "file"
+          },
+          {
+            "path": "README.md",
+            "kind": "file"
+          },
+          {
+            "path": "app/.gitignore",
+            "kind": "file"
+          },
+          {
+            "path": "app/build.gradle.kts",
+            "kind": "file"
+          },
+          {
+            "path": "app/proguard-rules.pro",
+            "kind": "file"
+          },
+          {
+            "path": "app/src",
+            "kind": "tree"
+          },
+          {
+            "path": "build.gradle.kts",
+            "kind": "file"
+          },
+          {
+            "path": "buildscripts",
+            "kind": "tree"
+          },
+          {
+            "path": "debug_2.keystore",
+            "kind": "file"
+          },
+          {
+            "path": "gradle",
+            "kind": "tree"
+          },
+          {
+            "path": "gradle.properties",
+            "kind": "file"
+          },
+          {
+            "path": "gradlew",
+            "kind": "file"
+          },
+          {
+            "path": "gradlew.bat",
+            "kind": "file"
+          },
+          {
+            "path": "screenshots",
+            "kind": "tree"
+          },
+          {
+            "path": "settings.gradle.kts",
+            "kind": "file"
+          },
+          {
+            "path": "spotless",
+            "kind": "tree"
+          }
+        ],
+        "outputs": [
+          {
+            "path": "app/build/outputs/apk/debug/app-debug.apk",
+            "kind": "file"
+          }
+        ],
+        "environment": [
+          [
+            "ANDROID_USER_HOME",
+            ".ant/android-home"
+          ],
+          [
+            "ANT_GRADLE_TASK_CACHE",
+            "1"
+          ],
+          [
+            "GRADLE_RO_DEP_CACHE",
+            ".gradle-deps"
+          ],
+          [
+            "GRADLE_USER_HOME",
+            ".ant/gradle-home"
+          ],
+          [
+            "TEMP",
+            ".ant/tmp"
+          ],
+          [
+            "TMP",
+            ".ant/tmp"
+          ],
+          [
+            "TMPDIR",
+            ".ant/tmp"
+          ]
+        ],
+        "cache_policy": "eligible",
+        "toolchain": {
+          "name": "gradle-wrapper",
+          "version": "distribution gradle-9.5.0-bin.zip; openjdk 17.0.21 2026-10-20",
+          "executable_digest": "sha256:81d2666ca892d859e86d8bd40e2bf06d64e9617672da8d130456c97586cad331"
+        },
+        "timeout_ms": null
+      },
+      "dependencies": []
+    }
+  ]
+}

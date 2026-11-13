@@ -1,0 +1,24 @@
+scenario,rep,seconds,executed,reused,notes
+prep-online,1,167.11,-,-,fills the dependency cache; not a comparison
+gradle-cold,1,114.56,-,-,empty build cache; daemon start; distribution unpack
+gradle-no-change,1,1.39,-,-,same checkout; warm daemon
+gradle-no-change,2,1.40,-,-,same checkout; warm daemon
+gradle-no-change,3,1.37,-,-,same checkout; warm daemon
+gradle-fresh-checkout,1,3.80,-,-,new checkout; warm daemon + local build cache
+gradle-fresh-checkout,2,3.48,-,-,new checkout; warm daemon + local build cache
+gradle-fresh-checkout,3,4.90,-,-,new checkout; warm daemon + local build cache
+gradle-one-file-change,1,3.30,-,-,same checkout; warm daemon; incremental
+gradle-one-file-change,2,3.01,-,-,same checkout; warm daemon; incremental
+gradle-one-file-change,3,2.00,-,-,same checkout; warm daemon; incremental
+ant-adapt,1,0.13,-,-,plan generation
+ant-remote-cold,1,122.53,1,0,empty shared cache; sandboxed; offline
+ant-remote-no-change,1,0.59,0,1,same checkout
+ant-remote-no-change,2,0.78,0,1,same checkout
+ant-remote-no-change,3,0.79,0,1,same checkout
+ant-remote-fresh-checkout,1,0.78,0,1,new checkout; other path; new mtimes
+ant-remote-fresh-checkout,2,0.58,0,1,new checkout; other path; new mtimes
+ant-remote-fresh-checkout,3,0.59,0,1,new checkout; other path; new mtimes
+ant-remote-one-file-change,1,74.15,1,0,fresh worker workspace; shared task cache
+ant-remote-one-file-change,2,72.55,1,0,fresh worker workspace; shared task cache
+ant-remote-one-file-change,3,73.94,1,0,fresh worker workspace; shared task cache
+ant-remote-teammate-after-edit,1,0.79,0,1,other checkout with the same edits
