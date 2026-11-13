@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-labelledby="t">
+  <title id="t">Ant: build everything, fast, on your own servers</title>
+  <defs>
+    <linearGradient id="ant-body" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#FFC53D"/>
+      <stop offset="0.5" stop-color="#FF8A1F"/>
+      <stop offset="1" stop-color="#FF4D2E"/>
+    </linearGradient>
+    <linearGradient id="ant-trail" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF8A1F"/>
+      <stop offset="1" stop-color="#FF4D2E" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(150 50) scale(0.5)">
+  <!-- speed trails -->
+  <g stroke="url(#ant-trail)" stroke-width="18" stroke-linecap="round" fill="none">
+    <path d="M150 414 L58 478"/>
+    <path d="M196 440 L130 488" opacity="0.7"/>
+    <path d="M112 372 L46 418" opacity="0.7"/>
+  </g>
+  <!-- the ant, heading up and to the right -->
+  <g transform="translate(268 236) rotate(38) scale(0.82) translate(-256 -256)">
+    <g fill="none" stroke="url(#ant-body)" stroke-linecap="round" stroke-linejoin="round" stroke-width="20">
+      <path d="M238 112 Q214 64 170 52"/>
+      <path d="M274 112 Q298 64 342 52"/>
+      <path d="M222 214 L160 186 L128 140"/>
+      <path d="M290 214 L352 186 L384 140"/>
+      <path d="M218 240 L146 246 L104 226"/>
+      <path d="M294 240 L366 246 L408 226"/>
+      <path d="M224 266 L168 310 L140 366"/>
+      <path d="M288 266 L344 310 L372 366"/>
+    </g>
+    <g fill="url(#ant-body)">
+      <!-- antenna tips: graph nodes -->
+      <circle cx="170" cy="52" r="20"/>
+      <circle cx="342" cy="52" r="20"/>
+      <!-- head, thorax, abdomen -->
+      <circle cx="256" cy="140" r="40"/>
+      <ellipse cx="256" cy="240" rx="38" ry="46"/>
+      <path d="M256 296 C306 296 330 344 326 392 C322 444 290 476 256 480 C222 476 190 444 186 392 C182 344 206 296 256 296 Z"/>
+    </g>
+  </g>
+</g>
+  <text x="440" y="200" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="150" font-weight="800" letter-spacing="-4" fill="#F5F7FA">ant</text>
+  <text x="446" y="262" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="36" font-weight="500" fill="#9AA4B2">Build everything. Fast. On your own servers.</text>
+</svg>

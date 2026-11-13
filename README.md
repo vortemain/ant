@@ -1,59 +1,170 @@
-# Ant
+<div align="center">
 
-A local-first, remotely executable build platform. This repository is at project inception; see [the architecture](docs/architecture.md) and [the agent handoff guide](AGENTS.md) before making changes.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <img alt="Ant: build everything. Fast. On your own servers." src="docs/assets/banner-light.svg" width="760">
+</picture>
 
-## Status
+**One small tool that builds every project with a single command, then makes the next build nearly instant
+by sharing proven results across your machines, your team, and your own servers.**
 
-**Vision:** a Bun/Expo-class, self-hostable tool that builds and packages everything — Android, iOS, web, desktop, backend, any language — with a handful of commands, very fast, scaling onto your own servers from the terminal (see [docs/vision.md](docs/vision.md)). The current code is the engine underneath, and the front door is here:
+[![CI](https://github.com/vortemain/ant/actions/workflows/ci.yml/badge.svg)](https://github.com/vortemain/ant/actions/workflows/ci.yml)
+[![Android benchmark](https://github.com/vortemain/ant/actions/workflows/bench-android.yml/badge.svg)](https://github.com/vortemain/ant/actions/workflows/bench-android.yml)
+[![Rust 1.95](https://img.shields.io/badge/rust-1.95-orange?logo=rust)](rust-toolchain.toml)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-0d1117)](#what-works-today)
+[![Status](https://img.shields.io/badge/status-early%20preview-ff8a1f)](docs/plan.md)
+
+[Quick start](#quick-start) · [Benchmarks](#measured-not-promised) · [How it works](#how-it-works) · [Self-hosting](#offload-to-your-own-servers) · [Roadmap](#roadmap) · [Docs](#documentation)
+
+</div>
+
+---
 
 ```bash
 cd my-project
-ant build        # detect, build (release), collect deliverables into dist/
-ant init         # optional: record the setup in ant.toml
+ant build
 ```
 
-See [getting started](docs/getting-started.md). Today `ant build` handles Cargo, npm, and CMake projects; Android, iOS, and everything else follow the roadmap.
+```
+ant build · cargo · release · 2 steps · 8 parallel
+  ✓ greet-core  1.0s
+  ✓ greeter  0.7s
 
-Stage 0 architecture validation is in progress. The initial Rust implementation includes a validated action model, a deterministic build DAG API, a JSON plan runner with sequential and bounded-parallel (`--jobs N`) execution with resource-weighted admission (per-action `resources` requests, optional `--memory-mb` budget), `--keep-going`, opt-in enforced Windows memory caps (`--enforce-memory`) with measured peak memory, a direct local process executor with a prepare/execute split, SHA-256 digests for declared files and trees (input digests include filesystem metadata), action-key candidates with capability-driven blockers (platform version captured), a content-addressed local cache library, `ant plan explain` cacheability diagnostics, cooperative cancellation/timeouts, Ctrl+C handling, Windows descendant-process cleanup, a schema-versioned JSONL event stream (`--events`, schema v2), a Windows restricted-token filesystem sandbox (`ant-sandbox-win`, wired into `ant run --sandbox`) that confines writes to the workspace, cache lookup/store/reuse behind the blocker gate (`ant run --plan --cache-dir DIR`; reuse happens only for blocker-free keys, which only `--network-isolated` produces — proven end-to-end), and the first build-system adapters: `ant adapt --adapter cargo` generates validated plans for real Cargo workspaces (per-member build actions, dependency edges, truthful toolchain identity) and `ant adapt --adapter npm` generates a `npm run build` action for real npm projects (no guessed outputs, truthful `node` toolchain identity, `cmd /C` on Windows because `npm` is a batch shim); generated plans run under `ant run --sandbox` via a workspace-relative scratch directory; adapt → run → real artifact proven end-to-end for both; without `--adapter`, `ant adapt` uses the single adapter that recognizes the project (refusing to guess when several do) and `ant adapt --detect` reports per-adapter detection diagnostics. The workspace is covered by 216 passing tests (including seeded property tests) behind a local quality gate (`scripts/check.ps1`) (unit, confinement integration, and end-to-end CLI) and compiles clippy-warning-free. Cache reuse now works under `ant run --network-isolated` (Windows): after a one-time elevated `ant sandbox setup`, actions run as a dedicated account whose network alone is firewall-blocked, which is the only mode that opens the cache gate (decision D-013; DNS resolution remains a documented residual channel; first cold/warm measurements in `docs/benchmarks/2026-11-13-cache-cold-warm.md`). Under every other executor the gate stays closed because network isolation requires that dedicated sandbox user + elevated setup (per-run non-elevated WFP is admin-gated and cannot scope to restricted-token capability SIDs — investigation: `docs/sandbox/network-isolation.md`, D-009), so `network-isolation-unavailable` remains (design + implementation + honest limitations: `docs/sandbox/windows-design.md`); generated adapter actions are `cache_policy: never` because dependency sources cannot be declared; self-hosted remote execution exists in a first form — `ant coordinator`, `ant worker`, and `ant remote run` (protocol v1, token auth, content-addressed transfer, verified outputs; see `docs/remote/`) — proven end to end on one machine over loopback but not yet on a VPS. The coordinator also serves a read-only web dashboard at `/ui` (viewer token; real jobs and workers only; see `docs/remote/operations.md`).
-
-## CLI
-
-```powershell
-cargo run -p ant-cli -- --version
-cargo run -p ant-cli -- run --timeout-ms 600000 -- cargo build
-cargo run -p ant-cli -- plan validate --plan build-plan.json
-cargo run -p ant-cli -- plan describe --plan build-plan.json
-cargo run -p ant-cli -- plan explain --plan build-plan.json --cache-dir .ant-cache
-cargo run -p ant-cli -- adapt --adapter cargo --project path\to\cargo-project --out build-plan.json
+Built in 2.9s →
+  dist/greeter
 ```
 
-See the [CLI guide](docs/cli/local-execution.md), [build plan format](docs/cli/build-plan-format.md), [cache keys and explainability](docs/cli/cache-and-keys.md), and [build adapters](docs/cli/adapters.md).
+No config file. Ant detects the project, builds it on every core, and puts the deliverables in `dist/`.
 
-## Handoff entry points
+## Measured, not promised
 
-- [Agent handoff rules](AGENTS.md)
-- [Architecture and trust boundaries](docs/architecture.md)
-- [Initial threat model](docs/security/threat-model.md)
-- [Benchmark methodology](docs/benchmarks/methodology.md)
-- [First local execution slice and limits](docs/cli/local-execution.md)
-- [Local JSON build plan format](docs/cli/build-plan-format.md)
-- [Cache keys and explainability](docs/cli/cache-and-keys.md)
-- [Build adapters (`ant adapt`)](docs/cli/adapters.md)
-- [Windows sandbox design (implementation + honest limitations)](docs/sandbox/windows-design.md)
-- [Network isolation options (investigation + D-009)](docs/sandbox/network-isolation.md)
-- [Implementation plan and decision log](docs/plan.md)
-- [Requirements traceability](docs/requirements-traceability.md)
-- [Research sources and open questions](docs/research.md)
+Every number below comes from a public CI run with its raw data in this repository. They're single-runner measurements, not general claims.
 
-## Current decisions
+| Project | Scenario | Native tool | **Ant** | |
+|---|---|---:|---:|---|
+| **Android**: JetNews (Jetpack Compose) | fresh checkout | Gradle, warm daemon + build cache: 4.0–4.6 s | **0.65–0.85 s** | ~5× |
+| | nothing changed | Gradle, warm daemon: 1.6–2.2 s | **0.66–0.86 s** | ~2.5× |
+| | first build ever | Gradle: 156.9 s | 159.0 s | tie |
+| **Rust**: Ant itself (10 crates, 291 MB vendored) | fresh checkout | cargo: 25.2 s | **0.54–0.74 s** | ~40× |
+| | first build ever | cargo: 24.3 s | 33.3 s | |
 
-- Rust core in a Cargo workspace; keep members responsibility-driven.
-- Start with a canonical action model and local execution semantics before remote transport.
-- Treat actions as non-cacheable unless declared inputs and execution identity are complete.
-- Remote execution API compatibility is an adapter boundary to investigate, not an assumption of full conformance.
+Reports: [Android](docs/benchmarks/2026-11-13-android.md) · [Rust remote cache](docs/benchmarks/2026-11-13-remote-cache.md).
+A "fresh checkout" is a teammate, a new clone, or a CI runner. Native tools rebuild from scratch there, while Ant fetches the result that a sandboxed worker already proved.
 
-See the plan for staged acceptance criteria and unresolved decisions.
+## Why Ant
 
+- **One command per job.** `ant build` builds, `ant init` records the setup, and that's all most projects need.
+- **Builds are proven, not trusted.** A result is shared only when the build ran in a sandbox with no network, every input was declared and hashed, and the toolchain was identified. Anything less runs every time. You never get a stale result.
+- **Path- and time-independent cache keys.** A clone at another path with fresh timestamps still hits the cache.
+- **Your servers, not ours.** Run a coordinator on your own VPS and workers on your own machines. The tokens, artifacts, and cache stay with you.
+- **Honest by design.** Every feature lists its limits, every decision is logged ([`docs/plan.md`](docs/plan.md)), and nothing is called "supported" until it works end to end.
 
+## Quick start
 
+Ant is in early preview. Build it from source (Rust 1.95, pinned in `rust-toolchain.toml`):
 
+```bash
+git clone https://github.com/vortemain/ant.git
+cd ant
+cargo install --path crates/ant-cli
+```
+
+Then, in any supported project:
+
+```bash
+ant build          # release build, deliverables in dist/
+ant build --dev    # debug build
+ant init           # optional: write ant.toml so every machine builds the same way
+```
+
+See [Getting started](docs/getting-started.md).
+
+## What works today
+
+| Ecosystem | `ant build` (local) | Shared remote cache (Linux worker) |
+|---|---|---|
+| Rust / Cargo (incl. workspaces) | ✅ binaries into `dist/` | ✅ measured, with vendored dependencies |
+| JavaScript / TypeScript / npm (incl. workspaces) | ✅ | runs remotely, not cached (`node_modules` is undeclared) |
+| C / C++ / CMake | ✅ | runs remotely, not cached |
+| Android / Gradle | via `ant adapt` | ✅ measured on JetNews, with in-project dependencies |
+| iOS, web bundlers, desktop installers, containers | roadmap | roadmap |
+
+| Platform | Status |
+|---|---|
+| Linux | bubblewrap sandbox with no network; the only cache writer today |
+| Windows | restricted-token sandbox, job objects, memory caps, network-isolated account |
+| macOS | not yet (needed for iOS) |
+
+## How it works
+
+```mermaid
+flowchart LR
+    P[Your project] -->|detect| A[Adapter<br/>cargo · npm · cmake · gradle]
+    A -->|plan| G[Action graph<br/>declared inputs, outputs, toolchain]
+    G --> K{Key from content,<br/>toolchain, platform}
+    K -->|hit| C[(Shared cache<br/>on your coordinator)]
+    K -->|miss| W[Sandboxed worker<br/>no network]
+    W -->|proven result| C
+    C -->|verified outputs| D[dist/]
+```
+
+1. **Adapters** read your build system (Cargo, npm, CMake, Gradle) and produce a plan: each action's command, declared inputs, outputs, and toolchain.
+2. **Keys** come from content digests, the toolchain identity, and the execution platform, never from paths or timestamps.
+3. **Workers** run actions in a sandbox with no network. Only a worker can write to the cache, and every blob is re-hashed on read and write.
+4. **Results** come back verified and land in your workspace and `dist/`.
+
+## Offload to your own servers
+
+```bash
+# On your server
+ant coordinator --data-dir /var/lib/ant --client-token-file client.token --worker-token-file worker.token
+
+# On each build machine (Linux)
+ant worker --coordinator https://builds.example.com --token-file worker.token --work-dir /var/tmp/ant --sandbox
+
+# From your laptop or CI
+ant adapt --out plan.json
+ant remote run --coordinator https://builds.example.com --token-file client.token --plan plan.json
+```
+
+The coordinator also serves a read-only dashboard at `/ui` (viewer token). See [operations](docs/remote/operations.md) and [protocol v1](docs/remote/protocol-v1.md). One-command `ant server deploy` is next on the roadmap.
+
+## Roadmap
+
+| Phase | Goal | State |
+|---|---|---|
+| P1 Front door | `ant build`, `ant init`, zero config | ✅ shipped |
+| P2 Speed | shared remote cache, measured | ✅ shipped |
+| P3 Self-hosting | `ant server deploy` to your VPS in one command | next |
+| P4 Android | Gradle builds, signing, install-by-QR | 🚧 builds and caches APKs; shared task cache in progress |
+| P5 iOS | Xcode builds on your Mac workers | planned |
+| P6 Everything else | web, desktop, containers, more languages | planned |
+| P7 Dashboard | Expo-quality UI: builds, logs, artifacts, QR installs | seeded (`/ui`) |
+| P8–P9 | teams, store submission, live preview | planned |
+
+The full plan, acceptance criteria, and decision log are in [`docs/plan.md`](docs/plan.md). The product vision is in [`docs/vision.md`](docs/vision.md).
+
+## Documentation
+
+| | |
+|---|---|
+| [Getting started](docs/getting-started.md) | `ant build` and `ant init` |
+| [Build adapters](docs/cli/adapters.md) | Cargo, npm, CMake, Gradle: what's declared and the honest limits |
+| [Cache keys](docs/cli/cache-and-keys.md) | what goes into a key and why results are reused |
+| [Remote execution](docs/remote/operations.md) | coordinator, workers, tokens, dashboard |
+| [Architecture](docs/architecture.md) | crates, contracts, trust boundaries |
+| [Security model](docs/security/threat-model.md) | what's protected, from whom, and what isn't yet |
+| [Benchmarks](docs/benchmarks/) | methodology and every recorded run |
+
+## Contributing
+
+```bash
+./scripts/check.sh      # Linux/macOS: rustfmt, clippy -D warnings, all tests
+./scripts/check.ps1     # Windows
+```
+
+All three are hard gates, and CI runs them on Linux and Windows for every push. Read [`AGENTS.md`](AGENTS.md) before changing a contract. It explains how work is planned, logged, and handed off.
+
+<div align="center">
+<sub>Built in Rust · Self-hosted by design · Every claim backed by a CI run</sub>
+</div>
