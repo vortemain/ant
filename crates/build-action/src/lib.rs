@@ -214,13 +214,28 @@ fn is_sha256_digest(value: &str) -> bool {
     hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Workspace-relative paths only, judged the same way on every platform so a
+/// plan valid on one OS is not an escape on another:
+/// - no `..` and no root (`/x`, `\x`): on Windows a rooted path without a
+///   drive is not `is_absolute()`, yet `workspace.join("/x")` resolves to the
+///   drive root — outside the workspace;
+/// - no drive-style prefix (`C:\x`, `C:x`): absolute or drive-relative on
+///   Windows, and never portable, even where (Unix) it is a legal file name.
 fn validate_relative_path(path: &Path) -> Result<(), ValidationError> {
     use std::path::Component;
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    let drive_style = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     if path.as_os_str().is_empty()
         || path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
+        || drive_style
+        || text.starts_with(['/', '\\'])
+        || path.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
     {
         return Err(ValidationError::InvalidPath(path.to_path_buf()));
     }
@@ -352,12 +367,19 @@ mod tests {
 
     #[test]
     fn rejects_absolute_working_directory() {
-        let mut action = sample();
-        action.working_directory = PathBuf::from("C:\\Windows");
-        assert_error(
-            &action,
-            ValidationError::InvalidPath(PathBuf::from("C:\\Windows")),
-        );
+        // Every one of these is rejected on every platform: absolute, rooted
+        // (escapes to the drive root on Windows), or drive-style.
+        for path in ["C:\\Windows", "C:Windows", "c:/x", "/etc", "\\etc", "/"] {
+            let mut action = sample();
+            action.working_directory = PathBuf::from(path);
+            assert_error(&action, ValidationError::InvalidPath(PathBuf::from(path)));
+        }
+        // Ordinary relative paths still pass.
+        for path in ["src", "src/nested", ".", "src/x.y", ".ant/tmp"] {
+            let mut action = sample();
+            action.working_directory = PathBuf::from(path);
+            assert_eq!(action.validate(), Ok(()), "{path}");
+        }
     }
 
     #[test]
