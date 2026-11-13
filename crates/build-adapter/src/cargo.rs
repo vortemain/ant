@@ -12,10 +12,30 @@
 //!   `cache_policy: never` — under-declared inputs must never claim cache
 //!   eligibility (D-003, D-010). Member-to-member invalidation comes from the
 //!   DAG edges, not from key material.
-//! - Outputs are declared only for `bin` and `lib` targets under the default
-//!   `target/debug` layout; other target kinds declare no outputs. A custom
-//!   `CARGO_TARGET_DIR` or build config makes the declared outputs wrong, and
-//!   the executor will then fail the action honestly instead of guessing.
+//! - Outputs are declared only for `bin` and `lib` targets, under
+//!   `<target-dir>/<profile-dir>`: the target directory is the one `cargo
+//!   metadata` reports (`target_directory`, which already reflects
+//!   `CARGO_TARGET_DIR` and `build.target-dir`), and the profile directory is
+//!   `debug` for the default `dev` profile or `release` for `--option
+//!   profile=release`. A target directory outside the project fails closed
+//!   (outputs must be workspace-relative); a non-default one inside the
+//!   project is pinned with a workspace-relative `CARGO_TARGET_DIR` on every
+//!   action, because the executor clears the child environment and would
+//!   otherwise drop an adapt-time variable. Other target kinds declare no
+//!   outputs. A configured default `build.target` triple changes the layout
+//!   (`<target-dir>/<triple>/<profile-dir>`) and is not reported by `cargo
+//!   metadata`; the executor then fails the action on output coverage
+//!   instead of guessing.
+//! - Dependency sources that live inside the project are declared: any
+//!   non-member package whose manifest is inside the workspace (vendored
+//!   crates under `cargo vendor` source replacement, path dependencies that
+//!   are not workspace members) becomes a tree input of every member that
+//!   transitively depends on it, from the `cargo metadata` resolve graph. The
+//!   project's `.cargo/config.toml` (or legacy `.cargo/config`) is declared
+//!   too, because it can change the build (source replacement, flags,
+//!   target dir). Configuration outside the project (`~/.cargo`) and
+//!   registry sources outside the project stay undeclared, so policy stays
+//!   `never` regardless.
 //! - Toolchain identity is captured from the real cargo: the resolved PATH
 //!   executable's SHA-256 digest and `cargo --version`. The adapter refuses
 //!   to generate when cargo cannot be resolved.
@@ -26,13 +46,47 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{canonical_root, executable_version, locate_executable, relative_to, AdapterError, BuildAdapter, Detection};
+use crate::{
+    canonical_root, check_option_keys, executable_version, locate_executable, relative_to,
+    AdapterError, AdapterOptions, BuildAdapter, Detection, OptionSpec,
+};
 
 pub struct CargoAdapter;
+
+const OPTIONS: &[OptionSpec] = &[OptionSpec {
+    key: "profile",
+    values: "dev|release",
+    description: "cargo build profile; release adds --release and maps outputs to <target-dir>/release",
+}];
+
+/// A supported cargo build profile: the extra argv and the profile's output
+/// directory name under the target directory.
+struct Profile {
+    flags: &'static [&'static str],
+    directory: &'static str,
+}
+
+fn profile(options: &AdapterOptions) -> Result<Profile, AdapterError> {
+    match options.get("profile") {
+        // The default dev profile keeps the pre-options argv exactly.
+        None | Some("dev") => Ok(Profile { flags: &[], directory: "debug" }),
+        Some("release") => Ok(Profile { flags: &["--release"], directory: "release" }),
+        // Custom profiles write to `<target-dir>/<name>` but whether one is
+        // defined cannot be checked through `cargo metadata`; refuse rather
+        // than emit a plan that may name a nonexistent profile.
+        Some(other) => Err(AdapterError::Option(format!(
+            "cargo profile '{other}' is not supported (supported: dev, release)"
+        ))),
+    }
+}
 
 impl BuildAdapter for CargoAdapter {
     fn name(&self) -> &'static str {
         "cargo"
+    }
+
+    fn options(&self) -> &'static [OptionSpec] {
+        OPTIONS
     }
 
     fn detect(&self, project_root: &Path) -> Result<Detection, AdapterError> {
@@ -46,14 +100,15 @@ impl BuildAdapter for CargoAdapter {
         }
     }
 
-    fn generate(&self, project_root: &Path) -> Result<PlanFile, AdapterError> {
+    fn generate(
+        &self,
+        project_root: &Path,
+        options: &AdapterOptions,
+    ) -> Result<PlanFile, AdapterError> {
+        // Options are validated before any side effect.
+        check_option_keys(self, options)?;
+        let profile = profile(options)?;
         let root = canonical_root(project_root)?;
-        // Prepare the staging directory generated actions use as TMP/TEMP
-        // (see the crate-level contract): toolchain scratch writes land
-        // inside the workspace, which is what makes these plans runnable
-        // under `ant run --sandbox`. Idempotent; the one allowed side effect.
-        let staging = root.join(".ant").join("tmp");
-        std::fs::create_dir_all(&staging).map_err(AdapterError::from)?;
         let staging_value = PathBuf::from(".ant").join("tmp").to_string_lossy().into_owned();
         let cargo = locate_executable(&format!("cargo{}", std::env::consts::EXE_SUFFIX))?;
         // Digest the real backing file: PATH entries may be symlinks (e.g.
@@ -81,6 +136,39 @@ impl BuildAdapter for CargoAdapter {
                 .as_str()
                 .ok_or_else(|| bad_metadata("workspace_root is missing"))?,
         );
+        // Every declared path is relative to the project root, so the project
+        // root must be the workspace root; a member directory would make the
+        // workspace manifest and sibling members unreachable.
+        let canonical_workspace = workspace_root.canonicalize().map_err(|error| {
+            bad_metadata(&format!("cannot resolve workspace_root {}: {error}", workspace_root.display()))
+        })?;
+        if canonical_workspace != root {
+            return Err(AdapterError::Project(format!(
+                "project {} is inside the cargo workspace rooted at {}; point --project at the workspace root",
+                root.display(),
+                workspace_root.display()
+            )));
+        }
+        // Outputs live under the target directory cargo reports, which must
+        // be inside the project: outputs are workspace-relative by contract.
+        let target_directory = PathBuf::from(
+            metadata["target_directory"]
+                .as_str()
+                .ok_or_else(|| bad_metadata("target_directory is missing"))?,
+        );
+        let target_rel = relative_to(&workspace_root, &target_directory).map_err(|_| {
+            AdapterError::Project(format!(
+                "cargo target directory {} is outside the project root {}; generated outputs must be workspace-relative, so point CARGO_TARGET_DIR / build.target-dir inside the project or unset it",
+                target_directory.display(),
+                workspace_root.display()
+            ))
+        })?;
+        if target_rel.as_os_str().is_empty() {
+            return Err(AdapterError::Project(
+                "cargo target directory is the project root itself; outputs would overlap sources".to_owned(),
+            ));
+        }
+        let output_dir = target_rel.join(profile.directory);
         let member_ids: BTreeSet<&str> = metadata_value(&metadata, "workspace_members")?
             .as_array()
             .ok_or_else(|| bad_metadata("workspace_members is not an array"))?
@@ -103,6 +191,19 @@ impl BuildAdapter for CargoAdapter {
 
         let member_names: BTreeSet<&str> = members.keys().copied().collect();
         let lock_exists = root.join("Cargo.lock").is_file();
+        let cargo_config = ["config.toml", "config"]
+            .iter()
+            .map(|name| PathBuf::from(".cargo").join(name))
+            .filter(|path| root.join(path).is_file())
+            .collect::<Vec<_>>();
+        let local_sources = local_dependency_sources(&metadata, &member_ids, &workspace_root)?;
+
+        // Prepare the staging directory generated actions use as TMP/TEMP
+        // (see the crate-level contract): toolchain scratch writes land
+        // inside the workspace, which is what makes these plans runnable
+        // under `ant run --sandbox`. Idempotent; the one allowed side effect,
+        // performed only after every check above passed.
+        std::fs::create_dir_all(root.join(".ant").join("tmp")).map_err(AdapterError::from)?;
         let mut file = PlanFile::new();
         for (name, package) in &members {
             let manifest = PathBuf::from(
@@ -131,6 +232,15 @@ impl BuildAdapter for CargoAdapter {
             if lock_exists {
                 declare_input(&mut inputs, PathBuf::from("Cargo.lock"), InputKind::File);
             }
+            for config in &cargo_config {
+                declare_input(&mut inputs, config.clone(), InputKind::File);
+            }
+            let package_id = package["id"].as_str().ok_or_else(|| bad_metadata("package has no id"))?;
+            if let Some(sources) = local_sources.get(package_id) {
+                for source in sources {
+                    declare_input(&mut inputs, source.clone(), InputKind::Tree);
+                }
+            }
 
             let mut outputs: BTreeSet<PathBuf> = BTreeSet::new();
             let targets = package["targets"]
@@ -145,15 +255,12 @@ impl BuildAdapter for CargoAdapter {
                 let is_bin = kinds.iter().any(|kind| kind.as_str() == Some("bin"));
                 let is_lib = kinds.iter().any(|kind| kind.as_str() == Some("lib"));
                 if is_bin {
-                    outputs.insert(PathBuf::from("target")
-                        .join("debug")
+                    outputs.insert(output_dir
                         .join(format!("{target_name}{}", std::env::consts::EXE_SUFFIX)));
                 } else if is_lib {
                     // Crate names in artifact file names use underscores.
                     let crate_name = target_name.replace('-', "_");
-                    outputs.insert(PathBuf::from("target")
-                        .join("debug")
-                        .join(format!("lib{crate_name}.rlib")));
+                    outputs.insert(output_dir.join(format!("lib{crate_name}.rlib")));
                 }
                 // Other target kinds (proc-macro, test, bench, example,
                 // custom-build) declare no outputs in v1.
@@ -188,17 +295,31 @@ impl BuildAdapter for CargoAdapter {
             if cfg!(not(windows)) {
                 environment.push(("TMPDIR".to_owned(), staging_value.clone()));
             }
+            // The executor clears the child environment, so an adapt-time
+            // CARGO_TARGET_DIR would not reach the build; pin a non-default
+            // target directory explicitly (workspace-relative, resolved
+            // against the action's cwd = workspace root). The default
+            // `target` needs nothing, keeping default plans unchanged.
+            if target_rel != Path::new("target") {
+                environment.push((
+                    "CARGO_TARGET_DIR".to_owned(),
+                    target_rel.to_string_lossy().into_owned(),
+                ));
+            }
             environment.sort();
+
+            let mut argv = vec![
+                "cargo".to_owned(),
+                "build".to_owned(),
+                "--package".to_owned(),
+                (*name).to_owned(),
+            ];
+            argv.extend(profile.flags.iter().map(|flag| (*flag).to_owned()));
 
             let action = Action {
                 schema_version: 1,
                 id: (*name).to_owned(),
-                argv: vec![
-                    "cargo".to_owned(),
-                    "build".to_owned(),
-                    "--package".to_owned(),
-                    (*name).to_owned(),
-                ],
+                argv,
                 working_directory: PathBuf::from("."),
                 inputs: inputs
                     .into_iter()
@@ -254,6 +375,74 @@ fn join_rel(base: &Path, leaf: &str) -> PathBuf {
 /// same path.
 fn declare_input(inputs: &mut BTreeMap<PathBuf, InputKind>, path: PathBuf, kind: InputKind) {
     inputs.entry(path).or_insert(kind);
+}
+
+/// For each workspace member package id, the workspace-relative directories
+/// of non-member packages it transitively depends on whose manifests live
+/// inside the workspace (vendored crates, non-member path dependencies).
+/// Packages outside the workspace (the registry cache, git checkouts, path
+/// dependencies elsewhere) cannot be declared and are skipped.
+fn local_dependency_sources(
+    metadata: &serde_json::Value,
+    member_ids: &BTreeSet<&str>,
+    workspace_root: &Path,
+) -> Result<BTreeMap<String, BTreeSet<PathBuf>>, AdapterError> {
+    let mut local_dirs: BTreeMap<&str, PathBuf> = BTreeMap::new();
+    for package in metadata_value(metadata, "packages")?
+        .as_array()
+        .ok_or_else(|| bad_metadata("packages is not an array"))?
+    {
+        let id = package["id"].as_str().ok_or_else(|| bad_metadata("package has no id"))?;
+        if member_ids.contains(id) {
+            continue;
+        }
+        let manifest = PathBuf::from(
+            package["manifest_path"]
+                .as_str()
+                .ok_or_else(|| bad_metadata("package manifest_path is missing"))?,
+        );
+        let dir = manifest.parent().ok_or_else(|| bad_metadata("manifest has no parent"))?;
+        if let Ok(relative) = relative_to(workspace_root, dir)
+            && !relative.as_os_str().is_empty()
+        {
+            local_dirs.insert(id, relative);
+        }
+    }
+
+    let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let resolve = metadata_value(metadata, "resolve")?;
+    for node in resolve["nodes"]
+        .as_array()
+        .ok_or_else(|| bad_metadata("resolve.nodes is missing"))?
+    {
+        let id = node["id"].as_str().ok_or_else(|| bad_metadata("resolve node has no id"))?;
+        let deps = node["dependencies"]
+            .as_array()
+            .ok_or_else(|| bad_metadata("resolve node has no dependencies"))?
+            .iter()
+            .map(|dep| dep.as_str().ok_or_else(|| bad_metadata("resolve dependency is not a string")))
+            .collect::<Result<Vec<_>, _>>()?;
+        edges.insert(id, deps);
+    }
+
+    let mut result = BTreeMap::new();
+    for member in member_ids {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut stack = vec![*member];
+        while let Some(id) = stack.pop() {
+            for dep in edges.get(id).map(Vec::as_slice).unwrap_or_default() {
+                if seen.insert(dep) {
+                    stack.push(dep);
+                }
+            }
+        }
+        let dirs: BTreeSet<PathBuf> = seen
+            .iter()
+            .filter_map(|id| local_dirs.get(id).cloned())
+            .collect();
+        result.insert((*member).to_owned(), dirs);
+    }
+    Ok(result)
 }
 
 fn cargo_metadata(cargo: &Path, root: &Path) -> Result<serde_json::Value, AdapterError> {
@@ -346,8 +535,8 @@ mod tests {
     fn generate_produces_deterministic_validated_member_actions() {
         let adapter = CargoAdapter;
         let dir = workspace();
-        let first = adapter.generate(dir.path()).expect("generate");
-        let second = adapter.generate(dir.path()).expect("generate again");
+        let first = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
+        let second = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate again");
         assert_eq!(first, second, "generation must be deterministic");
 
         let ids: Vec<&str> = first.actions.iter().map(|entry| entry.action.id.as_str()).collect();
@@ -414,7 +603,7 @@ mod tests {
         write(&dir.path().join("gen/src/lib.rs"), "pub fn x() {}\n");
         write(&dir.path().join("gen/build.rs"), "fn main() {}\n");
 
-        let plan = adapter.generate(dir.path()).expect("generate");
+        let plan = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
         assert_eq!(plan.actions.len(), 1);
         let action = &plan.actions[0].action;
         let paths: Vec<&Path> = action.inputs.iter().map(|input| input.path.as_path()).collect();
@@ -455,7 +644,7 @@ mod tests {
         );
         write(&dir.path().join("svc/src/main.rs"), "fn main() {}\n");
 
-        let plan = adapter.generate(dir.path()).expect("generate");
+        let plan = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
         assert_eq!(plan.actions.len(), 1);
         let action = &plan.actions[0].action;
         assert_eq!(action.id, "svc-bin");
@@ -476,6 +665,217 @@ mod tests {
         let detection = adapter.detect(dir.path()).expect("detect");
         assert!(!detection.supported);
         // Generation without detection is still honest: cargo metadata fails.
-        assert!(adapter.generate(dir.path()).is_err());
+        assert!(adapter.generate(dir.path(), &AdapterOptions::new()).is_err());
+    }
+
+    fn options(pairs: &[(&str, &str)]) -> AdapterOptions {
+        let mut options = AdapterOptions::new();
+        for (key, value) in pairs {
+            options.insert(key, value).expect("insert option");
+        }
+        options
+    }
+
+    fn single_bin(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        write(
+            &dir.path().join("Cargo.toml"),
+            &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        );
+        write(&dir.path().join("src/main.rs"), "fn main() {}\n");
+        dir
+    }
+
+    fn output_paths(action: &Action) -> Vec<PathBuf> {
+        action.outputs.iter().map(|output| output.path.clone()).collect()
+    }
+
+    #[test]
+    fn release_profile_adds_flag_and_maps_outputs() {
+        let adapter = CargoAdapter;
+        let dir = workspace();
+        let plan = adapter
+            .generate(dir.path(), &options(&[("profile", "release")]))
+            .expect("generate");
+        let app = &plan.actions[0].action;
+        assert_eq!(app.argv, vec!["cargo", "build", "--package", "app-bin", "--release"]);
+        assert_eq!(
+            output_paths(app),
+            vec![PathBuf::from("target")
+                .join("release")
+                .join(format!("app-bin{}", std::env::consts::EXE_SUFFIX))]
+        );
+        assert_eq!(
+            output_paths(&plan.actions[1].action),
+            vec![PathBuf::from("target").join("release").join("libcore_lib.rlib")]
+        );
+        // An explicit dev profile is byte-identical to the default plan.
+        let default = adapter.generate(dir.path(), &AdapterOptions::new()).expect("default");
+        let dev = adapter.generate(dir.path(), &options(&[("profile", "dev")])).expect("dev");
+        assert_eq!(default, dev);
+    }
+
+    #[test]
+    fn unsupported_options_fail_before_any_side_effect() {
+        let adapter = CargoAdapter;
+        let dir = single_bin("opt-errors");
+        let error = adapter
+            .generate(dir.path(), &options(&[("profile", "bench")]))
+            .expect_err("custom profile rejected");
+        assert!(matches!(error, AdapterError::Option(_)), "{error:?}");
+        assert!(error.to_string().contains("supported: dev, release"), "{error}");
+        let error = adapter
+            .generate(dir.path(), &options(&[("outputs", "entry-points")]))
+            .expect_err("foreign option rejected");
+        assert!(error.to_string().contains("does not accept option 'outputs'"), "{error}");
+        assert!(!dir.path().join(".ant").exists(), "no staging directory on option failure");
+    }
+
+    #[test]
+    fn config_target_dir_inside_the_project_is_mapped_and_pinned() {
+        let adapter = CargoAdapter;
+        let dir = single_bin("cfg-target");
+        write(
+            &dir.path().join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"build/out\"\n",
+        );
+        let plan = adapter
+            .generate(dir.path(), &options(&[("profile", "release")]))
+            .expect("generate");
+        let action = &plan.actions[0].action;
+        let target = PathBuf::from("build").join("out");
+        assert_eq!(
+            output_paths(action),
+            vec![target
+                .join("release")
+                .join(format!("cfg-target{}", std::env::consts::EXE_SUFFIX))]
+        );
+        // The executor clears the child environment, so the target dir is
+        // pinned explicitly (workspace-relative, platform separators).
+        assert!(
+            action
+                .environment
+                .contains(&("CARGO_TARGET_DIR".to_owned(), target.to_string_lossy().into_owned())),
+            "{:?}",
+            action.environment
+        );
+        // The project config can change the build, so it is a declared input.
+        assert!(action
+            .inputs
+            .iter()
+            .any(|input| input.path == Path::new(".cargo").join("config.toml")));
+        // The default layout does not pin anything (default plans unchanged).
+        let plain = single_bin("plain-target");
+        let plan = adapter.generate(plain.path(), &AdapterOptions::new()).expect("generate");
+        assert!(plan.actions[0]
+            .action
+            .environment
+            .iter()
+            .all(|(key, _)| key != "CARGO_TARGET_DIR"));
+    }
+
+    #[test]
+    fn target_dir_outside_the_project_fails_closed() {
+        let adapter = CargoAdapter;
+        let dir = single_bin("escape-target");
+        write(
+            &dir.path().join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"../escaped-target\"\n",
+        );
+        let error = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect_err("outside target dir rejected");
+        assert!(
+            error.to_string().contains("is outside the project root"),
+            "{error}"
+        );
+        assert!(!dir.path().join(".ant").exists(), "no staging directory on failure");
+    }
+
+    #[test]
+    fn member_directory_as_project_root_is_rejected() {
+        let adapter = CargoAdapter;
+        let dir = workspace();
+        let error = adapter
+            .generate(&dir.path().join("app"), &AdapterOptions::new())
+            .expect_err("member root rejected");
+        assert!(error.to_string().contains("point --project at the workspace root"), "{error}");
+    }
+
+    /// A crates.io dependency served from a vendored directory source (the
+    /// layout `cargo vendor` produces, built by hand so the test needs no
+    /// registry cache or network) plus a non-member path dependency: both
+    /// live inside the project, so both are declared as tree inputs of the
+    /// members that transitively depend on them — and only those.
+    #[test]
+    fn in_project_dependency_sources_are_declared_for_dependents() {
+        let adapter = CargoAdapter;
+        let dir = TempDir::new("vendored");
+        write(
+            &dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"other\"]\nexclude = [\"helper\"]\nresolver = \"2\"\n",
+        );
+        write(
+            &dir.path().join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nhelper = { path = \"../helper\" }\n",
+        );
+        write(&dir.path().join("app/src/main.rs"), "fn main() { helper::h(); }\n");
+        // `helper` is an excluded (non-member) path dependency — in-workspace
+        // path dependencies are otherwise auto-promoted to members — and
+        // it depends on the vendored registry crate.
+        write(
+            &dir.path().join("helper/Cargo.toml"),
+            "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntinydep = \"1\"\n",
+        );
+        write(&dir.path().join("helper/src/lib.rs"), "pub fn h() -> u32 { tinydep::value() }\n");
+        write(
+            &dir.path().join("other/Cargo.toml"),
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(&dir.path().join("other/src/lib.rs"), "pub fn o() {}\n");
+        write_vendored_tinydep(dir.path());
+
+        let plan = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
+        let app = &plan.actions[0].action;
+        assert_eq!(app.id, "app");
+        let tree_inputs: Vec<&Path> = app
+            .inputs
+            .iter()
+            .filter(|input| input.kind == InputKind::Tree)
+            .map(|input| input.path.as_path())
+            .collect();
+        assert!(tree_inputs.contains(&Path::new("helper")), "{tree_inputs:?}");
+        assert!(
+            tree_inputs.contains(&Path::new("vendor").join("tinydep").as_path()),
+            "transitive vendored source declared: {tree_inputs:?}"
+        );
+        let other = &plan.actions[1].action;
+        assert_eq!(other.id, "other");
+        assert!(
+            other.inputs.iter().all(|input| !input.path.starts_with("vendor")
+                && !input.path.starts_with("helper")),
+            "non-dependents declare no foreign sources: {:?}",
+            other.inputs
+        );
+        // Undeclared external configuration still keeps policy never.
+        assert_eq!(app.cache_policy, CachePolicy::Never);
+    }
+
+    /// Write `vendor/tinydep` as a `cargo vendor` directory source and the
+    /// `.cargo/config.toml` source replacement that points crates.io at it.
+    fn write_vendored_tinydep(root: &Path) {
+        write(
+            &root.join("vendor/tinydep/Cargo.toml"),
+            "[package]\nname = \"tinydep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        write(&root.join("vendor/tinydep/src/lib.rs"), "pub fn value() -> u32 { 7 }\n");
+        write(
+            &root.join("vendor/tinydep/.cargo-checksum.json"),
+            "{\"files\":{},\"package\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
+        );
+        write(
+            &root.join(".cargo/config.toml"),
+            "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
+        );
     }
 }
