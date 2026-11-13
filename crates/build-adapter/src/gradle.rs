@@ -283,10 +283,15 @@ impl BuildAdapter for GradleAdapter {
             // Eligible only when dependencies and the distribution are
             // declared inputs (D-024); otherwise the network supplies
             // undeclared content.
+            // Local reuse otherwise (D-028): dependencies resolve from the
+            // versions in the build files, so this machine may reuse its own
+            // result; it is never shared.
             cache_policy: if fully_declared {
                 CachePolicy::Eligible
-            } else {
+            } else if has_symlink {
                 CachePolicy::Never
+            } else {
+                CachePolicy::Local
             },
             toolchain: Some(toolchain),
             timeout_ms: None,
@@ -475,14 +480,14 @@ mod tests {
     }
 
     #[test]
-    fn online_projects_are_never_cached_and_declare_the_debug_apk() {
+    fn online_projects_are_reused_only_locally_and_declare_the_debug_apk() {
         let dir = android_project(true);
         let plan = GradleAdapter
             .generate(dir.path(), &AdapterOptions::new())
             .expect("generate");
         let action = &plan.actions[0].action;
         assert_eq!(action.id, "assembleDebug");
-        assert_eq!(action.cache_policy, CachePolicy::Never);
+        assert_eq!(action.cache_policy, CachePolicy::Local);
         assert!(!action.argv.iter().any(|arg| arg == "--offline"));
         assert_eq!(
             action.outputs[0].path,

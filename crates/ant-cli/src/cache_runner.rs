@@ -91,6 +91,12 @@ pub struct ExecConfig {
     pub sandbox: bool,
     pub enforce_memory: bool,
     pub isolated: Option<&'static IsolatedAccount>,
+    /// Local trusted reuse (D-028, `ant build`): unsandboxed runs key by
+    /// content-only digests through [`build_digest::trusted_local_key`],
+    /// against a store that is never shared.
+    pub local_reuse: bool,
+    /// Skip lookups (results are still stored): `ant build --fresh`.
+    pub fresh: bool,
 }
 
 pub fn run_action(
@@ -104,8 +110,17 @@ pub fn run_action(
         sandbox,
         enforce_memory,
         isolated,
+        local_reuse,
+        fresh,
     } = exec;
-    let mut prepared = local_executor::prepare_with_metadata(workspace, action)?;
+    let local_reuse = local_reuse && !sandbox && isolated.is_none();
+    // Local reuse keys by content only, so a branch switch or re-checkout
+    // that rewrites timestamps still hits.
+    let mut prepared = if local_reuse {
+        local_executor::prepare(workspace, action)?
+    } else {
+        local_executor::prepare_with_metadata(workspace, action)?
+    };
     if enforce_memory {
         prepared.enforce_memory_limit();
     }
@@ -115,6 +130,8 @@ pub fn run_action(
         ExecutionFingerprint::local_network_isolated(workspace)
     } else if sandbox {
         local_executor::sandboxed_fingerprint(workspace)
+    } else if local_reuse {
+        ExecutionFingerprint::local(workspace)
     } else {
         ExecutionFingerprint::local_metadata_fingerprinting(workspace)
     };
@@ -127,10 +144,20 @@ pub fn run_action(
         .collect();
     let candidate = build_digest::action_key_candidate(action, &inputs, &fingerprint)
         .map_err(ExecutionError::InputDigest)?;
+    // Proven key, or (local reuse only) the domain-separated trusted key.
+    // Actions without declared outputs have nothing to restore.
+    let key = if candidate.cache_eligible {
+        Some(candidate.digest)
+    } else if local_reuse && !action.outputs.is_empty() {
+        build_digest::trusted_local_key(&candidate)
+    } else {
+        None
+    };
 
-    if candidate.cache_eligible
+    if !fresh
+        && let Some(key) = &key
         && let Some(cache) = &participant.cache
-        && let Some(output_digests) = try_reuse(cache, &candidate.digest, action, workspace)
+        && let Some(output_digests) = try_reuse(cache, key, action, workspace)
     {
         return Ok(ActionRun::Reused {
             candidate,
@@ -144,7 +171,7 @@ pub fn run_action(
     if result.success()
         && !result.cancelled
         && !result.timed_out
-        && candidate.cache_eligible
+        && let Some(key) = &key
         && let Some(cache) = &participant.cache
     {
         let outputs: Vec<(std::path::PathBuf, OutputKind)> = action
@@ -154,7 +181,7 @@ pub fn run_action(
             .collect();
         // On success the executor re-verified the inputs unchanged, so
         // the pre-run candidate is the key these outputs belong to.
-        if let Err(error) = cache.store(&candidate.digest, workspace, &outputs) {
+        if let Err(error) = cache.store(key, workspace, &outputs) {
             store_warning = Some(format!("cache store failed: {error}"));
         }
     }
@@ -203,9 +230,19 @@ fn try_reuse(
     let mut output_digests = Vec::with_capacity(action.outputs.len());
     for output in &action.outputs {
         let path = workspace.join(&output.path);
-        let digest = match output.kind {
-            OutputKind::File => build_digest::digest_file(&path),
-            OutputKind::Tree => build_digest::digest_tree(&path),
+        let cache = workspace
+            .canonicalize()
+            .ok()
+            .and_then(|root| build_digest::workspace_cache(&root));
+        let digest = match (output.kind, &cache) {
+            (OutputKind::File, Some(cache)) => {
+                build_digest::digest_file_cached(&path, false, cache)
+            }
+            (OutputKind::Tree, Some(cache)) => {
+                build_digest::digest_tree_cached(&path, false, cache)
+            }
+            (OutputKind::File, None) => build_digest::digest_file(&path),
+            (OutputKind::Tree, None) => build_digest::digest_tree(&path),
         }
         .ok()?;
         output_digests.push(ActionContentDigest {
@@ -359,6 +396,9 @@ mod tests {
             .expect("dir entry")
             .path();
         fs::write(&blob, b"tampered").expect("corrupt blob");
+        // The output must come from the blob (an output already in place
+        // with the right content is kept without reading the cache).
+        fs::remove_file(workspace.path().join("out.txt")).expect("remove output");
 
         let action = reuse_action();
         assert!(

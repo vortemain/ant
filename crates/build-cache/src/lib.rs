@@ -347,6 +347,12 @@ impl Cache {
                     });
                 };
                 let target = workspace.join(&file.path);
+                // Already in place with the right content: nothing to write
+                // (digest through the change-detection cache when enabled,
+                // so an unchanged output is not even re-read; D-028).
+                if current_digest(workspace, &target).is_some_and(|digest| digest == blob_digest) {
+                    continue;
+                }
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent).map_err(|source| CacheError::Io {
                         path: parent.to_path_buf(),
@@ -462,6 +468,23 @@ fn validate_relative(path: &Path) -> Result<String, String> {
 
 fn hex(digest: &ContentDigest) -> String {
     digest.0.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The digest of an existing regular file, through the workspace's
+/// change-detection cache when the process enabled one.
+fn current_digest(workspace: &Path, target: &Path) -> Option<ContentDigest> {
+    let metadata = fs::symlink_metadata(target).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let cache = workspace
+        .canonicalize()
+        .ok()
+        .and_then(|root| build_digest::workspace_cache(&root));
+    match cache {
+        Some(cache) => cache.digest(target, &metadata, false).ok(),
+        None => digest_file(target).ok(),
+    }
 }
 
 #[cfg(test)]

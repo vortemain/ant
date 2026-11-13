@@ -268,6 +268,13 @@ impl BuildAdapter for CargoAdapter {
             &mut has_symlink,
         )?;
         let fully_declared = fully_declared && !has_symlink;
+        // Local reuse (D-028): registry and git dependencies are pinned by
+        // Cargo.lock (versions and checksums), so this machine may reuse
+        // its own result; path dependencies outside the project are not
+        // pinned by anything and keep the plan at `never`.
+        let locally_pinned = lock_exists
+            && !has_symlink
+            && outside_packages_are_pinned(&metadata, &member_ids, &workspace_root)?;
 
         // Prepare the staging directory generated actions use as TMP/TEMP
         // (see the crate-level contract): toolchain scratch writes land
@@ -392,6 +399,8 @@ impl BuildAdapter for CargoAdapter {
                 // reuse unsound.
                 cache_policy: if fully_declared {
                     CachePolicy::Eligible
+                } else if locally_pinned {
+                    CachePolicy::Local
                 } else {
                     CachePolicy::Never
                 },
@@ -519,6 +528,39 @@ fn all_packages_inside(
             .as_str()
             .ok_or_else(|| bad_metadata("package has no id"))?;
         if member_ids.contains(id) {
+            continue;
+        }
+        let manifest = Path::new(
+            package["manifest_path"]
+                .as_str()
+                .ok_or_else(|| bad_metadata("package manifest_path is missing"))?,
+        );
+        let inside = manifest
+            .parent()
+            .is_some_and(|dir| relative_to(workspace_root, dir).is_ok());
+        if !inside {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Every non-member package is either inside the project or comes from a
+/// lock-pinned source (registry or git: `source` is set). Path dependencies
+/// outside the project have no source and are not pinned.
+fn outside_packages_are_pinned(
+    metadata: &serde_json::Value,
+    member_ids: &BTreeSet<&str>,
+    workspace_root: &Path,
+) -> Result<bool, AdapterError> {
+    for package in metadata_value(metadata, "packages")?
+        .as_array()
+        .ok_or_else(|| bad_metadata("packages is not an array"))?
+    {
+        let id = package["id"]
+            .as_str()
+            .ok_or_else(|| bad_metadata("package has no id"))?;
+        if member_ids.contains(id) || package["source"].is_string() {
             continue;
         }
         let manifest = Path::new(

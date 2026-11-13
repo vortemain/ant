@@ -598,6 +598,8 @@ pub fn local_runtime_environment() -> Vec<(std::ffi::OsString, std::ffi::OsStrin
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CacheabilityReason {
     PolicyNever,
+    /// `cache_policy: local`: reusable only on this machine (D-028).
+    PolicyLocalOnly,
     MissingToolchainIdentity,
     MissingInputDigest(PathBuf),
     UnexpectedInputDigest(PathBuf),
@@ -613,6 +615,7 @@ impl fmt::Display for CacheabilityReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             Self::PolicyNever => "policy-never".to_owned(),
+            Self::PolicyLocalOnly => "policy-local-only".to_owned(),
             Self::MissingToolchainIdentity => "missing-toolchain-identity".to_owned(),
             Self::MissingInputDigest(path) => format!("missing-input-digest={}", path.display()),
             Self::UnexpectedInputDigest(path) => {
@@ -642,6 +645,31 @@ pub struct ActionKeyCandidate {
     pub reasons: Vec<CacheabilityReason>,
 }
 
+/// The key for **local, trusted reuse** (D-028): the same machine reusing
+/// its own earlier result, the way Turborepo and Nx do, without a sandbox.
+/// Allowed only when every blocker is one that local trust accepts (no
+/// sandbox, no network isolation, content-only digests, local-only policy);
+/// a never-policy action, a missing toolchain identity, or any input-digest
+/// mismatch still blocks. The key is domain-separated from proven keys, and
+/// callers keep these results in a separate, never-shared store.
+pub fn trusted_local_key(candidate: &ActionKeyCandidate) -> Option<ContentDigest> {
+    let accepted = candidate.reasons.iter().all(|reason| {
+        matches!(
+            reason,
+            CacheabilityReason::PolicyLocalOnly
+                | CacheabilityReason::NetworkIsolationUnavailable
+                | CacheabilityReason::LocalExecutorUnsandboxed
+                | CacheabilityReason::FilesystemMetadataNotFingerprintable
+        )
+    });
+    accepted.then(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ant-local-trusted-key-v1\0");
+        hasher.update(candidate.digest.0);
+        ContentDigest(hasher.finalize().into())
+    })
+}
+
 /// Compute a stable candidate key without performing cache lookup or reuse.
 pub fn action_key_candidate(
     action: &build_action::Action,
@@ -650,8 +678,10 @@ pub fn action_key_candidate(
 ) -> Result<ActionKeyCandidate, DigestError> {
     use build_action::CachePolicy;
     let mut reasons = Vec::new();
-    if action.cache_policy == CachePolicy::Never {
-        reasons.push(CacheabilityReason::PolicyNever);
+    match action.cache_policy {
+        CachePolicy::Never => reasons.push(CacheabilityReason::PolicyNever),
+        CachePolicy::Local => reasons.push(CacheabilityReason::PolicyLocalOnly),
+        CachePolicy::Eligible => {}
     }
     if action.toolchain.is_none() {
         reasons.push(CacheabilityReason::MissingToolchainIdentity);
@@ -1058,6 +1088,37 @@ mod tests {
             digest_file(&dir.path().join("link.txt")).unwrap_err(),
             DigestError::Symlink(_)
         ));
+    }
+
+    #[test]
+    fn trusted_local_keys_accept_only_local_trust_blockers() {
+        let dir = std::env::temp_dir();
+        let inputs = vec![(PathBuf::from("in.txt"), digest_bytes(b"x"))];
+        let mut action = sample_action();
+        action.toolchain = Some(build_action::ToolchainIdentity {
+            name: "tool".to_owned(),
+            version: "1".to_owned(),
+            executable_digest: digest_bytes(b"tool").to_string(),
+        });
+        let fingerprint = ExecutionFingerprint::local(&dir);
+
+        action.cache_policy = CachePolicy::Never;
+        let never = action_key_candidate(&action, &inputs, &fingerprint).expect("candidate");
+        assert_eq!(trusted_local_key(&never), None, "never stays never");
+
+        action.cache_policy = CachePolicy::Local;
+        let local = action_key_candidate(&action, &inputs, &fingerprint).expect("candidate");
+        assert!(!local.cache_eligible, "local results are never proven");
+        let key = trusted_local_key(&local).expect("local trust accepts");
+        assert_ne!(key, local.digest, "domain-separated from proven keys");
+
+        action.toolchain = None;
+        let unidentified = action_key_candidate(&action, &inputs, &fingerprint).expect("candidate");
+        assert_eq!(
+            trusted_local_key(&unidentified),
+            None,
+            "toolchain identity required"
+        );
     }
 
     fn sample_action() -> build_action::Action {

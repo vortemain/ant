@@ -85,7 +85,7 @@ See [Getting started](docs/getting-started.md).
 
 | Ecosystem | `ant build` | Proven result reuse (cache engine) |
 |---|---|---|
-| Rust / Cargo (incl. workspaces) | ✅ binaries into `dist/` | ✅ measured, with vendored dependencies |
+| Rust / Cargo (incl. workspaces) | ✅ binaries into `dist/`; reuses its own earlier builds | ✅ measured, with vendored dependencies |
 | JavaScript / TypeScript / npm (incl. workspaces) | ✅ | not yet (`node_modules` is undeclared) |
 | C / C++ / CMake | ✅ | not yet |
 | Android / Gradle | via `ant adapt` (P3 brings it to `ant build`) | ✅ measured on JetNews, plus Gradle's own task cache |

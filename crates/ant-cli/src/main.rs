@@ -286,6 +286,8 @@ fn run() -> Result<u8, String> {
                 sandbox: sandbox || network_isolated,
                 enforce_memory,
                 isolated,
+                local_reuse: false,
+                fresh: false,
             },
         };
         return execute_plan(

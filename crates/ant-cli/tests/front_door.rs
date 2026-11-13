@@ -35,6 +35,9 @@ fn ant_in(dir: &Path, args: &[&str]) -> (i32, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_ant"))
         .current_dir(dir)
         .env("RUST_BACKTRACE", "0")
+        // Keep per-user caches (change detection, local results) inside the
+        // test project's own `.ant/`, which is never a build input.
+        .env("ANT_CACHE_HOME", dir.join(".ant").join("cache-home"))
         .args(args)
         .output()
         .expect("spawn ant");
@@ -113,7 +116,7 @@ fn ant_build_needs_no_configuration_and_collects_runnable_artifacts() {
     let (code, _, stderr) = ant_in(dir.path(), &["build"]);
     assert_eq!(code, 0, "{stderr:?}");
     // --verbose shows the engine's machine lines too.
-    let (code, stdout, _) = ant_in(dir.path(), &["build", "--verbose"]);
+    let (code, stdout, _) = ant_in(dir.path(), &["build", "--verbose", "--fresh"]);
     assert_eq!(code, 0);
     assert!(
         stdout.contains("action=workspace status=succeeded"),
@@ -230,4 +233,61 @@ fn ant_build_runs_an_npm_project_without_configuration() {
     assert!(stdout.contains("ant build · npm · 1 step"), "{stdout:?}");
     assert!(stdout.contains("wrote its output in place"), "{stdout:?}");
     assert!(dir.path().join("dist").join("main.js").is_file());
+}
+
+fn run_artifact(dir: &Path) -> String {
+    let output = Command::new(dir.join("dist").join(exe("greeter")))
+        .output()
+        .expect("run artifact");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Local trusted reuse (D-028): an unchanged project is restored instead of
+/// rebuilt, a changed one rebuilds, switching back restores the earlier
+/// result (the artifact really is the old program), and `--fresh` rebuilds.
+#[test]
+fn ant_build_reuses_its_own_results_and_rebuilds_on_change() {
+    let dir = TempDir::new("local-reuse");
+    rust_workspace(dir.path());
+    let (code, stdout, stderr) = ant_in(dir.path(), &["build", "--dev"]);
+    assert_eq!(code, 0, "{stdout:?} {stderr:?}");
+    assert!(
+        !stdout.contains("reused"),
+        "first build executes: {stdout:?}"
+    );
+    let original = run_artifact(dir.path());
+
+    let (code, stdout, _) = ant_in(dir.path(), &["build", "--dev"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("reused from cache"), "{stdout:?}");
+    assert_eq!(run_artifact(dir.path()), original);
+
+    let main = dir.path().join("app/src/main.rs");
+    let source = fs::read_to_string(&main).expect("main");
+    write(
+        &main,
+        "fn main() { println!(\"branch b\"); }
+",
+    );
+    let (code, stdout, _) = ant_in(dir.path(), &["build", "--dev"]);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains("reused"), "a change rebuilds: {stdout:?}");
+    assert_eq!(run_artifact(dir.path()), "branch b");
+
+    write(&main, &source);
+    let (code, stdout, _) = ant_in(dir.path(), &["build", "--dev"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("reused from cache"),
+        "switching back restores: {stdout:?}"
+    );
+    assert_eq!(
+        run_artifact(dir.path()),
+        original,
+        "the restored program is the old one"
+    );
+
+    let (code, stdout, _) = ant_in(dir.path(), &["build", "--dev", "--fresh"]);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains("reused"), "--fresh rebuilds: {stdout:?}");
 }

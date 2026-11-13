@@ -168,18 +168,21 @@ fn safe_relative_dir(value: &str) -> Result<PathBuf, String> {
 // ant build
 // ---------------------------------------------------------------------------
 
-const BUILD_USAGE: &str = "usage: ant build [--dev] [--project PATH] [--jobs N] [--verbose]";
+const BUILD_USAGE: &str =
+    "usage: ant build [--dev] [--fresh] [--project PATH] [--jobs N] [--verbose]";
 
 pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let mut project = None;
     let mut dev = false;
     let mut verbose = false;
+    let mut fresh = false;
     let mut jobs = None;
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dev" => dev = true,
             "--verbose" => verbose = true,
+            "--fresh" => fresh = true,
             "--project" => project = Some(args.next().ok_or("--project requires a path")?),
             "--jobs" => {
                 jobs = Some(
@@ -249,9 +252,21 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             sandbox: false,
             enforce_memory: false,
             isolated: None,
+            // Reuse this machine's own earlier results (D-028); `--fresh`
+            // rebuilds and refreshes them.
+            local_reuse: true,
+            fresh,
         },
     };
-    let code = scheduler::run_plan(&graph, &root, &cancellation, run_options, None, &events)?;
+    let results = build_adapter::user_cache_dir().map(|dir| dir.join("local-results"));
+    let code = scheduler::run_plan(
+        &graph,
+        &root,
+        &cancellation,
+        run_options,
+        results.as_deref(),
+        &events,
+    )?;
     let elapsed = started.elapsed().as_secs_f64();
     if code != 0 {
         println!("\nBuild failed after {elapsed:.1}s. Re-run with --verbose for engine details.");

@@ -15,6 +15,11 @@ pub enum CachePolicy {
     Never,
     /// The planner asserts all output-affecting inputs are declared.
     Eligible,
+    /// Reusable only on the machine that built it, never shared (D-028):
+    /// every output-affecting input is declared or pinned (for example
+    /// registry dependencies pinned by a lock file), but some pinned content
+    /// lives outside the project, so the result cannot be proven elsewhere.
+    Local,
 }
 
 /// A declared workspace-relative file or tree input.
