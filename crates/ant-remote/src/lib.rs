@@ -12,4 +12,5 @@ pub mod client;
 pub mod coordinator;
 pub mod http;
 pub mod protocol;
+pub mod ui;
 pub mod worker;

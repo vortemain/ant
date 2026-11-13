@@ -33,6 +33,7 @@ dependencies = [
  "local-executor",
  "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]

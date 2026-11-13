@@ -83,6 +83,54 @@ pub struct JobStatus {
     pub error: Option<String>,
 }
 
+/// Control-plane read model of one job (`GET /v1/jobs`). Timestamps are the
+/// coordinator's wall clock in Unix milliseconds, recorded when the event
+/// happened — measured facts, never estimates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct JobSummary {
+    pub job_id: String,
+    pub action_id: String,
+    pub state: JobState,
+    pub attempts: u32,
+    /// Worker holding the lease (running) or that reported the result.
+    pub worker_id: Option<String>,
+    pub submitted_unix_ms: u64,
+    pub started_unix_ms: Option<u64>,
+    pub finished_unix_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+    /// `Some(true)` only for a completed job whose action succeeded.
+    pub succeeded: Option<bool>,
+    pub error: Option<String>,
+    pub input_count: usize,
+    pub output_count: usize,
+}
+
+/// `GET /v1/jobs`: every job the coordinator holds (in memory since start),
+/// newest first.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JobList {
+    pub coordinator_started_unix_ms: u64,
+    pub jobs: Vec<JobSummary>,
+}
+
+/// Control-plane read model of one worker, as observed by the coordinator.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkerSummary {
+    pub worker_id: String,
+    pub os: String,
+    /// Last lease poll or result report.
+    pub last_seen_unix_ms: u64,
+    pub current_job: Option<String>,
+    pub jobs_reported: u64,
+}
+
+/// `GET /v1/workers`: workers seen since the coordinator started.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkerList {
+    pub now_unix_ms: u64,
+    pub workers: Vec<WorkerSummary>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubmitResponse {
     pub job_id: String,

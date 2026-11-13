@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const COORDINATOR_USAGE: &str = "usage: ant coordinator --data-dir DIR --client-token-file FILE --worker-token-file FILE [--listen ADDR] [--allow-non-loopback] [--max-body-mb N]";
+const COORDINATOR_USAGE: &str = "usage: ant coordinator --data-dir DIR --client-token-file FILE --worker-token-file FILE [--viewer-token-file FILE] [--listen ADDR] [--allow-non-loopback] [--max-body-mb N]";
 const WORKER_USAGE: &str = "usage: ant worker --coordinator URL --token-file FILE --work-dir DIR [--id NAME] [--sandbox] [--once] [--allow-insecure-http]";
 const REMOTE_USAGE: &str = "usage: ant remote run --coordinator URL --token-file FILE --plan PLAN.json [--workspace PATH] [--allow-insecure-http]";
 
@@ -75,6 +75,7 @@ pub fn coordinator_command(args: impl Iterator<Item = OsString>) -> Result<u8, S
             "--data-dir",
             "--client-token-file",
             "--worker-token-file",
+            "--viewer-token-file",
             "--max-body-mb",
         ],
         &["--allow-non-loopback"],
@@ -98,11 +99,16 @@ pub fn coordinator_command(args: impl Iterator<Item = OsString>) -> Result<u8, S
     let worker_token = Token::from_file(&PathBuf::from(
         flags.require("--worker-token-file", COORDINATOR_USAGE)?,
     ))?;
+    let viewer_token = flags
+        .get("--viewer-token-file")
+        .map(|path| Token::from_file(&PathBuf::from(path)))
+        .transpose()?;
     let config = CoordinatorConfig {
         listen,
         data_dir: PathBuf::from(flags.require("--data-dir", COORDINATOR_USAGE)?),
         client_token,
         worker_token,
+        viewer_token,
         max_body_bytes: max_body_mb * 1024 * 1024,
         allow_non_loopback: flags.has("--allow-non-loopback"),
         threads: 8,
@@ -110,7 +116,7 @@ pub fn coordinator_command(args: impl Iterator<Item = OsString>) -> Result<u8, S
     serve(config, |bound| {
         use std::io::Write as _;
         println!(
-            "coordinator listening={bound} protocol_version={}",
+            "coordinator listening={bound} protocol_version={} dashboard=http://{bound}/ui",
             ant_remote::protocol::PROTOCOL_VERSION
         );
         let _ = std::io::stdout().flush();

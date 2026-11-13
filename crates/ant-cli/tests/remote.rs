@@ -48,6 +48,7 @@ impl Drop for Guard {
 
 const CLIENT_TOKEN: &str = "client-token-0123456789abcdefghijklmnopqrstuv";
 const WORKER_TOKEN: &str = "worker-token-0123456789abcdefghijklmnopqrstuv";
+const VIEWER_TOKEN: &str = "viewer-token-0123456789abcdefghijklmnopqrstuv";
 
 struct Cluster {
     dir: TempDir,
@@ -61,6 +62,7 @@ impl Cluster {
         let dir = TempDir::new(name);
         fs::write(dir.path().join("client.token"), CLIENT_TOKEN).expect("token");
         fs::write(dir.path().join("worker.token"), WORKER_TOKEN).expect("token");
+        fs::write(dir.path().join("viewer.token"), VIEWER_TOKEN).expect("token");
         let mut coordinator = Command::new(env!("CARGO_BIN_EXE_ant"))
             .args(["coordinator", "--listen", "127.0.0.1:0", "--data-dir"])
             .arg(dir.path().join("coord"))
@@ -68,6 +70,8 @@ impl Cluster {
             .arg(dir.path().join("client.token"))
             .arg("--worker-token-file")
             .arg(dir.path().join("worker.token"))
+            .arg("--viewer-token-file")
+            .arg(dir.path().join("viewer.token"))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -382,4 +386,141 @@ fn transport_guards_refuse_unsafe_configurations() {
         .expect("run");
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to listen on non-loopback"));
+}
+
+#[test]
+fn control_plane_read_model_and_viewer_role() {
+    let cluster = Cluster::start("control-plane", true);
+    let ws = cluster.dir.path().join("ws");
+    fs::create_dir_all(&ws).expect("ws");
+    fs::write(ws.join("in.txt"), "x").expect("input");
+    let copy = if cfg!(windows) {
+        "copy /Y in.txt out.txt >nul"
+    } else {
+        "cp in.txt out.txt"
+    };
+    let plan = write_plan(
+        cluster.dir.path(),
+        &[action(
+            "copy",
+            copy,
+            json!([{ "path": "in.txt", "kind": "file" }]),
+            json!([{ "path": "out.txt", "kind": "file" }]),
+            &[],
+        )],
+    );
+    let (code, stdout, stderr) = cluster.remote_run(&ws, &plan);
+    assert_eq!(code, 0, "stderr {stderr:?} stdout {stdout:?}");
+
+    let viewer = cluster.client(VIEWER_TOKEN);
+    let jobs: ant_remote::protocol::JobList = viewer
+        .get_json("/v1/jobs", "list jobs")
+        .expect("viewer lists jobs");
+    assert_eq!(jobs.jobs.len(), 1, "{jobs:?}");
+    let job = &jobs.jobs[0];
+    assert_eq!(job.action_id, "copy");
+    assert_eq!(job.state, ant_remote::protocol::JobState::Completed);
+    assert_eq!(job.succeeded, Some(true));
+    assert_eq!(job.exit_code, Some(0));
+    assert_eq!(job.worker_id.as_deref(), Some("test-worker"));
+    assert_eq!((job.input_count, job.output_count), (1, 1));
+    let (submitted, started, finished) = (
+        job.submitted_unix_ms,
+        job.started_unix_ms.expect("started"),
+        job.finished_unix_ms.expect("finished"),
+    );
+    assert!(
+        jobs.coordinator_started_unix_ms <= submitted
+            && submitted <= started
+            && started <= finished,
+        "{job:?}"
+    );
+
+    let workers: ant_remote::protocol::WorkerList = viewer
+        .get_json("/v1/workers", "list workers")
+        .expect("viewer lists workers");
+    assert_eq!(workers.workers.len(), 1);
+    assert_eq!(workers.workers[0].worker_id, "test-worker");
+    assert_eq!(workers.workers[0].os, std::env::consts::OS);
+    assert_eq!(workers.workers[0].jobs_reported, 1);
+    assert!(workers.workers[0].last_seen_unix_ms <= workers.now_unix_ms);
+
+    let status: ant_remote::protocol::JobStatus = viewer
+        .get_json(&format!("/v1/jobs/{}", job.job_id), "status")
+        .expect("viewer reads status");
+    assert_eq!(status.state, ant_remote::protocol::JobState::Completed);
+
+    // The viewer is strictly read-only.
+    let error = viewer
+        .missing(vec![format!("sha256:{}", "0".repeat(64))])
+        .expect_err("blobs");
+    assert!(error.contains("403"), "{error}");
+    let error = viewer.put_blob(b"x").expect_err("upload");
+    assert!(error.contains("403"), "{error}");
+    let lease = json!({ "protocol_version": 1, "worker_id": "v", "os": "x" });
+    let error = viewer
+        .post_json::<_, serde_json::Value>("/v1/lease", &lease, "lease")
+        .expect_err("lease");
+    assert!(error.contains("403"), "{error}");
+    let error = viewer
+        .post_json::<_, serde_json::Value>("/v1/jobs", &json!({}), "submit")
+        .expect_err("submit");
+    assert!(error.contains("403"), "{error}");
+    // Workers cannot read the control plane.
+    let error = cluster
+        .client(WORKER_TOKEN)
+        .get_json::<serde_json::Value>("/v1/jobs", "list")
+        .expect_err("worker");
+    assert!(error.contains("403"), "{error}");
+}
+
+#[test]
+fn dashboard_is_static_data_free_and_locked_down() {
+    let cluster = Cluster::start("dashboard", false);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    for (path, content_type, marker) in [
+        ("/ui", "text/html", "<title>Ant coordinator</title>"),
+        ("/", "text/html", "/ui/app.js"),
+        ("/ui/app.js", "text/javascript", "textContent"),
+        ("/ui/app.css", "text/css", "prefers-color-scheme"),
+    ] {
+        let mut response = agent
+            .get(&format!("{}{path}", cluster.url))
+            .call()
+            .expect("get");
+        assert_eq!(response.status().as_u16(), 200, "{path}");
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned()
+        };
+        assert!(header("content-type").starts_with(content_type), "{path}");
+        let csp = header("content-security-policy");
+        assert!(
+            csp.contains("default-src 'none'")
+                && csp.contains("script-src 'self'")
+                && csp.contains("frame-ancestors 'none'"),
+            "{path}: {csp}"
+        );
+        assert_eq!(header("x-content-type-options"), "nosniff");
+        let body = response.body_mut().read_to_string().expect("body");
+        assert!(body.contains(marker), "{path}");
+        assert!(
+            !body.contains(CLIENT_TOKEN) && !body.contains("job-"),
+            "{path} must not embed data"
+        );
+    }
+    // Without a token the data routes stay closed.
+    let response = agent
+        .get(&format!("{}/v1/jobs", cluster.url))
+        .call()
+        .expect("get");
+    assert_eq!(response.status().as_u16(), 401);
 }

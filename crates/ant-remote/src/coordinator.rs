@@ -12,6 +12,13 @@
 //! | GET    | `/v1/jobs/{id}`           | client        |
 //! | POST   | `/v1/lease`               | worker        |
 //! | POST   | `/v1/jobs/{id}/result`    | worker (the lease holder) |
+//! | GET    | `/v1/jobs`                | client/viewer |
+//! | GET    | `/v1/workers`             | client/viewer |
+//! | GET    | `/`, `/ui`, `/ui/app.*`   | none (static dashboard; contains no data) |
+//!
+//! The optional viewer token is read-only: list and status routes only. Every
+//! response carries a restrictive Content-Security-Policy and related
+//! headers because browsers talk to the coordinator through the dashboard.
 //!
 //! Jobs live in memory: a coordinator restart loses queued and running jobs
 //! (blobs persist on disk). A worker that stops reporting loses its lease
@@ -21,8 +28,9 @@
 use crate::auth::Token;
 use crate::blobs::BlobStore;
 use crate::protocol::{
-    Health, JobResult, JobSpec, JobState, JobStatus, LeaseRequest, LeaseResponse, MissingRequest,
-    MissingResponse, PROTOCOL_VERSION, SubmitResponse, validate_entries,
+    Health, JobList, JobResult, JobSpec, JobState, JobStatus, JobSummary, LeaseRequest,
+    LeaseResponse, MissingRequest, MissingResponse, PROTOCOL_VERSION, SubmitResponse, WorkerList,
+    WorkerSummary, validate_entries,
 };
 use build_digest::ContentDigest;
 use std::collections::{HashMap, VecDeque};
@@ -37,6 +45,8 @@ pub struct CoordinatorConfig {
     pub data_dir: PathBuf,
     pub client_token: Token,
     pub worker_token: Token,
+    /// Optional read-only token for the dashboard and monitoring.
+    pub viewer_token: Option<Token>,
     /// Largest accepted upload (blob or JSON document), in bytes.
     pub max_body_bytes: u64,
     /// Binding a non-loopback address is refused unless this is set: tokens
@@ -56,6 +66,23 @@ struct JobRecord {
     lease: Option<(String, Instant)>,
     result: Option<JobResult>,
     error: Option<String>,
+    submitted_ms: u64,
+    started_ms: Option<u64>,
+    finished_ms: Option<u64>,
+}
+
+struct WorkerRecord {
+    os: String,
+    last_seen_ms: u64,
+    current_job: Option<String>,
+    jobs_reported: u64,
+}
+
+/// Coordinator wall clock in Unix milliseconds.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 #[derive(Default)]
@@ -63,6 +90,7 @@ struct Jobs {
     next_id: u64,
     records: HashMap<String, JobRecord>,
     queue: VecDeque<String>,
+    workers: HashMap<String, WorkerRecord>,
 }
 
 impl Jobs {
@@ -82,6 +110,7 @@ impl Jobs {
                     requeue.push(id.clone());
                 } else {
                     record.state = JobState::Failed;
+                    record.finished_ms = Some(now_ms());
                     record.error =
                         Some(format!("lease expired {MAX_ATTEMPTS} times (worker lost)"));
                 }
@@ -89,6 +118,49 @@ impl Jobs {
         }
         requeue.sort();
         self.queue.extend(requeue);
+    }
+
+    fn summaries(&self) -> Vec<JobSummary> {
+        let mut jobs: Vec<JobSummary> = self
+            .records
+            .iter()
+            .map(|(id, record)| JobSummary {
+                job_id: id.clone(),
+                action_id: record.spec.action.id.clone(),
+                state: record.state,
+                attempts: record.attempts,
+                worker_id: record
+                    .lease
+                    .as_ref()
+                    .map(|(worker, _)| worker.clone())
+                    .or_else(|| record.result.as_ref().map(|r| r.worker_id.clone())),
+                submitted_unix_ms: record.submitted_ms,
+                started_unix_ms: record.started_ms,
+                finished_unix_ms: record.finished_ms,
+                exit_code: record.result.as_ref().and_then(|r| r.exit_code),
+                succeeded: match record.state {
+                    JobState::Completed => record.result.as_ref().map(JobResult::succeeded),
+                    JobState::Failed => Some(false),
+                    _ => None,
+                },
+                error: record
+                    .error
+                    .clone()
+                    .or_else(|| record.result.as_ref().and_then(|r| r.error.clone())),
+                input_count: record.spec.inputs.len(),
+                output_count: record.result.as_ref().map_or(0, |r| r.outputs.len()),
+            })
+            .collect();
+        // Newest first; job ids are `job-N` with increasing N.
+        jobs.sort_by_key(|job| {
+            std::cmp::Reverse(
+                job.job_id
+                    .trim_start_matches("job-")
+                    .parse::<u64>()
+                    .unwrap_or(0),
+            )
+        });
+        jobs
     }
 
     fn status(&self, id: &str) -> Option<JobStatus> {
@@ -106,12 +178,14 @@ struct State {
     config: CoordinatorConfig,
     blobs: BlobStore,
     jobs: Mutex<Jobs>,
+    started_ms: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
     Client,
     Worker,
+    Viewer,
 }
 
 type Reply = (u16, Vec<u8>, &'static str);
@@ -152,6 +226,7 @@ pub fn serve(config: CoordinatorConfig, on_bound: impl FnOnce(SocketAddr)) -> Re
         config,
         blobs,
         jobs: Mutex::new(Jobs::default()),
+        started_ms: now_ms(),
     });
     let server = Arc::new(server);
     on_bound(bound);
@@ -174,13 +249,26 @@ pub fn serve(config: CoordinatorConfig, on_bound: impl FnOnce(SocketAddr)) -> Re
 fn handle(state: &State, mut request: tiny_http::Request) {
     let reply = route(state, &mut request);
     let (code, body, content_type) = reply;
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes())
-        .expect("static header");
-    let _ = request.respond(
-        tiny_http::Response::from_data(body)
-            .with_status_code(code)
-            .with_header(header),
-    );
+    let mut response = tiny_http::Response::from_data(body).with_status_code(code);
+    for (name, value) in [
+        ("Content-Type", content_type),
+        // The dashboard loads only its own script/style and talks only to
+        // this origin; nothing may frame it or leak referrers.
+        (
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; \
+             img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        ),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Cache-Control", "no-store"),
+    ] {
+        response.add_header(
+            tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+                .expect("static header"),
+        );
+    }
+    let _ = request.respond(response);
 }
 
 fn authenticate(state: &State, request: &tiny_http::Request) -> Option<Role> {
@@ -193,6 +281,13 @@ fn authenticate(state: &State, request: &tiny_http::Request) -> Option<Role> {
         Some(Role::Client)
     } else if state.config.worker_token.matches_header(&presented) {
         Some(Role::Worker)
+    } else if state
+        .config
+        .viewer_token
+        .as_ref()
+        .is_some_and(|token| token.matches_header(&presented))
+    {
+        Some(Role::Viewer)
     } else {
         None
     }
@@ -221,6 +316,18 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or("").to_owned();
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if method == tiny_http::Method::Get {
+        // Static dashboard assets: public, data-free.
+        let asset = match segments.as_slice() {
+            [""] | ["ui"] | ["ui", ""] => Some((crate::ui::INDEX_HTML, "text/html; charset=utf-8")),
+            ["ui", "app.js"] => Some((crate::ui::APP_JS, "text/javascript; charset=utf-8")),
+            ["ui", "app.css"] => Some((crate::ui::APP_CSS, "text/css; charset=utf-8")),
+            _ => None,
+        };
+        if let Some((body, content_type)) = asset {
+            return (200, body.as_bytes().to_vec(), content_type);
+        }
+    }
     if method == tiny_http::Method::Get && segments == ["v1", "health"] {
         return json_reply(
             200,
@@ -233,6 +340,13 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         return error_reply(401, "missing or invalid bearer token");
     };
     let result = match (&method, segments.as_slice()) {
+        (tiny_http::Method::Get, ["v1", "jobs"]) => require_reader(role).map(|_| list_jobs(state)),
+        (tiny_http::Method::Get, ["v1", "workers"]) => {
+            require_reader(role).map(|_| list_workers(state))
+        }
+        (_, ["v1", "blobs", ..]) if role == Role::Viewer => {
+            Err(error_reply(403, "viewer tokens are read-only"))
+        }
         (tiny_http::Method::Post, ["v1", "blobs", "missing"]) => missing(state, request),
         (tiny_http::Method::Put, ["v1", "blobs", digest]) => put_blob(state, request, digest),
         (tiny_http::Method::Get, ["v1", "blobs", digest]) => get_blob(state, digest),
@@ -240,7 +354,7 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
             require(role, Role::Client).and_then(|_| submit(state, request))
         }
         (tiny_http::Method::Get, ["v1", "jobs", id]) => {
-            require(role, Role::Client).and_then(|_| job_status(state, id))
+            require_reader(role).and_then(|_| job_status(state, id))
         }
         (tiny_http::Method::Post, ["v1", "lease"]) => {
             require(role, Role::Worker).and_then(|_| lease(state, request))
@@ -251,6 +365,50 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         _ => Err(error_reply(404, "no such route")),
     };
     result.unwrap_or_else(|reply| reply)
+}
+
+/// Read-model routes: clients and viewers.
+fn require_reader(actual: Role) -> Result<(), Reply> {
+    if matches!(actual, Role::Client | Role::Viewer) {
+        Ok(())
+    } else {
+        Err(error_reply(403, "token role not permitted for this route"))
+    }
+}
+
+fn list_jobs(state: &State) -> Reply {
+    let mut jobs = state.jobs.lock().expect("jobs lock");
+    jobs.expire_leases(Instant::now());
+    json_reply(
+        200,
+        &JobList {
+            coordinator_started_unix_ms: state.started_ms,
+            jobs: jobs.summaries(),
+        },
+    )
+}
+
+fn list_workers(state: &State) -> Reply {
+    let jobs = state.jobs.lock().expect("jobs lock");
+    let mut workers: Vec<WorkerSummary> = jobs
+        .workers
+        .iter()
+        .map(|(id, worker)| WorkerSummary {
+            worker_id: id.clone(),
+            os: worker.os.clone(),
+            last_seen_unix_ms: worker.last_seen_ms,
+            current_job: worker.current_job.clone(),
+            jobs_reported: worker.jobs_reported,
+        })
+        .collect();
+    workers.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
+    json_reply(
+        200,
+        &WorkerList {
+            now_unix_ms: now_ms(),
+            workers,
+        },
+    )
 }
 
 fn require(actual: Role, needed: Role) -> Result<(), Reply> {
@@ -337,6 +495,9 @@ fn submit(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Repl
             lease: None,
             result: None,
             error: None,
+            submitted_ms: now_ms(),
+            started_ms: None,
+            finished_ms: None,
         },
     );
     jobs.queue.push_back(job_id.clone());
@@ -366,9 +527,26 @@ fn lease(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Reply
     let now = Instant::now();
     let mut jobs = state.jobs.lock().expect("jobs lock");
     jobs.expire_leases(now);
+    // Every poll is a heartbeat, including empty ones.
+    let seen = now_ms();
+    let worker = jobs
+        .workers
+        .entry(lease.worker_id.clone())
+        .or_insert(WorkerRecord {
+            os: lease.os.clone(),
+            last_seen_ms: seen,
+            current_job: None,
+            jobs_reported: 0,
+        });
+    worker.os = lease.os.clone();
+    worker.last_seen_ms = seen;
+    worker.current_job = None;
     let Some(job_id) = jobs.queue.pop_front() else {
         return Ok((204, Vec::new(), "application/json"));
     };
+    if let Some(worker) = jobs.workers.get_mut(&lease.worker_id) {
+        worker.current_job = Some(job_id.clone());
+    }
     let record = jobs.records.get_mut(&job_id).expect("queued job exists");
     let lease_for = record
         .spec
@@ -378,6 +556,7 @@ fn lease(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Reply
         + LEASE_GRACE;
     record.state = JobState::Running;
     record.attempts += 1;
+    record.started_ms = Some(seen);
     record.lease = Some((lease.worker_id, now + lease_for));
     let spec = record.spec.clone();
     Ok(json_reply(200, &LeaseResponse { job_id, spec }))
@@ -413,7 +592,15 @@ fn post_result(state: &State, request: &mut tiny_http::Request, id: &str) -> Res
     }
     record.state = JobState::Completed;
     record.lease = None;
+    let finished = now_ms();
+    record.finished_ms = Some(finished);
+    let worker_id = result.worker_id.clone();
     record.result = Some(result);
+    if let Some(worker) = jobs.workers.get_mut(&worker_id) {
+        worker.last_seen_ms = finished;
+        worker.current_job = None;
+        worker.jobs_reported += 1;
+    }
     Ok(json_reply(200, &serde_json::json!({ "accepted": id })))
 }
 
@@ -438,6 +625,9 @@ mod tests {
             lease: Some(("w".into(), Instant::now())),
             result: None,
             error: None,
+            submitted_ms: 1,
+            started_ms: Some(2),
+            finished_ms: None,
         }
     }
 

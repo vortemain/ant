@@ -32,5 +32,9 @@ ant-sandbox-win = { path = "../ant-sandbox-win" }
 # terminating the process without cleanup. Justified in docs/plan.md.
 version = "3.5.2"
 
+[dev-dependencies]
+# Raw HTTP checks of the coordinator dashboard headers in e2e tests.
+ureq.workspace = true
+
 [lints]
 workspace = true
