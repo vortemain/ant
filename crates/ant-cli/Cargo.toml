@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 build-action = { path = "../build-action" }
+ant-remote = { path = "../ant-remote" }
 build-adapter = { path = "../build-adapter" }
 build-cache = { path = "../build-cache" }
 build-digest = { path = "../build-digest" }

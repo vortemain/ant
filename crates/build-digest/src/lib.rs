@@ -110,6 +110,19 @@ fn hash_metadata(hasher: &mut Sha256, metadata: &FileMetadata) {
     }
 }
 
+/// Domain separator for Ant's canonical file-content digest.
+const FILE_DOMAIN: &[u8] = b"ant-file-v1\0";
+
+/// Canonical digest of in-memory file content: identical to [`digest_file`]
+/// for a file holding `bytes`. Remote blobs are named by this digest, so a
+/// transferred file and the same file digested locally always agree.
+pub fn digest_bytes(bytes: &[u8]) -> ContentDigest {
+    let mut hasher = Sha256::new();
+    hasher.update(FILE_DOMAIN);
+    hasher.update(bytes);
+    ContentDigest(hasher.finalize().into())
+}
+
 pub fn digest_file(path: &Path) -> Result<ContentDigest, DigestError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| DigestError::Io {
         path: path.to_path_buf(),
@@ -126,7 +139,7 @@ pub fn digest_file(path: &Path) -> Result<ContentDigest, DigestError> {
         source,
     })?;
     let mut hasher = Sha256::new();
-    hasher.update(b"ant-file-v1\0");
+    hasher.update(FILE_DOMAIN);
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let count = file.read(&mut buffer).map_err(|source| DigestError::Io {
@@ -978,6 +991,21 @@ mod tests {
             inherited_environment: local_runtime_environment(),
             capabilities: ExecutorCapabilities::default(),
         }
+    }
+
+    #[test]
+    fn digest_bytes_matches_digest_file() {
+        // Remote blob names rely on this equality (one canonical file digest).
+        let dir = TempDir::new("digest-bytes");
+        let path = dir.write("f.bin", b"same content");
+        assert_eq!(
+            digest_bytes(b"same content"),
+            digest_file(&path).expect("digest")
+        );
+        assert_ne!(
+            digest_bytes(b"same content"),
+            digest_bytes(b"other content")
+        );
     }
 
     #[test]

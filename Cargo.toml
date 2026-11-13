@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ant-cli", "crates/ant-sandbox-win", "crates/build-action", "crates/build-adapter", "crates/build-cache", "crates/build-digest", "crates/build-events", "crates/build-graph", "crates/local-executor"]
+members = ["crates/ant-cli", "crates/ant-remote", "crates/ant-sandbox-win", "crates/build-action", "crates/build-adapter", "crates/build-cache", "crates/build-digest", "crates/build-events", "crates/build-graph", "crates/local-executor"]
 
 [workspace.package]
 edition = "2024"
@@ -12,6 +12,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10.9"
 os_info = "3.15.0"
+# Remote execution transport (D-014): small synchronous HTTP server and
+# client (rustls TLS for https coordinators behind a reverse proxy).
+tiny_http = "0.12.0"
+ureq = "3.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 mod cache_runner;
 mod isolation;
+mod remote_cli;
 mod scheduler;
 
 fn main() -> ExitCode {
@@ -42,6 +43,15 @@ fn run() -> Result<u8, String> {
     }
     if command == "adapt" {
         return adapt_command(args);
+    }
+    if command == "coordinator" {
+        return remote_cli::coordinator_command(args);
+    }
+    if command == "worker" {
+        return remote_cli::worker_command(args);
+    }
+    if command == "remote" {
+        return remote_cli::remote_command(args);
     }
     if command == "sandbox" {
         return isolation::sandbox_command(args);
@@ -771,7 +781,7 @@ fn detect_command(project_path: &Path) -> u8 {
     u8::from(supported == 0)
 }
 
-fn load_graph(plan_path: &Path) -> Result<BuildGraph, String> {
+pub(crate) fn load_graph(plan_path: &Path) -> Result<BuildGraph, String> {
     let content = fs::read_to_string(plan_path)
         .map_err(|error| format!("cannot read plan {}: {error}", plan_path.display()))?;
     // Windows PowerShell 5's `Set-Content -Encoding UTF8` (and other

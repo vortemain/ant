@@ -1,0 +1,20 @@
+[package]
+name = "ant-remote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Self-hosted remote execution: protocol v1, coordinator, worker, and client"
+
+[dependencies]
+build-action = { path = "../build-action" }
+build-digest = { path = "../build-digest" }
+build-graph = { path = "../build-graph" }
+local-executor = { path = "../local-executor" }
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true
