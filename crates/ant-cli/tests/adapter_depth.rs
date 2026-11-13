@@ -141,7 +141,7 @@ fn adapt_option_errors_fail_closed_without_writing() {
         ),
         (
             &["--option", "outputs=entry-points"],
-            "does not accept option 'outputs' (accepted: profile)",
+            "does not accept option 'outputs' (accepted: profile, granularity)",
         ),
         (&["--option", "profile"], "is not KEY=VALUE"),
         (
@@ -316,18 +316,14 @@ fn cargo_vendored_registry_dependency_builds_sandboxed() {
             stdout.contains("action=vend-app status=succeeded"),
             "{stdout:?}"
         );
-        let vendored_input = format!(
-            "input={} digest=",
-            Path::new("vendor").join("tinydep").display()
-        );
+        // The whole project is declared top-down (D-021): the vendored
+        // sources are digested as part of the `vendor` tree input.
+        let vendored_input = "input=vendor digest=".to_owned();
         assert!(
             stdout.contains(&vendored_input),
             "vendored source must be digested: {stdout:?}"
         );
-        let config_input = format!(
-            "input={} digest=",
-            Path::new(".cargo").join("config.toml").display()
-        );
+        let config_input = "input=.cargo digest=".to_owned();
         assert!(
             stdout.contains(&config_input),
             "project cargo config must be digested: {stdout:?}"

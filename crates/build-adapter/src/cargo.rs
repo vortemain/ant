@@ -240,79 +240,34 @@ impl BuildAdapter for CargoAdapter {
 
         let member_names: BTreeSet<&str> = members.keys().copied().collect();
         let lock_exists = root.join("Cargo.lock").is_file();
-        let cargo_config = ["config.toml", "config"]
-            .iter()
-            .map(|name| PathBuf::from(".cargo").join(name))
-            .filter(|path| root.join(path).is_file())
-            .collect::<Vec<_>>();
-        let local_sources = local_dependency_sources(&metadata, &member_ids, &workspace_root)?;
         // Cache eligibility (D-020): every non-member package must live
         // inside the project (vendored or path dependency) so its source is
         // a declared input, and the lock file must pin the resolution.
         let fully_declared =
             lock_exists && all_packages_inside(&metadata, &member_ids, &workspace_root)?;
-        // The toolchain file selects the compiler; declare it when present.
-        let toolchain_files = ["rust-toolchain.toml", "rust-toolchain"]
-            .iter()
-            .map(PathBuf::from)
-            .filter(|path| root.join(path).is_file())
-            .collect::<Vec<_>>();
 
         // The workspace definition (D-021): building any one package makes
-        // cargo load the whole workspace — every member's manifest, the files
-        // it infers each member's targets from, and the manifests of every
-        // locked dependency — so every action declares all of it. Remote
-        // execution (where undeclared files do not exist) found this.
+        // cargo load the whole workspace, and Rust code may read any project
+        // file at compile time (`include_str!`, build scripts), so every
+        // action declares the whole project except build outputs and Ant/VCS
+        // metadata. Remote execution, where undeclared files do not exist,
+        // found both gaps. A symlink cannot be digested, so one anywhere in
+        // the project keeps the plan out of the cache.
         let mut workspace_inputs: BTreeMap<PathBuf, InputKind> = BTreeMap::new();
-        declare_input(
+        let excluded = [
+            target_rel.clone(),
+            PathBuf::from(".ant"),
+            PathBuf::from(".git"),
+        ];
+        let mut has_symlink = false;
+        declare_project(
+            &root,
+            Path::new(""),
+            &excluded,
             &mut workspace_inputs,
-            PathBuf::from("Cargo.toml"),
-            InputKind::File,
-        );
-        if lock_exists {
-            declare_input(
-                &mut workspace_inputs,
-                PathBuf::from("Cargo.lock"),
-                InputKind::File,
-            );
-        }
-        for config in &cargo_config {
-            declare_input(&mut workspace_inputs, config.clone(), InputKind::File);
-        }
-        for file in &toolchain_files {
-            declare_input(&mut workspace_inputs, file.clone(), InputKind::File);
-        }
-        for package in members.values() {
-            let manifest = PathBuf::from(
-                package["manifest_path"]
-                    .as_str()
-                    .ok_or_else(|| bad_metadata("package manifest_path is missing"))?,
-            );
-            let package_dir = relative_to(
-                &workspace_root,
-                manifest.parent().expect("manifest has a parent"),
-            )?;
-            declare_input(
-                &mut workspace_inputs,
-                join_rel(&package_dir, "Cargo.toml"),
-                InputKind::File,
-            );
-            let build_script = join_rel(&package_dir, "build.rs");
-            if root.join(&build_script).is_file() {
-                declare_input(&mut workspace_inputs, build_script, InputKind::File);
-            }
-            for tree in ["src", "examples", "tests", "benches"] {
-                let dir = join_rel(&package_dir, tree);
-                if root.join(&dir).is_dir() {
-                    declare_input(&mut workspace_inputs, dir, InputKind::Tree);
-                }
-            }
-        }
-        for sources in local_sources.values() {
-            for source in sources {
-                declare_input(&mut workspace_inputs, source.clone(), InputKind::Tree);
-            }
-        }
+            &mut has_symlink,
+        )?;
+        let fully_declared = fully_declared && !has_symlink;
 
         // Prepare the staging directory generated actions use as TMP/TEMP
         // (see the crate-level contract): toolchain scratch writes land
@@ -499,15 +454,53 @@ fn metadata_value<'a>(
         .ok_or_else(|| bad_metadata(&format!("{key} is missing")))
 }
 
-/// Workspace-relative path join that stays relative.
-fn join_rel(base: &Path, leaf: &str) -> PathBuf {
-    base.join(leaf)
-}
-
 /// Insert an input declaration without overwriting an existing kind for the
 /// same path.
 fn declare_input(inputs: &mut BTreeMap<PathBuf, InputKind>, path: PathBuf, kind: InputKind) {
     inputs.entry(path).or_insert(kind);
+}
+
+/// Declare every entry under `dir_rel` (relative to `root`) except the
+/// excluded paths and output directories Ant itself created (they hold an
+/// `.ant-artifacts` marker): files as file inputs, directories as tree
+/// inputs, descending only where an excluded path lies inside. Symlinks are
+/// skipped and reported through `has_symlink`.
+fn declare_project(
+    root: &Path,
+    dir_rel: &Path,
+    excluded: &[PathBuf],
+    inputs: &mut BTreeMap<PathBuf, InputKind>,
+    has_symlink: &mut bool,
+) -> Result<(), AdapterError> {
+    let mut children: Vec<_> = std::fs::read_dir(root.join(dir_rel))
+        .map_err(AdapterError::from)?
+        .collect::<Result<_, _>>()
+        .map_err(AdapterError::from)?;
+    children.sort_by_key(|entry| entry.file_name());
+    for child in children {
+        let rel = dir_rel.join(child.file_name());
+        if excluded.contains(&rel) {
+            continue;
+        }
+        let file_type = child.file_type().map_err(AdapterError::from)?;
+        if file_type.is_symlink() {
+            *has_symlink = true;
+            continue;
+        }
+        if file_type.is_dir() {
+            if root.join(&rel).join(".ant-artifacts").is_file() {
+                continue;
+            }
+            if excluded.iter().any(|path| path.starts_with(&rel)) {
+                declare_project(root, &rel, excluded, inputs, has_symlink)?;
+            } else {
+                declare_input(inputs, rel, InputKind::Tree);
+            }
+        } else {
+            declare_input(inputs, rel, InputKind::File);
+        }
+    }
+    Ok(())
 }
 
 /// Whether every non-member package's manifest lies inside the workspace,
@@ -541,83 +534,6 @@ fn all_packages_inside(
         }
     }
     Ok(true)
-}
-
-/// For each workspace member package id, the workspace-relative directories
-/// of non-member packages it transitively depends on whose manifests live
-/// inside the workspace (vendored crates, non-member path dependencies).
-/// Packages outside the workspace (the registry cache, git checkouts, path
-/// dependencies elsewhere) cannot be declared and are skipped.
-fn local_dependency_sources(
-    metadata: &serde_json::Value,
-    member_ids: &BTreeSet<&str>,
-    workspace_root: &Path,
-) -> Result<BTreeMap<String, BTreeSet<PathBuf>>, AdapterError> {
-    let mut local_dirs: BTreeMap<&str, PathBuf> = BTreeMap::new();
-    for package in metadata_value(metadata, "packages")?
-        .as_array()
-        .ok_or_else(|| bad_metadata("packages is not an array"))?
-    {
-        let id = package["id"]
-            .as_str()
-            .ok_or_else(|| bad_metadata("package has no id"))?;
-        if member_ids.contains(id) {
-            continue;
-        }
-        let manifest = PathBuf::from(
-            package["manifest_path"]
-                .as_str()
-                .ok_or_else(|| bad_metadata("package manifest_path is missing"))?,
-        );
-        let dir = manifest
-            .parent()
-            .ok_or_else(|| bad_metadata("manifest has no parent"))?;
-        if let Ok(relative) = relative_to(workspace_root, dir)
-            && !relative.as_os_str().is_empty()
-        {
-            local_dirs.insert(id, relative);
-        }
-    }
-
-    let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    let resolve = metadata_value(metadata, "resolve")?;
-    for node in resolve["nodes"]
-        .as_array()
-        .ok_or_else(|| bad_metadata("resolve.nodes is missing"))?
-    {
-        let id = node["id"]
-            .as_str()
-            .ok_or_else(|| bad_metadata("resolve node has no id"))?;
-        let deps = node["dependencies"]
-            .as_array()
-            .ok_or_else(|| bad_metadata("resolve node has no dependencies"))?
-            .iter()
-            .map(|dep| {
-                dep.as_str()
-                    .ok_or_else(|| bad_metadata("resolve dependency is not a string"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        edges.insert(id, deps);
-    }
-
-    let mut result = BTreeMap::new();
-    for member in member_ids {
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        let mut stack = vec![*member];
-        while let Some(id) = stack.pop() {
-            for dep in edges.get(id).map(Vec::as_slice).unwrap_or_default() {
-                if seen.insert(dep) {
-                    stack.push(dep);
-                }
-            }
-        }
-        let dirs: BTreeSet<PathBuf> = seen
-            .iter()
-            .filter_map(|id| local_dirs.get(id).cloned())
-            .collect();
-        result.insert((*member).to_owned(), dirs);
-    }
-    Ok(result)
 }
 
 fn cargo_metadata(cargo: &Path, root: &Path) -> Result<serde_json::Value, AdapterError> {
@@ -676,6 +592,15 @@ mod tests {
     }
 
     /// A two-member workspace: a lib with a bin and a dependent lib.
+    /// Whether `path` is declared: an input itself, or inside a declared
+    /// tree input (the project is declared top-down, D-021).
+    fn covers(action: &Action, path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
+        action.inputs.iter().any(|input| {
+            input.path == path || (input.kind == InputKind::Tree && path.starts_with(&input.path))
+        })
+    }
+
     fn workspace() -> TempDir {
         let dir = TempDir::new("ws");
         write(
@@ -743,25 +668,28 @@ mod tests {
                 std::env::consts::EXE_SUFFIX
             ))]
         );
-        // Member inputs: manifest, src tree, and the workspace manifest.
-        let input_paths: Vec<&Path> = app
+        // The whole project is declared (D-021): member manifests and
+        // sources, the workspace manifest, and the sibling member too.
+        for path in [
+            "app/Cargo.toml",
+            "app/src/main.rs",
+            "Cargo.toml",
+            "core/src/lib.rs",
+        ] {
+            assert!(
+                covers(app, path),
+                "{path} must be declared: {:?}",
+                app.inputs
+            );
+        }
+        // Member directories are tree inputs; build outputs are not inputs.
+        let app_dir = app
             .inputs
             .iter()
-            .map(|input| input.path.as_path())
-            .collect();
-        assert!(input_paths.contains(&Path::new("app/Cargo.toml")));
-        assert!(input_paths.contains(&Path::new("app/src")));
-        assert!(
-            input_paths.contains(&Path::new("Cargo.toml")),
-            "workspace manifest declared"
-        );
-        // Tree-kind inputs are marked as trees.
-        let src_input = app
-            .inputs
-            .iter()
-            .find(|input| input.path == Path::new("app/src"))
-            .expect("src input");
-        assert_eq!(src_input.kind, InputKind::Tree);
+            .find(|input| input.path == Path::new("app"))
+            .expect("member directory input");
+        assert_eq!(app_dir.kind, InputKind::Tree);
+        assert!(!covers(app, ".ant/tmp") && !covers(app, "target/debug"));
         // Every dependency is in the project and the lock file exists, so
         // the actions are cache-eligible (D-020).
         assert_eq!(app.cache_policy, CachePolicy::Eligible);
@@ -837,18 +765,12 @@ mod tests {
             .map(|input| input.path.as_path())
             .collect();
         // The build script can change the build result, so it must be declared.
-        let build_script = paths
-            .iter()
-            .copied()
-            .find(|path| path.file_name() == Some(std::ffi::OsStr::new("build.rs")))
-            .expect("build.rs declared as input");
-        assert_eq!(build_script, &Path::new("gen").join("build.rs"));
-        let script_input = action
-            .inputs
-            .iter()
-            .find(|input| input.path == Path::new("gen").join("build.rs"))
-            .expect("build.rs entry");
-        assert_eq!(script_input.kind, InputKind::File);
+        assert!(!paths.is_empty());
+        assert!(
+            covers(action, Path::new("gen").join("build.rs")),
+            "build.rs declared: {:?}",
+            action.inputs
+        );
         // The generated package has no bin or lib output name mismatch: it is
         // a lib, so the rlib output is declared.
         assert_eq!(
@@ -890,12 +812,10 @@ mod tests {
             .iter()
             .map(|input| input.path.as_path())
             .collect();
-        assert!(paths.contains(&Path::new("svc/Cargo.toml")));
-        assert!(
-            paths.contains(&Path::new("Cargo.toml")),
-            "workspace manifest declared"
-        );
-        assert!(paths.contains(&Path::new("svc/src")));
+        assert!(!paths.is_empty());
+        for path in ["svc/Cargo.toml", "Cargo.toml", "svc/src/main.rs"] {
+            assert!(covers(action, path), "{path} must be declared");
+        }
         assert!(plan.actions[0].dependencies.is_empty());
     }
 
@@ -1037,12 +957,7 @@ mod tests {
             action.environment
         );
         // The project config can change the build, so it is a declared input.
-        assert!(
-            action
-                .inputs
-                .iter()
-                .any(|input| input.path == Path::new(".cargo").join("config.toml"))
-        );
+        assert!(covers(action, Path::new(".cargo").join("config.toml")));
         // The default layout does not pin anything (default plans unchanged).
         let plain = single_bin("plain-target");
         let plan = adapter
@@ -1148,8 +1063,8 @@ mod tests {
             "{tree_inputs:?}"
         );
         assert!(
-            tree_inputs.contains(&Path::new("vendor").join("tinydep").as_path()),
-            "transitive vendored source declared: {tree_inputs:?}"
+            covers(app, Path::new("vendor").join("tinydep").join("Cargo.toml")),
+            "vendored source declared: {tree_inputs:?}"
         );
         let other = &plan.actions[1].action;
         assert_eq!(other.id, "other");
@@ -1157,14 +1072,10 @@ mod tests {
         // including every locked dependency's manifest (D-021), so even a
         // member that does not depend on them declares those sources.
         assert!(
-            other
-                .inputs
-                .iter()
-                .any(|input| input.path == Path::new("vendor").join("tinydep"))
-                && other
-                    .inputs
-                    .iter()
-                    .any(|input| input.path == Path::new("helper")),
+            covers(
+                other,
+                Path::new("vendor").join("tinydep").join("Cargo.toml")
+            ) && covers(other, Path::new("helper").join("Cargo.toml")),
             "every action declares the whole workspace definition: {:?}",
             other.inputs
         );

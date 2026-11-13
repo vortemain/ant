@@ -1130,7 +1130,11 @@ fn adapt_generates_and_runs_a_cargo_project() {
     )
     .expect("write main.rs");
     let project = dir.path().to_string_lossy().into_owned();
-    let plan = dir.path().join("plan.json");
+    // Plans live outside the project: every project file is a declared
+    // input of a cargo plan (D-021), so a plan written into the project
+    // would become an input of the next generation.
+    let plans = TempDir::new("adapt-cargo-plans");
+    let plan = plans.path().join("plan.json");
     let plan_str = plan.to_string_lossy().into_owned();
 
     let (code, stdout, stderr) = run_ant(&[
@@ -1174,7 +1178,7 @@ fn adapt_generates_and_runs_a_cargo_project() {
     );
 
     // And re-adapting is deterministic: same plan content.
-    let plan2 = dir.path().join("plan2.json");
+    let plan2 = plans.path().join("plan2.json");
     let plan2_str = plan2.to_string_lossy().into_owned();
     let (code, _, _) = run_ant(&[
         "adapt",
