@@ -89,6 +89,10 @@ State on disk is only the blob store, `--data-dir/blobs` (content-addressed, imm
 
 Stop workers, stop the coordinator, replace the binary, start the coordinator, then workers. Clients and workers must speak the same `protocol_version` as the coordinator (mismatches are rejected with 400).
 
+## Dashboard and viewer token
+
+Create a third token for read-only access and start the coordinator with `--viewer-token-file /etc/ant/viewer.token`. Open `https://build.example.com/ui` and paste the viewer token: the page shows job counts, every job (state, worker, attempts, submitted time, duration, exit code/error), and the workers seen since the coordinator started. The viewer token can read the control plane only — it cannot upload, submit, or lease. Share it with people who need visibility; keep client and worker tokens for machines. The dashboard is served by the coordinator itself (same origin as the API), so the reverse proxy needs no extra configuration.
+
 ## Monitoring and limits
 
 - Health: `GET /v1/health`. Per-job state: `GET /v1/jobs/{id}` (client token).

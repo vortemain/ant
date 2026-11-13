@@ -16,7 +16,8 @@ JSON documents over HTTP/1.1 under `/v1`. Every job and lease document carries `
 
 | Role | May call |
 |---|---|
-| client | blobs, `POST /v1/jobs`, `GET /v1/jobs/{id}` |
+| client | blobs, `POST /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs`, `GET /v1/workers` |
+| viewer (optional, `--viewer-token-file`) | read-only: `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/workers` |
 | worker | blobs, `POST /v1/lease`, `POST /v1/jobs/{id}/result` (only for a job it holds the lease on) |
 
 Missing/invalid token → 401; valid token, wrong role → 403. `GET /v1/health` is unauthenticated and returns `{"protocol_version":1}`.
@@ -54,6 +55,18 @@ The coordinator validates the action, the entries, and that every input blob is 
 ## Worker execution
 
 Fresh workspace per job (`<work-dir>/<job-id>`, removed afterwards), plus an `.ant/tmp` staging directory; each input blob downloaded and verified before writing; the action runs with Ant's local executor (`prepare_with_metadata` + `execute_prepared`, or the restricted-token sandbox with `--sandbox`), which re-verifies inputs and checks declared outputs; on success every declared output file is uploaded (trees expanded).
+
+## Control-plane read model (T5.1)
+
+`GET /v1/jobs` (client/viewer) → `{coordinator_started_unix_ms, jobs:[JobSummary]}`, newest first. A `JobSummary` is `{job_id, action_id, state, attempts, worker_id, submitted_unix_ms, started_unix_ms, finished_unix_ms, exit_code, succeeded, error, input_count, output_count}`. Timestamps are the coordinator's wall clock in Unix milliseconds recorded when the event happened (measured, never estimated); `succeeded` is `true` only for a completed job whose action exited 0 without error or timeout.
+
+`GET /v1/workers` (client/viewer) → `{now_unix_ms, workers:[{worker_id, os, last_seen_unix_ms, current_job, jobs_reported}]}`. "Last seen" is the last lease poll or result report; a busy worker does not poll, so its last-seen time ages while it runs a job.
+
+Both lists reflect coordinator memory since it started (see limits below).
+
+## Dashboard (T5.1)
+
+`GET /`, `GET /ui`, `GET /ui/app.js`, `GET /ui/app.css` serve a static, data-free dashboard. The page asks for a viewer or client token (kept only in that browser tab's `sessionStorage`), then polls the two read-model routes every 3 s. Every coordinator response carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store`. All data is rendered with `textContent`, never as markup.
 
 ## Known v1 limits
 
