@@ -68,6 +68,23 @@ Both lists reflect coordinator memory since it started (see limits below).
 
 `GET /`, `GET /ui`, `GET /ui/app.js`, `GET /ui/app.css` serve a static, data-free dashboard. The page asks for a viewer or client token (kept only in that browser tab's `sessionStorage`), then polls the two read-model routes every 3 s. Every coordinator response carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store`. All data is rendered with `textContent`, never as markup.
 
+## Shared remote cache (P2.3, D-019)
+
+Only a **sandboxed Linux worker** (`ant worker --sandbox` on Linux: bubblewrap, no network) produces cacheable results. Before executing a job it:
+
+1. writes every input with one normalized modification time (2000-01-01 UTC), so file metadata is a function of content;
+2. mounts the job's workspace at the fixed path `/tmp/ant/ws` inside the sandbox, so paths the action sees (and may embed in outputs) are the same for every job and machine;
+3. computes the action key from content digests with that fingerprint (`ExecutionFingerprint::remote_worker_sandboxed`); the key is eligible only when the action is fully declared (`cache_policy: eligible`, toolchain identity) — the same blocker rules as local runs.
+
+| Method | Path | Role | Body → Response |
+|---|---|---|---|
+| GET | `/v1/cache/{key}` | client, worker | → `CacheEntry {outputs, worker_id, created_unix_ms}`; 404 on a miss or when any referenced blob is gone |
+| PUT | `/v1/cache/{key}` | **worker only** | `CacheStoreRequest {worker_id, outputs}` → 201 stored / 200 already present (first entry wins); 409 when an output blob is missing |
+
+On a hit the worker reports the stored outputs without executing (`JobResult.reused = true`, plus `cache_key`); the client prints `status=reused` and installs the outputs exactly as for an executed job; the dashboard marks the job "reused from the shared cache". Viewers cannot read or write the cache. `JobResult.reused`/`cache_key` and `JobSummary.reused` are additive fields with defaults.
+
+**Trust model:** a cache entry is as trustworthy as the worker host that stored it — clients can never write entries, so a compromised *client* cannot poison the cache, but a compromised *worker* (or worker token) can. Keep worker tokens on dedicated, controlled machines. Entries are keyed by the full action key (platform version, toolchain digest, inputs, environment allowlist), so workers with different OS versions or toolchains do not share entries.
+
 ## Known v1 limits
 
 - Jobs live in coordinator memory: a restart loses queued/running jobs (clients fail with 404); blobs persist.

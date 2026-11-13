@@ -67,6 +67,8 @@ Caddy obtains and renews certificates automatically. Keep the proxy's body limit
 
 ## Workers
 
+**Linux workers with `--sandbox` build the shared cache.** Each result they prove (sandboxed, no network, fully declared action) is stored on the coordinator and reused by every later build of the same action, from any machine or checkout (see the protocol's "Shared remote cache"). They need the `bubblewrap` package and unprivileged user namespaces (`sysctl kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+). Workers without `--sandbox`, and Windows workers, execute normally but never store or reuse cache entries. Cache entries live in `--data-dir/cache` next to the blobs; back them up together.
+
 ```bash
 ant worker --coordinator https://build.example.com --token-file /etc/ant/worker.token \
   --work-dir /var/lib/ant-worker --id "$(hostname)"
