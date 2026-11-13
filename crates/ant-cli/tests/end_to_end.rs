@@ -76,6 +76,16 @@ fn plan_action(id: &str, command: &str, dependencies: &[&str]) -> serde_json::Va
     })
 }
 
+/// A shell command that runs for roughly `seconds - 1` seconds without
+/// output: `ping -n` on Windows (one ping per second), `sleep` elsewhere.
+fn slow_command(seconds: u32) -> String {
+    if cfg!(windows) {
+        format!("ping -n {seconds} 127.0.0.1 >nul")
+    } else {
+        format!("sleep {}", seconds.saturating_sub(1))
+    }
+}
+
 fn write_plan(dir: &TempDir, actions: &[serde_json::Value]) -> String {
     let plan = json!({ "schema_version": 1, "actions": actions });
     let path = dir.write(
@@ -218,7 +228,7 @@ fn failed_action_stops_the_plan() {
 #[test]
 fn timed_out_plan_action_reports_exit_124() {
     let dir = TempDir::new("plan-timeout");
-    let mut action = plan_action("slow", "ping -n 6 127.0.0.1 >nul", &[]);
+    let mut action = plan_action("slow", &slow_command(6), &[]);
     action["action"]["timeout_ms"] = json!(500);
     let plan = write_plan(&dir, &[action]);
     let workspace = dir.path().to_string_lossy().into_owned();
@@ -230,7 +240,7 @@ fn timed_out_plan_action_reports_exit_124() {
 #[test]
 fn cancel_file_stops_plan_with_exit_130() {
     let dir = TempDir::new("plan-cancel");
-    let mut action = plan_action("slow", "ping -n 6 127.0.0.1 >nul", &[]);
+    let mut action = plan_action("slow", &slow_command(6), &[]);
     action["action"]["timeout_ms"] = json!(30000);
     let plan = write_plan(&dir, &[action]);
     let cancel_file = dir.path().join("stop.marker");
@@ -410,7 +420,7 @@ fn parallel_failure_stops_new_starts_and_reports_skipped() {
         &[
             plan_action("fails", "exit 3", &[]),
             plan_action("dependent", "echo never> d.txt", &["fails"]),
-            plan_action("independent", "ping -n 3 127.0.0.1 >nul", &[]),
+            plan_action("independent", &slow_command(3), &[]),
         ],
     );
     let workspace = dir.path().to_string_lossy().into_owned();
@@ -438,8 +448,8 @@ fn parallel_failure_stops_new_starts_and_reports_skipped() {
 #[test]
 fn parallel_timeout_reports_exit_124() {
     let dir = TempDir::new("par-timeout");
-    let mut slow_a = plan_action("slow-a", "ping -n 6 127.0.0.1 >nul", &[]);
-    let mut slow_b = plan_action("slow-b", "ping -n 6 127.0.0.1 >nul", &[]);
+    let mut slow_a = plan_action("slow-a", &slow_command(6), &[]);
+    let mut slow_b = plan_action("slow-b", &slow_command(6), &[]);
     slow_a["action"]["timeout_ms"] = json!(500);
     slow_b["action"]["timeout_ms"] = json!(500);
     let plan = write_plan(&dir, &[slow_a, slow_b]);
@@ -463,8 +473,8 @@ fn parallel_cancel_file_reports_exit_130() {
     let plan = write_plan(
         &dir,
         &[
-            plan_action("slow-a", "ping -n 6 127.0.0.1 >nul", &[]),
-            plan_action("slow-b", "ping -n 6 127.0.0.1 >nul", &[]),
+            plan_action("slow-a", &slow_command(6), &[]),
+            plan_action("slow-b", &slow_command(6), &[]),
         ],
     );
     let cancel_file = dir.path().join("stop.marker");
@@ -1850,7 +1860,8 @@ fn alloc_action(alloc_mb: u64, memory_mb: u64) -> serde_json::Value {
             "working_directory": ".",
             "inputs": [], "outputs": [], "environment": [],
             "cache_policy": "never",
-            "timeout_ms": 60000,
+            // Generous: a fresh CI runner's first PowerShell start can be slow.
+            "timeout_ms": 180000,
             "resources": { "memory_mb": memory_mb }
         },
         "dependencies": []
@@ -1864,6 +1875,12 @@ fn alloc_action(alloc_mb: u64, memory_mb: u64) -> serde_json::Value {
 #[cfg(windows)]
 #[test]
 fn enforce_memory_caps_committed_memory() {
+    // Warm PowerShell up once, uncapped and outside Ant, so first-run module
+    // preparation on a fresh machine is not timed inside the capped runs.
+    let _ = Command::new("powershell")
+        .env_remove("PSModulePath")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+        .status();
     let dir = TempDir::new("enforce-memory");
     let workspace = dir.path().to_string_lossy().into_owned();
 
