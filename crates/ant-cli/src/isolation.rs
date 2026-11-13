@@ -22,10 +22,11 @@ const TEARDOWN_SCRIPT: &str = include_str!("../../../scripts/sandbox/teardown.ps
 fn encode_command(script: &str, dry_run: bool) -> String {
     // A `param()` block cannot receive arguments through -EncodedCommand, so
     // the dry-run switch is set by wrapping the script in a script block.
+    // Progress records would otherwise leak to stderr as CLIXML.
     let wrapped = if dry_run {
-        format!("& {{\n{script}\n}} -DryRun")
+        format!("$ProgressPreference = 'SilentlyContinue'\n& {{\n{script}\n}} -DryRun")
     } else {
-        format!("& {{\n{script}\n}}")
+        format!("$ProgressPreference = 'SilentlyContinue'\n& {{\n{script}\n}}")
     };
     let bytes: Vec<u8> = wrapped.encode_utf16().flat_map(u16::to_le_bytes).collect();
     base64(&bytes)
