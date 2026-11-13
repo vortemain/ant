@@ -85,13 +85,10 @@ fn ant_build_needs_no_configuration_and_collects_runnable_artifacts() {
     let (code, stdout, stderr) = ant_in(dir.path(), &["build"]);
     assert_eq!(code, 0, "stderr {stderr:?} stdout {stdout:?}");
     assert!(
-        stdout.contains("ant build · cargo · release · 2 steps"),
+        stdout.contains("ant build · cargo · release · 1 step "),
         "{stdout:?}"
     );
-    assert!(
-        stdout.contains("✓ greet-core") && stdout.contains("✓ greeter"),
-        "{stdout:?}"
-    );
+    assert!(stdout.contains("✓ workspace"), "{stdout:?}");
     assert!(
         !stdout.contains("action="),
         "machine lines are hidden by default: {stdout:?}"
@@ -119,7 +116,7 @@ fn ant_build_needs_no_configuration_and_collects_runnable_artifacts() {
     let (code, stdout, _) = ant_in(dir.path(), &["build", "--verbose"]);
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("action=greeter status=succeeded"),
+        stdout.contains("action=workspace status=succeeded"),
         "{stdout:?}"
     );
 }

@@ -58,13 +58,21 @@ fn rel(path: &Path) -> String {
 /// Expand declared inputs into the transferred entry set.
 fn collect_inputs(workspace: &Path, action: &Action) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
+    // Re-read only files whose stamp changed since the last run (D-027).
+    let cache = workspace
+        .canonicalize()
+        .ok()
+        .and_then(|root| build_digest::workspace_cache(&root));
     for input in &action.inputs {
         let base = rel(&input.path);
         let path = workspace.join(&input.path);
         match input.kind {
             InputKind::File => {
-                let digest = build_digest::digest_file(&path)
-                    .map_err(|error| format!("input {base}: {error}"))?;
+                let digest = match &cache {
+                    Some(cache) => build_digest::digest_file_cached(&path, false, cache),
+                    None => build_digest::digest_file(&path),
+                }
+                .map_err(|error| format!("input {base}: {error}"))?;
                 entries.push(Entry {
                     path: base,
                     kind: EntryKind::File,
@@ -79,9 +87,12 @@ fn collect_inputs(workspace: &Path, action: &Action) -> Result<Vec<Entry>, Strin
                     digest: None,
                     executable: false,
                 });
-                for entry in build_digest::tree_entries(&path)
-                    .map_err(|error| format!("input {base}: {error}"))?
-                {
+                let tree = match &cache {
+                    Some(cache) => build_digest::tree_entries_cached(&path, false, cache),
+                    None => build_digest::tree_entries(&path),
+                }
+                .map_err(|error| format!("input {base}: {error}"))?;
+                for entry in tree {
                     let path = format!("{base}/{}", entry.path);
                     entries.push(match entry.digest {
                         Some(digest) if !entry.is_dir => Entry {

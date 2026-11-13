@@ -260,8 +260,9 @@ fn prepare_with_mode(
         if !correct_type {
             return Err(ExecutionError::InputTypeMismatch(path));
         }
-        let digest = digest_declared_path(&resolved, input.kind, metadata_fingerprinting)
-            .map_err(ExecutionError::InputDigest)?;
+        let digest =
+            digest_declared_path(&workspace, &resolved, input.kind, metadata_fingerprinting)
+                .map_err(ExecutionError::InputDigest)?;
         input_digests.push(ActionContentDigest {
             path: input.path.clone(),
             digest,
@@ -309,9 +310,10 @@ pub fn execute_prepared(
                 source,
             })?;
     let mut command = Command::new(&action.argv[0]);
+    let environment = spawn_environment(action, &display_path(&cwd));
     command.args(&action.argv[1..]).current_dir(cwd).env_clear();
     command.envs(build_digest::local_runtime_environment());
-    command.envs(action.environment.iter().map(|(key, value)| (key, value)));
+    command.envs(environment);
     #[cfg(not(windows))]
     if prepared.memory_limit_bytes.is_some() {
         return Err(ExecutionError::ResourceLimit(
@@ -378,8 +380,13 @@ fn verify_inputs_and_digest_outputs(
     for (input, before) in action.inputs.iter().zip(&prepared.input_digests) {
         let path = workspace.join(&before.path);
         reject_symlink_components(workspace, &input.path).map_err(ExecutionError::InputDigest)?;
-        let digest = digest_declared_path(&path, input.kind, prepared.metadata_fingerprinting)
-            .map_err(ExecutionError::InputDigest)?;
+        let digest = digest_declared_path(
+            &prepared.workspace,
+            &path,
+            input.kind,
+            prepared.metadata_fingerprinting,
+        )
+        .map_err(ExecutionError::InputDigest)?;
         if digest != before.digest {
             return Err(ExecutionError::InputChangedDuringExecution(
                 before.path.clone(),
@@ -503,7 +510,7 @@ pub fn execute_sandboxed_prepared(
             )
         })
         .collect();
-    environment.extend(action.environment.iter().cloned());
+    environment.extend(spawn_environment(action, &cwd));
 
     let mut child = sandbox
         .spawn_with_memory_limit(
@@ -648,7 +655,7 @@ pub fn execute_network_isolated_prepared(
             )
         })
         .collect();
-    environment.extend(action.environment.iter().cloned());
+    environment.extend(spawn_environment(action, &cwd));
 
     let mut runner_argv = vec![
         account.runner.to_string_lossy().into_owned(),
@@ -810,7 +817,7 @@ pub fn execute_sandboxed_prepared(
         .args(&action.argv)
         .env_clear();
     command.envs(build_digest::local_runtime_environment());
-    command.envs(action.environment.iter().map(|(key, value)| (key, value)));
+    command.envs(spawn_environment(action, &inner_cwd));
     let mut child = command.spawn().map_err(ExecutionError::Spawn)?;
     let timeout = action.timeout_ms.map(Duration::from_millis);
     let (status, cancelled, timed_out) = wait_for_child(&mut child, cancellation, timeout)?;
@@ -992,11 +999,64 @@ fn attach_child_to_job(child: &Child) -> Option<win32job::Job> {
     Some(job)
 }
 
+/// Temp-directory variables whose workspace-relative values are made
+/// absolute at spawn time. Plans declare them relative (keys stay
+/// path-independent), but tools that change directory, such as cargo
+/// build scripts and the MSVC linker, would otherwise resolve them
+/// against the wrong directory (D-027).
+const ABSOLUTIZED_VARIABLES: &[&str] = &["TMP", "TEMP", "TMPDIR"];
+
+/// The action's declared environment as the child sees it: relative
+/// temp-directory values resolved against the action's working directory.
+fn spawn_environment(action: &Action, cwd: &Path) -> Vec<(String, String)> {
+    action
+        .environment
+        .iter()
+        .map(|(key, value)| {
+            let relative = !value.is_empty() && Path::new(value).is_relative();
+            if relative
+                && ABSOLUTIZED_VARIABLES
+                    .iter()
+                    .any(|name| key.eq_ignore_ascii_case(name))
+            {
+                (key.clone(), cwd.join(value).to_string_lossy().into_owned())
+            } else {
+                (key.clone(), value.clone())
+            }
+        })
+        .collect()
+}
+
+/// A path as tools expect to see it (no `\?\` verbatim prefix on Windows).
+fn display_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        strip_verbatim_prefix(path)
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
+/// Digest a declared input, through the workspace's change-detection cache
+/// when the process enabled one (D-027; developer commands only).
 fn digest_declared_path(
+    workspace: &Path,
     path: &Path,
     kind: InputKind,
     metadata_fingerprinting: bool,
 ) -> Result<ContentDigest, DigestError> {
+    if let Some(cache) = build_digest::workspace_cache(workspace) {
+        return match kind {
+            InputKind::File => {
+                build_digest::digest_file_cached(path, metadata_fingerprinting, &cache)
+            }
+            InputKind::Tree => {
+                build_digest::digest_tree_cached(path, metadata_fingerprinting, &cache)
+            }
+        };
+    }
     match (kind, metadata_fingerprinting) {
         (InputKind::File, false) => digest_file(path),
         (InputKind::File, true) => digest_file_with_metadata(path),

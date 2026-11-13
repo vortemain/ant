@@ -12,11 +12,10 @@ ant build
 Ant detects the project, builds it in release mode using all your cores, and copies the deliverables into `dist/`:
 
 ```
-ant build · cargo · release · 2 steps · 8 parallel
-  ✓ greet-core  1.0s
-  ✓ greeter  0.7s
+ant build · cargo · release · 1 step · 8 parallel
+  ✓ workspace  1.6s
 
-Built in 2.9s →
+Built in 2.0s →
   dist\greeter.exe
 ```
 
@@ -57,5 +56,6 @@ Android, iOS, web bundlers, desktop installers, containers, and more languages a
 
 - Ant never overwrites a `dist/` directory it did not create. If your project already uses `dist/`, set `out_dir` in `ant.toml`.
 - If a directory matches several build systems (for example both `Cargo.toml` and `package.json`), Ant asks you to choose once: `ant init --adapter cargo`.
+- Ant remembers each file's fingerprint between builds and only re-reads files whose size or timestamp changed, so a no-change build barely touches the disk. The record lives in your user cache folder, not the project (set `ANT_NO_DIGEST_CACHE=1` to turn it off).
 - Ant's working files live in `.ant/` (for example `.ant/plan.json`, the exact plan it ran); you can delete them at any time.
 - Building on your own servers, caching across machines, and the dashboard are described in [remote operations](remote/operations.md); a one-command setup (`ant server deploy`) is the next phase of the roadmap.

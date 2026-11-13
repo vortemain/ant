@@ -28,11 +28,10 @@ ant build
 ```
 
 ```
-ant build · cargo · release · 2 steps · 8 parallel
-  ✓ greet-core  1.0s
-  ✓ greeter  0.7s
+ant build · cargo · release · 1 step · 8 parallel
+  ✓ workspace  1.6s
 
-Built in 2.9s →
+Built in 2.0s →
   dist/greeter
 ```
 

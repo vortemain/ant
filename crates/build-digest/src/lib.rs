@@ -4,6 +4,11 @@
 //! separated relative paths. Symlinks and non-UTF-8 names are rejected until
 //! the project defines and tests cross-platform symlink semantics.
 
+mod digest_cache;
+
+pub use digest_cache::{
+    DigestCache, RACY_WINDOW_NS, enable_workspace_caches, save_workspace_caches, workspace_cache,
+};
 use sha2::{Digest as _, Sha256};
 use std::fmt;
 use std::fs::{self, File};
@@ -217,7 +222,7 @@ pub fn tree_entries(root: &Path) -> Result<Vec<TreeEntry>, DigestError> {
         return Err(DigestError::UnexpectedType(root.to_path_buf()));
     }
     let mut entries = Vec::new();
-    collect_tree(root, root, &mut entries, false)?;
+    collect_tree(root, root, &mut entries, false, None)?;
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
 }
@@ -236,7 +241,7 @@ pub fn tree_entries_with_metadata(root: &Path) -> Result<Vec<TreeEntry>, DigestE
         return Err(DigestError::UnexpectedType(root.to_path_buf()));
     }
     let mut entries = Vec::new();
-    collect_tree(root, root, &mut entries, true)?;
+    collect_tree(root, root, &mut entries, true, None)?;
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
 }
@@ -275,6 +280,64 @@ pub fn digest_tree_with_metadata(root: &Path) -> Result<ContentDigest, DigestErr
     digest_entries(b"ant-tree-meta-v1", &entries)
 }
 
+/// [`tree_entries`] / [`tree_entries_with_metadata`] reusing unchanged
+/// files' digests from `cache` (D-027). Results are identical to the
+/// uncached functions.
+pub fn tree_entries_cached(
+    root: &Path,
+    with_metadata: bool,
+    cache: &DigestCache,
+) -> Result<Vec<TreeEntry>, DigestError> {
+    let metadata = fs::symlink_metadata(root).map_err(|source| DigestError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(DigestError::Symlink(root.to_path_buf()));
+    }
+    if !metadata.is_dir() {
+        return Err(DigestError::UnexpectedType(root.to_path_buf()));
+    }
+    let mut entries = Vec::new();
+    collect_tree(root, root, &mut entries, with_metadata, Some(cache))?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(entries)
+}
+
+/// [`digest_tree`] / [`digest_tree_with_metadata`] through `cache`.
+pub fn digest_tree_cached(
+    root: &Path,
+    with_metadata: bool,
+    cache: &DigestCache,
+) -> Result<ContentDigest, DigestError> {
+    let entries = tree_entries_cached(root, with_metadata, cache)?;
+    let tag: &[u8] = if with_metadata {
+        b"ant-tree-meta-v1"
+    } else {
+        b"ant-tree-v1"
+    };
+    digest_entries(tag, &entries)
+}
+
+/// [`digest_file`] / [`digest_file_with_metadata`] through `cache`.
+pub fn digest_file_cached(
+    path: &Path,
+    with_metadata: bool,
+    cache: &DigestCache,
+) -> Result<ContentDigest, DigestError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| DigestError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(DigestError::Symlink(path.to_path_buf()));
+    }
+    if !metadata.is_file() {
+        return Err(DigestError::UnexpectedType(path.to_path_buf()));
+    }
+    cache.digest(path, &metadata, with_metadata)
+}
+
 /// Digest a tree from its entries alone (relative path, file or directory,
 /// content digest; no metadata), without reading any file: identical to
 /// [`digest_tree`] for a directory holding exactly these entries. Remote
@@ -310,6 +373,7 @@ fn collect_tree(
     current: &Path,
     entries: &mut Vec<TreeEntry>,
     with_metadata: bool,
+    cache: Option<&DigestCache>,
 ) -> Result<(), DigestError> {
     let mut children = fs::read_dir(current)
         .map_err(|source| DigestError::Io {
@@ -343,12 +407,12 @@ fn collect_tree(
                 digest: None,
                 metadata: None,
             });
-            collect_tree(root, &child, entries, with_metadata)?;
+            collect_tree(root, &child, entries, with_metadata, cache)?;
         } else if metadata.is_file() {
-            let digest = if with_metadata {
-                digest_file_with_metadata(&child)?
-            } else {
-                digest_file(&child)?
+            let digest = match cache {
+                Some(cache) => cache.digest(&child, &metadata, with_metadata)?,
+                None if with_metadata => digest_file_with_metadata(&child)?,
+                None => digest_file(&child)?,
             };
             let entry_metadata = if with_metadata {
                 Some(file_metadata(&metadata))

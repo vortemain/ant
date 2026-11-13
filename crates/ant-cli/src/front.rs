@@ -117,6 +117,12 @@ fn build_options(
     if accepts("config") {
         chosen.insert("config".into(), "Release".into());
     }
+    // One `cargo build --workspace` instead of one invocation per member:
+    // cargo schedules crates in parallel itself, and a no-change build pays
+    // cargo's startup once, not once per crate (D-027).
+    if accepts("granularity") {
+        chosen.insert("granularity".into(), "workspace".into());
+    }
     for (key, value) in configured {
         chosen.insert(key.clone(), value.clone());
     }

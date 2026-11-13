@@ -525,6 +525,12 @@ fn file_stamp(path: &Path) -> Option<(u64, u128)> {
 /// `$XDG_CACHE_HOME/ant/toolchains.json` or `~/.cache/ant/toolchains.json`
 /// elsewhere. `ANT_CACHE_HOME` overrides the directory.
 fn toolchain_cache_file() -> Option<PathBuf> {
+    Some(user_cache_dir()?.join("toolchains.json"))
+}
+
+/// Ant's per-user cache directory (`ANT_CACHE_HOME` overrides it); see
+/// the paths above. Also holds change-detection caches (D-027).
+pub fn user_cache_dir() -> Option<PathBuf> {
     let dir = if let Some(dir) = std::env::var_os("ANT_CACHE_HOME") {
         PathBuf::from(dir)
     } else if cfg!(windows) {
@@ -538,7 +544,7 @@ fn toolchain_cache_file() -> Option<PathBuf> {
             .join(".cache")
             .join("ant")
     };
-    Some(dir.join("toolchains.json"))
+    Some(dir)
 }
 
 fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {

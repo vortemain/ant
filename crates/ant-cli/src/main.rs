@@ -17,7 +17,23 @@ mod remote_cli;
 mod scheduler;
 
 fn main() -> ExitCode {
-    match run() {
+    let command = std::env::args_os().nth(1);
+    // Developer-facing commands remember file fingerprints between runs so
+    // unchanged files are not re-read (D-027). Workers and the sandbox
+    // runner never do. `ANT_NO_DIGEST_CACHE=1` turns it off.
+    let caches = command
+        .as_deref()
+        .is_some_and(|command| ["build", "run", "remote"].iter().any(|c| command == *c))
+        && std::env::var_os("ANT_NO_DIGEST_CACHE")
+            .is_none_or(|value| value.is_empty() || value == "0");
+    if caches && let Some(dir) = build_adapter::user_cache_dir() {
+        build_digest::enable_workspace_caches(dir.join("digests"));
+    }
+    let result = run();
+    if caches {
+        build_digest::save_workspace_caches();
+    }
+    match result {
         Ok(code) => ExitCode::from(code),
         Err(message) => {
             eprintln!("ant: {message}");
