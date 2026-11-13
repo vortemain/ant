@@ -1,7 +1,7 @@
 # Agent handoff guide
 
 ## Goal
-Build a trustworthy local-first build engine that can grow into self-hosted remote, hybrid, distributed, managed, and enterprise execution. The attached master specification is a user-provided requirements source; it is not evidence that any capability has already been implemented.
+**Read `docs/vision.md` first.** Ant is a Bun/Expo-class, self-hostable build tool that covers everything — every platform (Android, iOS, web, desktop, backend) and language — with very few commands (`ant init`, `ant build`, `ant server deploy`), very fast builds, automatic offloading to the owner's own servers, and a polished dashboard. Underneath it is a trustworthy local-first build engine that grows into self-hosted remote, hybrid, distributed, managed, and enterprise execution. Work follows the product roadmap (phases P1–P9) at the top of `docs/plan.md` (decision D-016): user-facing simplicity first; plumbing commands are internals, not the product's front door. The attached master specification is a user-provided requirements source; it is not evidence that any capability has already been implemented.
 
 ## Before taking ownership
 1. Read `README.md`, `docs/architecture.md`, `docs/plan.md`, and `docs/requirements-traceability.md`.
