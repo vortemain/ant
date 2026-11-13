@@ -1,5 +1,5 @@
-# Ant CI. Not yet exercised: the repository has no GitHub remote (see
-# docs/plan.md T1.18). The toolchain comes from rust-toolchain.toml.
+# Ant CI: the quality gate (fmt, clippy -D warnings, full test suite) on
+# Linux and Windows for every push. Runs on github.com/vortemain/ant.
 name: ci
 
 on:

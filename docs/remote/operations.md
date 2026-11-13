@@ -50,7 +50,7 @@ WantedBy=multi-user.target
 
 The first stdout line is `coordinator listening=ADDR protocol_version=1`. Health check: `curl -fsS http://127.0.0.1:8742/v1/health`.
 
-> The Linux build of Ant has not been compiled or tested yet (only the Windows target is installed in the development environment); verify it before relying on this unit.
+> The Linux build compiles and passes its test suite in CI (ubuntu-latest, 211 tests), but the coordinator has not yet been run as a service on a real Linux VPS; verify this unit there before relying on it.
 
 ## TLS reverse proxy (Caddy example)
 
