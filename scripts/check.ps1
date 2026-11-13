@@ -1,11 +1,9 @@
 # Ant quality gate (Windows / PowerShell).
 #
-# Hard gates: clippy with warnings denied across all targets, and the full
-# workspace test suite. Formatting is advisory until the one-time format
-# commit lands (decision D-012); pass -StrictFormat to make it a hard gate.
+# Hard gates: rustfmt, clippy with warnings denied across all targets, and
+# the full workspace test suite (decision D-012).
 #
-# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1 [-StrictFormat]
-param([switch]$StrictFormat)
+# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
@@ -24,7 +22,7 @@ function Invoke-Step([string]$Name, [scriptblock]$Command, [bool]$Hard = $true) 
     }
 }
 
-Invoke-Step 'cargo fmt --check' { cargo fmt --all -- --check | Out-Null } $StrictFormat.IsPresent
+Invoke-Step 'cargo fmt --check' { cargo fmt --all -- --check }
 Invoke-Step 'cargo clippy (deny warnings)' { cargo clippy --workspace --all-targets -- -D warnings }
 Invoke-Step 'cargo test' { cargo test --workspace }
 
