@@ -65,6 +65,31 @@ pub struct JobResult {
     /// Every declared output file/directory, workspace-relative. Files are
     /// uploaded as blobs before the result is posted.
     pub outputs: Vec<Entry>,
+    /// The outputs came from the shared remote cache; nothing was executed.
+    #[serde(default)]
+    pub reused: bool,
+    /// The action key the worker computed when the run was cache-eligible
+    /// (sandboxed Linux worker, fully declared action; D-019).
+    #[serde(default)]
+    pub cache_key: Option<String>,
+}
+
+/// A shared remote cache entry: the outputs a sandboxed worker produced for
+/// an action key (`GET /v1/cache/{key}`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheEntry {
+    pub outputs: Vec<Entry>,
+    pub worker_id: String,
+    pub created_unix_ms: u64,
+}
+
+/// `PUT /v1/cache/{key}` (workers only).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheStoreRequest {
+    pub worker_id: String,
+    pub outputs: Vec<Entry>,
 }
 
 impl JobResult {
@@ -103,6 +128,9 @@ pub struct JobSummary {
     pub error: Option<String>,
     pub input_count: usize,
     pub output_count: usize,
+    /// Satisfied from the shared remote cache instead of executing.
+    #[serde(default)]
+    pub reused: bool,
 }
 
 /// `GET /v1/jobs`: every job the coordinator holds (in memory since start),

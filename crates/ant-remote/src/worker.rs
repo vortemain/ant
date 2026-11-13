@@ -76,7 +76,25 @@ fn failure(config: &WorkerConfig, error: String) -> JobResult {
         timed_out: false,
         error: Some(error),
         outputs: Vec::new(),
+        reused: false,
+        cache_key: None,
     }
+}
+
+/// Where a sandboxed Linux worker mounts every job's workspace (D-019):
+/// identical across jobs and workers, on the sandbox's private /tmp.
+pub const WORKER_MOUNT: &str = "/tmp/ant/ws";
+
+/// One modification time for every materialized input (2000-01-01 UTC), so
+/// filesystem metadata is a deterministic function of content (D-019).
+fn normalized_mtime() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800)
+}
+
+/// Whether this worker produces cache-eligible, path- and time-independent
+/// results: the Linux bubblewrap sandbox (no network, fixed mount).
+fn caches_results(config: &WorkerConfig) -> bool {
+    config.sandbox && cfg!(target_os = "linux")
 }
 
 fn execute_job(
@@ -99,6 +117,9 @@ fn execute_job(
         let workspace = workspace
             .canonicalize()
             .map_err(|error| error.to_string())?;
+        if caches_results(config) {
+            return run_cacheable(coordinator, config, &workspace, spec);
+        }
         let prepared = local_executor::prepare_with_metadata(&workspace, &spec.action)
             .map_err(|error| error.to_string())?;
         let cancellation = CancellationToken::new();
@@ -118,6 +139,8 @@ fn execute_job(
             timed_out: executed.timed_out,
             error: None,
             outputs,
+            reused: false,
+            cache_key: None,
         })
     })();
     let _ = std::fs::remove_dir_all(&workspace);
@@ -147,10 +170,93 @@ fn materialize(
                     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                 }
                 std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
+                set_mtime(&target)?;
             }
         }
     }
+    // Directories last (writing files changes their parents' mtimes),
+    // deepest first so a parent is stamped after its children.
+    let mut dirs: Vec<&Entry> = inputs.iter().filter(|e| e.kind == EntryKind::Dir).collect();
+    dirs.sort_by_key(|entry| std::cmp::Reverse(entry.path.matches('/').count()));
+    for entry in dirs {
+        set_mtime(&workspace.join(&entry.path))?;
+    }
     Ok(())
+}
+
+fn set_mtime(path: &Path) -> Result<(), String> {
+    let file = if path.is_dir() {
+        // Directory handles carry their own mtime on Unix; Windows workers
+        // never produce cacheable results, so directories are skipped there.
+        if cfg!(windows) {
+            return Ok(());
+        }
+        std::fs::File::open(path)
+    } else {
+        std::fs::File::options().write(true).open(path)
+    }
+    .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    file.set_modified(normalized_mtime())
+        .map_err(|error| format!("cannot set mtime on {}: {error}", path.display()))
+}
+
+/// Sandboxed Linux worker path (D-019): compute the path- and
+/// time-independent action key, serve a cache hit without executing, or
+/// execute under the fixed mount and store the proven result.
+fn run_cacheable(
+    coordinator: &Coordinator,
+    config: &WorkerConfig,
+    workspace: &Path,
+    spec: &JobSpec,
+) -> Result<JobResult, String> {
+    // Content-only digests: with normalized mtimes, metadata is determined
+    // by content, so these keys are complete (see the fingerprint docs).
+    let mut prepared =
+        local_executor::prepare(workspace, &spec.action).map_err(|error| error.to_string())?;
+    prepared.sandbox_mount = Some(PathBuf::from(WORKER_MOUNT));
+    let fingerprint =
+        build_digest::ExecutionFingerprint::remote_worker_sandboxed(Path::new(WORKER_MOUNT));
+    let inputs: Vec<_> = prepared
+        .input_digests
+        .iter()
+        .map(|entry| (entry.path.clone(), entry.digest))
+        .collect();
+    let candidate = build_digest::action_key_candidate(&spec.action, &inputs, &fingerprint)
+        .map_err(|error| error.to_string())?;
+    let key = candidate
+        .cache_eligible
+        .then(|| candidate.digest.to_string());
+    if let Some(key) = &key
+        && let Some(entry) = coordinator.cache_lookup(key)?
+    {
+        return Ok(JobResult {
+            worker_id: config.worker_id.clone(),
+            exit_code: Some(0),
+            timed_out: false,
+            error: None,
+            outputs: entry.outputs,
+            reused: true,
+            cache_key: Some(key.clone()),
+        });
+    }
+    let executed = local_executor::execute_sandboxed_prepared(&prepared, &CancellationToken::new())
+        .map_err(|error| error.to_string())?;
+    let mut outputs = Vec::new();
+    if executed.success() {
+        outputs = upload_outputs(coordinator, workspace, &spec.action)?;
+        if let Some(key) = &key {
+            coordinator.cache_store(key, &config.worker_id, &outputs)?;
+        }
+    }
+    Ok(JobResult {
+        worker_id: config.worker_id.clone(),
+        exit_code: executed.status.code(),
+        timed_out: executed.timed_out,
+        error: None,
+        outputs,
+        reused: false,
+        cache_key: key,
+    })
 }
 
 fn upload_outputs(

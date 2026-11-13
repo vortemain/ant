@@ -175,6 +175,11 @@ pub struct PreparedAction {
     /// Job-wide committed-memory cap to enforce at execution, in bytes.
     /// `None` (the default) runs uncapped; see [`PreparedAction::enforce_memory_limit`].
     pub memory_limit_bytes: Option<u64>,
+    /// Linux sandbox only: mount the workspace at this fixed path inside the
+    /// sandbox instead of its host path, so absolute paths the action sees
+    /// (and may embed in outputs) are identical across jobs and machines.
+    /// Remote workers use it to make cache keys path-independent (D-019).
+    pub sandbox_mount: Option<PathBuf>,
 }
 
 impl PreparedAction {
@@ -270,6 +275,7 @@ fn prepare_with_mode(
         input_digests,
         metadata_fingerprinting,
         memory_limit_bytes: None,
+        sandbox_mount: None,
     })
 }
 
@@ -770,15 +776,27 @@ pub fn execute_sandboxed_prepared(
                 path: requested_cwd.clone(),
                 source,
             })?;
+    // Inside the sandbox the workspace lives at its host path, or at the
+    // requested fixed mount point (created on the private /tmp tmpfs).
+    let (inner_workspace, inner_cwd) = match &prepared.sandbox_mount {
+        Some(mount) => (
+            mount.clone(),
+            mount.join(
+                cwd.strip_prefix(&prepared.workspace)
+                    .unwrap_or(Path::new("")),
+            ),
+        ),
+        None => (prepared.workspace.clone(), cwd.clone()),
+    };
     let mut command = Command::new(bwrap);
     command.args(linux_sandbox::BASE_ARGS);
     // After the private /tmp so a workspace under /tmp stays visible.
     command
         .arg("--bind")
         .arg(&prepared.workspace)
-        .arg(&prepared.workspace)
+        .arg(&inner_workspace)
         .arg("--chdir")
-        .arg(&cwd)
+        .arg(&inner_cwd)
         .arg("--")
         .args(&action.argv)
         .env_clear();

@@ -12,6 +12,8 @@
 //! | GET    | `/v1/jobs/{id}`           | client        |
 //! | POST   | `/v1/lease`               | worker        |
 //! | POST   | `/v1/jobs/{id}/result`    | worker (the lease holder) |
+//! | GET    | `/v1/cache/{key}`         | client/worker |
+//! | PUT    | `/v1/cache/{key}`         | worker (D-019: only workers write) |
 //! | GET    | `/v1/jobs`                | client/viewer |
 //! | GET    | `/v1/workers`             | client/viewer |
 //! | GET    | `/`, `/ui`, `/ui/app.*`   | none (static dashboard; contains no data) |
@@ -28,9 +30,9 @@
 use crate::auth::Token;
 use crate::blobs::BlobStore;
 use crate::protocol::{
-    Health, JobList, JobResult, JobSpec, JobState, JobStatus, JobSummary, LeaseRequest,
-    LeaseResponse, MissingRequest, MissingResponse, PROTOCOL_VERSION, SubmitResponse, WorkerList,
-    WorkerSummary, validate_entries,
+    CacheEntry, CacheStoreRequest, Health, JobList, JobResult, JobSpec, JobState, JobStatus,
+    JobSummary, LeaseRequest, LeaseResponse, MissingRequest, MissingResponse, PROTOCOL_VERSION,
+    SubmitResponse, WorkerList, WorkerSummary, validate_entries,
 };
 use build_digest::ContentDigest;
 use std::collections::{HashMap, VecDeque};
@@ -149,6 +151,7 @@ impl Jobs {
                     .or_else(|| record.result.as_ref().and_then(|r| r.error.clone())),
                 input_count: record.spec.inputs.len(),
                 output_count: record.result.as_ref().map_or(0, |r| r.outputs.len()),
+                reused: record.result.as_ref().is_some_and(|r| r.reused),
             })
             .collect();
         // Newest first; job ids are `job-N` with increasing N.
@@ -344,8 +347,12 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         (tiny_http::Method::Get, ["v1", "workers"]) => {
             require_reader(role).map(|_| list_workers(state))
         }
-        (_, ["v1", "blobs", ..]) if role == Role::Viewer => {
+        (_, ["v1", "blobs" | "cache", ..]) if role == Role::Viewer => {
             Err(error_reply(403, "viewer tokens are read-only"))
+        }
+        (tiny_http::Method::Get, ["v1", "cache", key]) => cache_get(state, key),
+        (tiny_http::Method::Put, ["v1", "cache", key]) => {
+            require(role, Role::Worker).and_then(|_| cache_put(state, request, key))
         }
         (tiny_http::Method::Post, ["v1", "blobs", "missing"]) => missing(state, request),
         (tiny_http::Method::Put, ["v1", "blobs", digest]) => put_blob(state, request, digest),
@@ -365,6 +372,68 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         _ => Err(error_reply(404, "no such route")),
     };
     result.unwrap_or_else(|reply| reply)
+}
+
+fn cache_path(state: &State, key: &str) -> Result<PathBuf, Reply> {
+    let digest = parse_digest(key)?;
+    let hex = digest.to_string();
+    Ok(state
+        .config
+        .data_dir
+        .join("cache")
+        .join(hex.trim_start_matches("sha256:")))
+}
+
+/// A hit only when the entry parses and every output blob is still stored.
+fn cache_get(state: &State, key: &str) -> Result<Reply, Reply> {
+    let path = cache_path(state, key)?;
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Err(error_reply(404, "no cache entry"));
+    };
+    let entry: CacheEntry =
+        serde_json::from_slice(&bytes).map_err(|_| error_reply(404, "unreadable cache entry"))?;
+    for output in &entry.outputs {
+        if let Some(digest) = &output.digest
+            && !state.blobs.contains(&parse_digest(digest)?)
+        {
+            return Err(error_reply(404, "cache entry refers to a missing blob"));
+        }
+    }
+    Ok(json_reply(200, &entry))
+}
+
+/// Store a worker-proven result. The first stored entry for a key wins (a
+/// key determines its outputs); every referenced blob must already exist.
+fn cache_put(state: &State, request: &mut tiny_http::Request, key: &str) -> Result<Reply, Reply> {
+    let path = cache_path(state, key)?;
+    let body = read_body(state, request)?;
+    let store: CacheStoreRequest = parse_json(&body)?;
+    validate_entries(&store.outputs).map_err(|error| error_reply(400, &error))?;
+    for output in &store.outputs {
+        if let Some(digest) = &output.digest
+            && !state.blobs.contains(&parse_digest(digest)?)
+        {
+            return Err(error_reply(
+                409,
+                &format!("output blob {digest} not uploaded"),
+            ));
+        }
+    }
+    if path.is_file() {
+        return Ok(json_reply(200, &serde_json::json!({ "stored": false })));
+    }
+    let entry = CacheEntry {
+        outputs: store.outputs,
+        worker_id: store.worker_id,
+        created_unix_ms: now_ms(),
+    };
+    let dir = path.parent().expect("cache dir");
+    std::fs::create_dir_all(dir).map_err(|error| error_reply(500, &error.to_string()))?;
+    let temp = dir.join(format!(".{}.tmp", std::process::id()));
+    std::fs::write(&temp, serde_json::to_vec(&entry).expect("serializable"))
+        .and_then(|()| std::fs::rename(&temp, &path))
+        .map_err(|error| error_reply(500, &error.to_string()))?;
+    Ok(json_reply(201, &serde_json::json!({ "stored": true })))
 }
 
 /// Read-model routes: clients and viewers.

@@ -453,6 +453,16 @@ impl ExecutionFingerprint {
         Self::local_network_isolated(workspace)
     }
 
+    /// Fingerprint of a sandboxed Linux *remote worker* run (D-019). The
+    /// workspace is the fixed in-sandbox mount point, and the worker writes
+    /// every input with one normalized modification time, so filesystem
+    /// metadata is a deterministic function of content and path. That makes
+    /// keys from content-only input digests complete (metadata is captured by
+    /// construction) and identical across jobs, workspaces, and checkouts.
+    pub fn remote_worker_sandboxed(mount: &Path) -> Self {
+        Self::local_namespace_sandboxed(mount)
+    }
+
     pub fn local_network_isolated(workspace: &Path) -> Self {
         let mut fingerprint = Self::local_sandboxed(workspace);
         fingerprint.capabilities.network_isolation = true;

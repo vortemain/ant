@@ -100,6 +100,7 @@ function renderJobs(list) {
     if (job.exit_code !== null && job.exit_code !== undefined) result.append(el("span", `exit ${job.exit_code}`));
     else if (job.state === "completed" || job.state === "failed") result.append(el("span", "no exit code"));
     else result.append(el("span", "—"));
+    if (job.reused) result.append(el("span", "reused from the shared cache", "detail"));
     if (job.error) result.append(el("span", job.error, "detail"));
     if (job.output_count) result.append(el("span", `${job.output_count} output entr${job.output_count === 1 ? "y" : "ies"}`, "detail"));
     tr.append(result);

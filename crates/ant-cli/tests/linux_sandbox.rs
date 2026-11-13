@@ -214,3 +214,164 @@ fn linux_sandbox_cache_reuses_and_invalidates() {
         "changed input"
     );
 }
+
+/// Kills a spawned server/worker when dropped.
+struct Guard(std::process::Child);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The shared remote cache (D-019): a sandboxed Linux worker proves a
+/// result once; afterwards the same action is reused from the coordinator —
+/// including from a different checkout at a different path with different
+/// file timestamps — and changed content executes again.
+#[test]
+fn remote_cache_reuses_across_workspaces_and_timestamps() {
+    use std::io::BufRead as _;
+    if !sandbox_ready() {
+        return;
+    }
+    let dir = TempDir::new("remote-cache");
+    let token = |name: &str, value: &str| {
+        let path = dir.path().join(name);
+        fs::write(&path, value).expect("token");
+        path
+    };
+    let client_token = token(
+        "client.token",
+        "client-token-0123456789abcdefghijklmnopqrstuv",
+    );
+    let worker_token = token(
+        "worker.token",
+        "worker-token-0123456789abcdefghijklmnopqrstuv",
+    );
+    let mut coordinator = Command::new(env!("CARGO_BIN_EXE_ant"))
+        .args(["coordinator", "--listen", "127.0.0.1:0", "--data-dir"])
+        .arg(dir.path().join("coord"))
+        .arg("--client-token-file")
+        .arg(&client_token)
+        .arg("--worker-token-file")
+        .arg(&worker_token)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("coordinator");
+    let mut line = String::new();
+    std::io::BufReader::new(coordinator.stdout.take().expect("stdout"))
+        .read_line(&mut line)
+        .expect("listening line");
+    let _coordinator = Guard(coordinator);
+    let addr = line
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("listening="))
+        .expect("address");
+    let url = format!("http://{addr}");
+    let _worker = Guard(
+        Command::new(env!("CARGO_BIN_EXE_ant"))
+            .args([
+                "worker",
+                "--coordinator",
+                &url,
+                "--id",
+                "linux-worker",
+                "--sandbox",
+                "--token-file",
+            ])
+            .arg(&worker_token)
+            .arg("--work-dir")
+            .arg(dir.path().join("work"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("worker"),
+    );
+
+    let shell = fs::canonicalize("/bin/sh").expect("resolve /bin/sh");
+    let digest = build_digest::digest_file(&shell).expect("digest sh");
+    let plan = json!({
+        "schema_version": 1,
+        "actions": [{
+            "action": {
+                "schema_version": 1, "id": "copy",
+                "argv": [shell.to_string_lossy(), "-c", "cp in.txt out.txt"],
+                "working_directory": ".",
+                "inputs": [{ "path": "in.txt", "kind": "file" }],
+                "outputs": [{ "path": "out.txt", "kind": "file" }],
+                "environment": [], "cache_policy": "eligible",
+                "toolchain": { "name": "sh", "version": "system", "executable_digest": digest.to_string() },
+                "timeout_ms": 60000
+            },
+            "dependencies": []
+        }]
+    });
+    let plan_path = dir.path().join("plan.json");
+    fs::write(&plan_path, serde_json::to_vec_pretty(&plan).expect("json")).expect("plan");
+    let remote_run = |ws: &Path| {
+        run_ant(&[
+            "remote",
+            "run",
+            "--coordinator",
+            &url,
+            "--token-file",
+            &client_token.to_string_lossy(),
+            "--workspace",
+            &ws.to_string_lossy(),
+            "--plan",
+            &plan_path.to_string_lossy(),
+        ])
+    };
+
+    let ws_a = dir.path().join("checkout-a");
+    fs::create_dir_all(&ws_a).expect("ws a");
+    fs::write(ws_a.join("in.txt"), "hello remote cache").expect("input");
+    let (code, stdout, stderr) = remote_run(&ws_a);
+    assert_eq!(code, 0, "stdout {stdout:?} stderr {stderr:?}");
+    assert!(
+        stdout.contains("action=copy status=succeeded"),
+        "first build executes: {stdout:?}"
+    );
+
+    fs::remove_file(ws_a.join("out.txt")).expect("delete output");
+    let (code, stdout, _) = remote_run(&ws_a);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("action=copy status=reused"),
+        "same workspace reuses: {stdout:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(ws_a.join("out.txt")).expect("restored"),
+        "hello remote cache"
+    );
+
+    // A different checkout: other path, files written later (new mtimes).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let ws_b = dir.path().join("elsewhere").join("checkout-b");
+    fs::create_dir_all(&ws_b).expect("ws b");
+    fs::write(ws_b.join("in.txt"), "hello remote cache").expect("input");
+    let (code, stdout, _) = remote_run(&ws_b);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("action=copy status=reused"),
+        "a different path and timestamps must still reuse: {stdout:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(ws_b.join("out.txt")).expect("restored"),
+        "hello remote cache"
+    );
+
+    fs::write(ws_b.join("in.txt"), "different content").expect("change");
+    let (code, stdout, _) = remote_run(&ws_b);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("action=copy status=succeeded"),
+        "changed content executes: {stdout:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(ws_b.join("out.txt")).expect("rebuilt"),
+        "different content"
+    );
+}

@@ -145,6 +145,46 @@ impl Coordinator {
         Ok(response.map(|r| r.missing).unwrap_or_default())
     }
 
+    /// `Some(entry)` on a cache hit, `None` on a miss.
+    pub fn cache_lookup(&self, key: &str) -> Result<Option<crate::protocol::CacheEntry>, String> {
+        let response = self
+            .agent
+            .get(&self.url(&format!("/v1/cache/{key}")))
+            .header("Authorization", &self.token.header_value())
+            .call()
+            .map_err(|error| format!("cache lookup failed: {error}"))?;
+        let (status, body) = self.read(response)?;
+        if status == 404 {
+            return Ok(None);
+        }
+        Self::check(status, &body, "cache lookup")?;
+        serde_json::from_slice(&body)
+            .map(Some)
+            .map_err(|error| format!("cache lookup: invalid response: {error}"))
+    }
+
+    pub fn cache_store(
+        &self,
+        key: &str,
+        worker_id: &str,
+        outputs: &[crate::protocol::Entry],
+    ) -> Result<(), String> {
+        let request = crate::protocol::CacheStoreRequest {
+            worker_id: worker_id.to_owned(),
+            outputs: outputs.to_vec(),
+        };
+        let payload = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+        let response = self
+            .agent
+            .put(&self.url(&format!("/v1/cache/{key}")))
+            .header("Authorization", &self.token.header_value())
+            .header("Content-Type", "application/json")
+            .send(&payload[..])
+            .map_err(|error| format!("cache store failed: {error}"))?;
+        let (status, body) = self.read(response)?;
+        Self::check(status, &body, "cache store")
+    }
+
     pub fn put_blob(&self, bytes: &[u8]) -> Result<ContentDigest, String> {
         let digest = digest_bytes(bytes);
         let response = self

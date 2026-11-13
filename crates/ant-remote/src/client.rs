@@ -199,8 +199,9 @@ fn report(
         return Ok(1);
     }
     install_outputs(coordinator, workspace, action, &result.outputs)?;
+    let status_word = if result.reused { "reused" } else { "succeeded" };
     println!(
-        "action={id} status=succeeded exit_code={exit} remote_job={} worker={}",
+        "action={id} status={status_word} exit_code={exit} remote_job={} worker={}",
         status.job_id, result.worker_id
     );
     for entry in &result.outputs {
