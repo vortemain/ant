@@ -18,6 +18,12 @@
 //! clamped to it, so the action runs alone instead of deadlocking the run.
 //! Requests are admission weights only; processes are not limited at runtime.
 //!
+//! With `keep_going` (`--keep-going`), a failed, timed-out, or unpreparable
+//! action no longer stops new starts: every action that does not depend on it
+//! (directly or transitively) still runs, and its dependents are reported as
+//! `skipped`. Cancellation always stops new starts. The exit status reports
+//! the worst outcome observed (hard error > cancelled > timed out > failed).
+//!
 //! Every state transition is mirrored into the structured event stream
 //! (`build-events`) when one is configured.
 
@@ -43,6 +49,23 @@ enum Termination {
     TimedOut,
     Cancelled,
     HardError(String),
+}
+
+impl Termination {
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Success => 0,
+            Self::FailedProcess => 1,
+            Self::TimedOut => 2,
+            Self::Cancelled => 3,
+            Self::HardError(_) => 4,
+        }
+    }
+
+    /// Keep the more severe outcome; the first of equal severity wins.
+    fn worst(self, other: Self) -> Self {
+        if other.rank() > self.rank() { other } else { self }
+    }
 }
 
 struct PlanResult {
@@ -95,6 +118,8 @@ struct Weight {
 /// Ready queue plus free capacity; guarded by one lock so admission is atomic.
 struct Admission {
     ready: VecDeque<usize>,
+    /// Admitted actions that have not yet released their capacity.
+    running: usize,
     free_cpu: u64,
     /// `None` when no memory budget was configured.
     free_memory_mb: Option<u64>,
@@ -114,6 +139,7 @@ impl Admission {
             return None;
         }
         self.ready.pop_front();
+        self.running += 1;
         self.free_cpu -= weight.cpu;
         if let Some(free) = self.free_memory_mb.as_mut() {
             *free -= weight.memory_mb;
@@ -122,6 +148,7 @@ impl Admission {
     }
 
     fn release(&mut self, weight: Weight) {
+        self.running -= 1;
         self.free_cpu += weight.cpu;
         if let Some(free) = self.free_memory_mb.as_mut() {
             *free += weight.memory_mb;
@@ -134,6 +161,14 @@ impl Admission {
 pub struct Capacity {
     pub cpu: u64,
     pub memory_mb: Option<u64>,
+}
+
+/// Plan-run settings chosen on the command line.
+#[derive(Clone, Copy, Debug)]
+pub struct RunOptions {
+    pub capacity: Capacity,
+    pub keep_going: bool,
+    pub sandbox: bool,
 }
 
 /// Clamp an action's request to the run capacity. Returns the weight and
@@ -162,6 +197,8 @@ struct Shared {
     executed: Vec<AtomicBool>,
     executed_count: AtomicUsize,
     stop_starting: AtomicBool,
+    /// `--keep-going`: failures do not stop independent actions.
+    keep_going: bool,
     failed: AtomicBool,
     timed_out: AtomicBool,
     cancelled: AtomicBool,
@@ -176,6 +213,15 @@ struct Shared {
 }
 
 impl Shared {
+    /// A non-cancellation failure stops new starts unless keep-going is on;
+    /// with keep-going the failed action's dependents are simply never
+    /// queued, so they end up reported as skipped.
+    fn on_failure(&self) {
+        if !self.keep_going {
+            self.stop_starting.store(true, Ordering::Relaxed);
+        }
+    }
+
     fn log(&self, line: String) {
         let _guard = self.output.lock().expect("output lock");
         println!("{line}");
@@ -191,11 +237,11 @@ pub fn run_plan(
     graph: &BuildGraph,
     workspace: &Path,
     cancellation: &CancellationToken,
-    capacity: Capacity,
-    sandbox: bool,
+    options: RunOptions,
     cache_dir: Option<&Path>,
     events: &Mutex<EventStream>,
 ) -> Result<u8, String> {
+    let RunOptions { capacity, keep_going, sandbox } = options;
     if capacity.cpu == 0 {
         return Err("--jobs requires a positive integer".to_owned());
     }
@@ -239,9 +285,9 @@ pub fn run_plan(
     // cache participation and a silently ignored flag would hide the mistake.
     let participant = CacheParticipant::new(cache_dir)?;
     let result = if jobs == 1 {
-        run_sequential(workspace, cancellation, &tasks, sandbox, &participant, events)
+        run_sequential(workspace, cancellation, &tasks, keep_going, sandbox, &participant, events)
     } else {
-        run_parallel(workspace, cancellation, tasks, capacity, sandbox, participant, events)
+        run_parallel(workspace, cancellation, tasks, options, participant, events)
     };
     let outcome = match result.termination {
         Termination::Success => RunOutcome::Succeeded,
@@ -267,14 +313,26 @@ fn run_sequential(
     workspace: &Path,
     cancellation: &CancellationToken,
     tasks: &[Task],
+    keep_going: bool,
     sandbox: bool,
     participant: &CacheParticipant,
     events: &Mutex<EventStream>,
 ) -> PlanResult {
     let mut executed_ids = BTreeSet::new();
     let mut termination = Termination::Success;
+    // Actions that did not succeed (failed or never ran); with keep-going,
+    // anything depending on one of these is skipped.
+    let mut blocked: HashSet<String> = HashSet::new();
     for task in tasks {
         let id = task.action.id.clone();
+        if task.dependencies.iter().any(|dependency| blocked.contains(dependency)) {
+            blocked.insert(id);
+            continue;
+        }
+        if keep_going && cancellation.is_cancelled() {
+            termination = termination.worst(Termination::Cancelled);
+            break;
+        }
         println!("action={id} status=started");
         events.lock().expect("events lock").emit(EventKind::ActionStarted { action_id: id.clone() });
         executed_ids.insert(id.clone());
@@ -305,7 +363,7 @@ fn run_sequential(
                 if result.cancelled {
                     println!("action={} status=cancelled", result.action_id);
                     emit_action_finished(events, &result.action_id, ActionFinishFacts::minimal(ActionStatus::Cancelled));
-                    termination = Termination::Cancelled;
+                    termination = termination.worst(Termination::Cancelled);
                     break;
                 }
                 if result.timed_out {
@@ -315,7 +373,11 @@ fn run_sequential(
                         exit_code: result.status.code(),
                         ..ActionFinishFacts::minimal(ActionStatus::TimedOut)
                     });
-                    termination = Termination::TimedOut;
+                    termination = termination.worst(Termination::TimedOut);
+                    if keep_going {
+                        blocked.insert(id);
+                        continue;
+                    }
                     break;
                 }
                 let exit_code = result.status.code();
@@ -341,14 +403,18 @@ fn run_sequential(
                     error: None,
                 });
                 if !result.success() {
-                    termination = Termination::FailedProcess;
+                    termination = termination.worst(Termination::FailedProcess);
+                    if keep_going {
+                        blocked.insert(id);
+                        continue;
+                    }
                     break;
                 }
             }
             Err(ExecutionError::Cancelled) => {
                 println!("action={id} status=cancelled");
                 emit_action_finished(events, &id, ActionFinishFacts::minimal(ActionStatus::Cancelled));
-                termination = Termination::Cancelled;
+                termination = termination.worst(Termination::Cancelled);
                 break;
             }
             Err(error) => {
@@ -359,7 +425,11 @@ fn run_sequential(
                     error: Some(message.clone()),
                     ..ActionFinishFacts::minimal(ActionStatus::Failed)
                 });
-                termination = Termination::HardError(message);
+                termination = termination.worst(Termination::HardError(message));
+                if keep_going {
+                    blocked.insert(id);
+                    continue;
+                }
                 break;
             }
         }
@@ -372,11 +442,11 @@ fn run_parallel(
     workspace: &Path,
     cancellation: &CancellationToken,
     tasks: Vec<Task>,
-    capacity: Capacity,
-    sandbox: bool,
+    options: RunOptions,
     participant: CacheParticipant,
     events: &Mutex<EventStream>,
 ) -> PlanResult {
+    let RunOptions { capacity, keep_going, sandbox } = options;
     let total = tasks.len();
     let mut position: HashMap<String, usize> = HashMap::with_capacity(total);
     for (index, task) in tasks.iter().enumerate() {
@@ -411,6 +481,7 @@ fn run_parallel(
         dependents,
         queue: Mutex::new(Admission {
             ready: queue,
+            running: 0,
             free_cpu: capacity.cpu,
             free_memory_mb: capacity.memory_mb,
         }),
@@ -418,6 +489,7 @@ fn run_parallel(
         executed: (0..total).map(|_| AtomicBool::new(false)).collect(),
         executed_count: AtomicUsize::new(0),
         stop_starting: AtomicBool::new(false),
+        keep_going,
         failed: AtomicBool::new(false),
         timed_out: AtomicBool::new(false),
         cancelled: AtomicBool::new(false),
@@ -522,9 +594,15 @@ fn worker_loop(
             shared.stop_starting.store(true, Ordering::Relaxed);
             return;
         }
-        let next = shared.queue.lock().expect("queue lock").admit(&shared.weights);
+        let (next, idle) = {
+            let mut queue = shared.queue.lock().expect("queue lock");
+            let next = queue.admit(&shared.weights);
+            // Nothing ready and nothing running: no further task can ever
+            // become ready (remaining tasks are blocked by failures).
+            (next, queue.ready.is_empty() && queue.running == 0)
+        };
         let Some(index) = next else {
-            if shared.executed_count.load(Ordering::Relaxed) == shared.tasks.len() {
+            if idle {
                 return;
             }
             // Waiting for a dependency to finish or for capacity to free up.
@@ -589,7 +667,9 @@ fn run_task(
                 *guard = Some(message);
             }
             shared.failed.store(true, Ordering::Relaxed);
-            shared.stop_starting.store(true, Ordering::Relaxed);
+            shared.executed[index].store(true, Ordering::Relaxed);
+            shared.executed_count.fetch_add(1, Ordering::Relaxed);
+            shared.on_failure();
             return;
         }
     };
@@ -655,7 +735,7 @@ fn run_task(
                     error: None,
                 });
                 shared.timed_out.store(true, Ordering::Relaxed);
-                shared.stop_starting.store(true, Ordering::Relaxed);
+                shared.on_failure();
                 return;
             }
             if !result.success() {
@@ -674,7 +754,7 @@ fn run_task(
                     error: None,
                 });
                 shared.failed.store(true, Ordering::Relaxed);
-                shared.stop_starting.store(true, Ordering::Relaxed);
+                shared.on_failure();
                 return;
             }
             if let Some(warning) = store_warning {
@@ -830,11 +910,22 @@ mod tests {
     use super::*;
 
     fn admission(ready: &[usize], cpu: u64, memory_mb: Option<u64>) -> Admission {
-        Admission { ready: ready.iter().copied().collect(), free_cpu: cpu, free_memory_mb: memory_mb }
+        Admission { ready: ready.iter().copied().collect(), running: 0, free_cpu: cpu, free_memory_mb: memory_mb }
     }
 
     fn weight(cpu: u64, memory_mb: u64) -> Weight {
         Weight { cpu, memory_mb }
+    }
+
+    #[test]
+    fn termination_keeps_the_worst_outcome() {
+        let worst = Termination::Success
+            .worst(Termination::FailedProcess)
+            .worst(Termination::TimedOut)
+            .worst(Termination::FailedProcess);
+        assert!(matches!(worst, Termination::TimedOut));
+        let worst = worst.worst(Termination::HardError("x".to_owned())).worst(Termination::Cancelled);
+        assert!(matches!(worst, Termination::HardError(ref message) if message == "x"));
     }
 
     #[test]

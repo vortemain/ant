@@ -1208,3 +1208,62 @@ fn resource_requests_and_flags_are_validated() {
     assert_eq!(code, 1);
     assert!(stderr.contains("--memory-mb applies only to plan execution"), "stderr was {stderr:?}");
 }
+
+fn keep_going_plan(dir: &TempDir) -> String {
+    // `bad` fails; `child` and `grandchild` sit downstream of it; `independent`
+    // does not depend on it. Ready actions start in action-ID order, so
+    // without keep-going `independent` would be skipped after `bad` fails.
+    write_plan(dir, &[
+        plan_action("bad", "exit 3", &[]),
+        plan_action("child", "echo child> child.txt", &["bad"]),
+        plan_action("grandchild", "echo grandchild> grandchild.txt", &["child"]),
+        plan_action("independent", "echo ok> independent.txt", &[]),
+    ])
+}
+
+#[test]
+fn keep_going_runs_independent_actions_and_skips_dependents() {
+    for jobs in ["1", "2"] {
+        let dir = TempDir::new(&format!("keep-going-{jobs}"));
+        let plan = keep_going_plan(&dir);
+        let workspace = dir.path().to_string_lossy().into_owned();
+
+        // Control: the default stops new starts at the first failure.
+        let (code, stdout, _) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--jobs", "1"]);
+        assert_eq!(code, 1);
+        assert!(stdout.contains("action=independent status=skipped"), "control stdout was {stdout:?}");
+        assert!(!dir.path().join("independent.txt").exists());
+
+        let (code, stdout, stderr) = run_ant(&[
+            "run", "--workspace", &workspace, "--plan", &plan, "--jobs", jobs, "--keep-going",
+        ]);
+        assert_eq!(code, 1, "jobs={jobs}: a failure must still fail the run; stderr was {stderr:?}");
+        assert!(stdout.contains("action=bad status=failed"), "jobs={jobs}: {stdout:?}");
+        assert!(stdout.contains("action=independent status=succeeded"), "jobs={jobs}: {stdout:?}");
+        assert!(dir.path().join("independent.txt").exists(), "jobs={jobs}: independent action must run");
+        assert!(stdout.contains("action=child status=skipped"), "jobs={jobs}: {stdout:?}");
+        assert!(stdout.contains("action=grandchild status=skipped"), "jobs={jobs}: {stdout:?}");
+        assert!(!dir.path().join("child.txt").exists() && !dir.path().join("grandchild.txt").exists());
+        assert!(!stdout.contains("action=bad status=skipped"), "a failed action is not skipped: {stdout:?}");
+    }
+}
+
+#[test]
+fn keep_going_reports_the_worst_outcome_and_is_plan_only() {
+    let dir = TempDir::new("keep-going-worst");
+    let mut slow = if cfg!(windows) {
+        plan_action("a-slow", "ping -n 5 127.0.0.1 >nul", &[])
+    } else {
+        plan_action("a-slow", "sleep 4", &[])
+    };
+    slow["action"]["timeout_ms"] = json!(500);
+    let plan = write_plan(&dir, &[slow, plan_action("b-fails", "exit 1", &[]), plan_action("c-ok", "echo ok> c.txt", &[])]);
+    let workspace = dir.path().to_string_lossy().into_owned();
+    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--keep-going"]);
+    assert_eq!(code, 124, "a timeout outranks a plain failure; stderr was {stderr:?}; stdout was {stdout:?}");
+    assert!(dir.path().join("c.txt").exists(), "stdout was {stdout:?}");
+
+    let (code, _, stderr) = run_ant(&["run", "--workspace", &workspace, "--keep-going", "--", "cmd"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("--keep-going applies only to plan execution"), "stderr was {stderr:?}");
+}

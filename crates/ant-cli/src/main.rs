@@ -57,6 +57,7 @@ fn run() -> Result<u8, String> {
     let mut events_path: Option<PathBuf> = None;
     let mut cache_dir: Option<PathBuf> = None;
     let mut sandbox = false;
+    let mut keep_going = false;
     let mut passthrough = false;
     let mut process_args = Vec::new();
     while let Some(arg) = args.next() {
@@ -66,6 +67,11 @@ fn run() -> Result<u8, String> {
         }
         if arg == "--" {
             passthrough = true;
+        } else if arg == "--keep-going" {
+            if keep_going {
+                return Err("--keep-going may only be specified once".to_owned());
+            }
+            keep_going = true;
         } else if arg == "--sandbox" {
             if sandbox {
                 return Err("--sandbox may only be specified once".to_owned());
@@ -139,6 +145,9 @@ fn run() -> Result<u8, String> {
     if plan_path.is_none() && jobs.is_some() {
         return Err("--jobs applies only to plan execution".to_owned());
     }
+    if plan_path.is_none() && keep_going {
+        return Err("--keep-going applies only to plan execution".to_owned());
+    }
     if plan_path.is_none() && memory_mb.is_some() {
         return Err("--memory-mb applies only to plan execution".to_owned());
     }
@@ -155,8 +164,12 @@ fn run() -> Result<u8, String> {
     install_ctrl_c_handler(&cancellation);
     let events = Mutex::new(EventStream::create(events_path, new_run_id())?);
     if let Some(plan_path) = plan_path {
-        let capacity = scheduler::Capacity { cpu: jobs as u64, memory_mb };
-        return execute_plan(&workspace, &plan_path, &cancellation, capacity, sandbox, cache_dir.as_deref(), &events);
+        let options = scheduler::RunOptions {
+            capacity: scheduler::Capacity { cpu: jobs as u64, memory_mb },
+            keep_going,
+            sandbox,
+        };
+        return execute_plan(&workspace, &plan_path, &cancellation, options, cache_dir.as_deref(), &events);
     }
     if !passthrough || process_args.is_empty() {
         return Err(usage().to_owned());
@@ -274,14 +287,13 @@ fn execute_plan(
     workspace: &Path,
     plan_path: &Path,
     cancellation: &CancellationToken,
-    capacity: scheduler::Capacity,
-    sandbox: bool,
+    options: scheduler::RunOptions,
     cache_dir: Option<&Path>,
     events: &Mutex<EventStream>,
 ) -> Result<u8, String> {
     let graph = load_graph(plan_path)?;
     // Fully validate the graph before starting the first process.
-    run_plan(&graph, workspace, cancellation, capacity, sandbox, cache_dir, events)
+    run_plan(&graph, workspace, cancellation, options, cache_dir, events)
 }
 
 fn plan_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u8, String> {
@@ -567,5 +579,5 @@ fn load_graph(plan_path: &Path) -> Result<BuildGraph, String> {
 }
 
 fn usage() -> &'static str {
-    "Ant - local-first build infrastructure\n\nUsage:\n  ant --version\n  ant run [--workspace PATH] [--cwd RELATIVE_PATH] [--timeout-ms N] [--cancel-file PATH] [--events PATH] [--sandbox] -- PROGRAM [ARG ...]\n  ant run [--workspace PATH] [--cancel-file PATH] [--jobs N] [--memory-mb M] [--events PATH] [--sandbox] [--cache-dir DIR] --plan PLAN.json\n  ant plan validate --plan PLAN.json\n  ant plan describe --plan PLAN.json\n  ant plan explain --plan PLAN.json [--cache-dir DIR] [--workspace PATH]\n  ant adapt [--adapter NAME] [--project PATH] --out PLAN.json\n  ant adapt --detect [--project PATH]\n\nRuns local actions directly. By default the executor is not a sandbox and does not\nprovide cache reuse. On Windows, --sandbox confines writes to the workspace using a\nrestricted token (still not network-isolated, so cache reuse stays gated);\n--sandbox fails closed on other platforms and never falls back to unsandboxed\nexecution. --jobs N is a CPU-slot capacity and --memory-mb M an optional memory\nbudget: an action starts only when its declared resources (cpu, default 1;\nmemory_mb) fit, in FIFO order; these are admission weights, not runtime limits.\n--cache-dir opts a plan run into cache participation, but a key is\nstored or looked up only when its candidate reported no blockers — no executor can\nreport that yet (network isolation is unavailable), so nothing is reused today.\n'ant plan explain' reports per-action key candidates and cacheability blockers\nfor inspection only. 'ant adapt' generates a plan for a recognized project using\na build-system adapter (available: cargo, npm); without --adapter it uses the single\nadapter that recognizes the project and refuses to guess when several do.\n'ant adapt --detect' reports every adapter's detection result without writing.\nGenerated actions declare what the adapter can honestly cover and default to\ncache_policy never."
+    "Ant - local-first build infrastructure\n\nUsage:\n  ant --version\n  ant run [--workspace PATH] [--cwd RELATIVE_PATH] [--timeout-ms N] [--cancel-file PATH] [--events PATH] [--sandbox] -- PROGRAM [ARG ...]\n  ant run [--workspace PATH] [--cancel-file PATH] [--jobs N] [--memory-mb M] [--keep-going] [--events PATH] [--sandbox] [--cache-dir DIR] --plan PLAN.json\n  ant plan validate --plan PLAN.json\n  ant plan describe --plan PLAN.json\n  ant plan explain --plan PLAN.json [--cache-dir DIR] [--workspace PATH]\n  ant adapt [--adapter NAME] [--project PATH] --out PLAN.json\n  ant adapt --detect [--project PATH]\n\nRuns local actions directly. By default the executor is not a sandbox and does not\nprovide cache reuse. On Windows, --sandbox confines writes to the workspace using a\nrestricted token (still not network-isolated, so cache reuse stays gated);\n--sandbox fails closed on other platforms and never falls back to unsandboxed\nexecution. --jobs N is a CPU-slot capacity and --memory-mb M an optional memory\nbudget: an action starts only when its declared resources (cpu, default 1;\nmemory_mb) fit, in FIFO order; these are admission weights, not runtime limits.\n--keep-going runs every action not downstream of a failure instead of stopping\nnew starts at the first failure; dependents of failed actions are skipped.\n--cache-dir opts a plan run into cache participation, but a key is\nstored or looked up only when its candidate reported no blockers — no executor can\nreport that yet (network isolation is unavailable), so nothing is reused today.\n'ant plan explain' reports per-action key candidates and cacheability blockers\nfor inspection only. 'ant adapt' generates a plan for a recognized project using\na build-system adapter (available: cargo, npm); without --adapter it uses the single\nadapter that recognizes the project and refuses to guess when several do.\n'ant adapt --detect' reports every adapter's detection result without writing.\nGenerated actions declare what the adapter can honestly cover and default to\ncache_policy never."
 }
