@@ -119,6 +119,7 @@ fn upload_missing(
     let missing: std::collections::HashSet<String> =
         coordinator.missing(digests)?.into_iter().collect();
     let mut uploaded = std::collections::HashSet::new();
+    let mut blobs = Vec::new();
     for entry in inputs {
         let Some(digest) = &entry.digest else {
             continue;
@@ -126,13 +127,14 @@ fn upload_missing(
         if missing.contains(digest) && uploaded.insert(digest.clone()) {
             let bytes = std::fs::read(workspace.join(&entry.path))
                 .map_err(|error| format!("input {}: {error}", entry.path))?;
-            let sent = coordinator.put_blob(&bytes)?;
-            if &sent.to_string() != digest {
+            if &crate::blobs::digest_bytes(&bytes).to_string() != digest {
                 return Err(format!("input {} changed while uploading", entry.path));
             }
+            blobs.push(bytes);
         }
     }
-    Ok(())
+    // Many small files per request (D-023).
+    coordinator.put_blobs(&blobs)
 }
 
 fn wait(
@@ -256,22 +258,27 @@ fn install_outputs(
             }
         }
     }
-    for entry in outputs {
+    // Fetch every output file in batches, verified, before writing (D-023).
+    let file_entries: Vec<&Entry> = outputs
+        .iter()
+        .filter(|e| e.kind == EntryKind::File)
+        .collect();
+    let digests: Vec<String> = file_entries
+        .iter()
+        .map(|entry| entry.digest.clone().expect("validated"))
+        .collect();
+    let blobs = coordinator.get_blobs(&digests)?;
+    for entry in outputs.iter().filter(|e| e.kind == EntryKind::Dir) {
+        std::fs::create_dir_all(workspace.join(&entry.path)).map_err(|error| error.to_string())?;
+    }
+    for (entry, bytes) in file_entries.into_iter().zip(blobs) {
         let target = workspace.join(&entry.path);
-        match entry.kind {
-            EntryKind::Dir => {
-                std::fs::create_dir_all(&target).map_err(|error| error.to_string())?
-            }
-            EntryKind::File => {
-                let bytes = coordinator.get_blob(entry.digest.as_deref().expect("validated"))?;
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-                }
-                std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
-                if entry.executable {
-                    crate::protocol::make_executable(&target)?;
-                }
-            }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
+        if entry.executable {
+            crate::protocol::make_executable(&target)?;
         }
     }
     Ok(())

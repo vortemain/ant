@@ -228,6 +228,63 @@ pub struct MissingResponse {
     pub missing: Vec<String>,
 }
 
+/// `POST /v1/blobs/batch-get` request: at most [`MAX_BATCH_BLOBS`] digests.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BatchGetRequest {
+    pub digests: Vec<String>,
+}
+
+/// Most blobs one batch request may name or carry (P2.6).
+pub const MAX_BATCH_BLOBS: usize = 1024;
+/// Target payload size for one batch; senders split larger sets.
+pub const BATCH_TARGET_BYTES: usize = 32 * 1024 * 1024;
+
+/// Encode blobs as frames: for each, a u32 (big-endian) digest length, the
+/// digest text, a u64 data length, then the data. Used by the batched blob
+/// routes to move many small files per request (P2.6, D-023).
+pub fn encode_frames(frames: &[(&str, &[u8])]) -> Vec<u8> {
+    let total: usize = frames.iter().map(|(d, b)| 12 + d.len() + b.len()).sum();
+    let mut out = Vec::with_capacity(total);
+    for (digest, bytes) in frames {
+        out.extend_from_slice(&(digest.len() as u32).to_be_bytes());
+        out.extend_from_slice(digest.as_bytes());
+        out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+    out
+}
+
+/// Decode frames produced by [`encode_frames`]; rejects truncated or
+/// oversized frames and more than [`MAX_BATCH_BLOBS`] frames. Callers must
+/// still verify each blob against its digest.
+pub fn decode_frames(mut bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut frames = Vec::new();
+    let take = |bytes: &mut &[u8], n: usize| -> Result<Vec<u8>, String> {
+        if bytes.len() < n {
+            return Err("truncated blob frame".to_owned());
+        }
+        let (head, tail) = bytes.split_at(n);
+        *bytes = tail;
+        Ok(head.to_vec())
+    };
+    while !bytes.is_empty() {
+        if frames.len() >= MAX_BATCH_BLOBS {
+            return Err(format!("more than {MAX_BATCH_BLOBS} blobs in one batch"));
+        }
+        let digest_len =
+            u32::from_be_bytes(take(&mut bytes, 4)?.try_into().expect("4 bytes")) as usize;
+        if digest_len > 128 {
+            return Err("blob frame digest is too long".to_owned());
+        }
+        let digest = String::from_utf8(take(&mut bytes, digest_len)?)
+            .map_err(|_| "blob frame digest is not UTF-8".to_owned())?;
+        let data_len = u64::from_be_bytes(take(&mut bytes, 8)?.try_into().expect("8 bytes"));
+        let data_len = usize::try_from(data_len).map_err(|_| "blob frame too large".to_owned())?;
+        frames.push((digest, take(&mut bytes, data_len)?));
+    }
+    Ok(frames)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Health {
     pub protocol_version: u32,
@@ -316,6 +373,28 @@ mod tests {
         ] {
             assert!(validate_relative(bad).is_err(), "{bad:?} must be rejected");
         }
+    }
+
+    #[test]
+    fn frames_roundtrip_and_reject_malformed_input() {
+        let frames = encode_frames(&[("sha256:aa", b"hello"), ("sha256:bb", b"")]);
+        let decoded = decode_frames(&frames).expect("decode");
+        assert_eq!(
+            decoded,
+            vec![
+                ("sha256:aa".to_owned(), b"hello".to_vec()),
+                ("sha256:bb".to_owned(), Vec::new())
+            ]
+        );
+        assert!(
+            decode_frames(&frames[..frames.len() - 1]).is_err(),
+            "truncated data"
+        );
+        assert!(decode_frames(&[0, 0, 0]).is_err(), "truncated header");
+        let mut huge = (200u32).to_be_bytes().to_vec();
+        huge.extend(vec![b'x'; 200]);
+        assert!(decode_frames(&huge).is_err(), "oversized digest");
+        assert_eq!(decode_frames(&[]).expect("empty"), Vec::new());
     }
 
     #[test]

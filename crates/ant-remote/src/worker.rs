@@ -157,24 +157,30 @@ fn materialize(
     // Staging for actions that point TEMP/TMP inside the workspace.
     std::fs::create_dir_all(workspace.join(".ant").join("tmp"))
         .map_err(|error| error.to_string())?;
-    for entry in inputs {
-        let target = workspace.join(&entry.path);
-        match entry.kind {
-            EntryKind::Dir => {
-                std::fs::create_dir_all(&target).map_err(|error| error.to_string())?
+    for entry in inputs.iter().filter(|e| e.kind == EntryKind::Dir) {
+        std::fs::create_dir_all(workspace.join(&entry.path)).map_err(|error| error.to_string())?;
+    }
+    // Files arrive in batches (D-023); a chunk at a time bounds memory.
+    let files: Vec<&Entry> = inputs
+        .iter()
+        .filter(|e| e.kind == EntryKind::File)
+        .collect();
+    for chunk in files.chunks(256) {
+        let digests: Vec<String> = chunk
+            .iter()
+            .map(|entry| entry.digest.clone().expect("validated file entry"))
+            .collect();
+        let blobs = coordinator.get_blobs(&digests)?;
+        for (entry, bytes) in chunk.iter().zip(blobs) {
+            let target = workspace.join(&entry.path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
-            EntryKind::File => {
-                let digest = entry.digest.as_deref().expect("validated file entry");
-                let bytes = coordinator.get_blob(digest)?;
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-                }
-                std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
-                if entry.executable {
-                    crate::protocol::make_executable(&target)?;
-                }
-                set_mtime(&target)?;
+            std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
+            if entry.executable {
+                crate::protocol::make_executable(&target)?;
             }
+            set_mtime(&target)?;
         }
     }
     // Directories last (writing files changes their parents' mtimes),

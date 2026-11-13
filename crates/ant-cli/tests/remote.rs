@@ -525,3 +525,66 @@ fn dashboard_is_static_data_free_and_locked_down() {
         .expect("get");
     assert_eq!(response.status().as_u16(), 401);
 }
+
+/// Batched blob routes (D-023) keep every guarantee of the single-blob
+/// routes: content is verified per blob (one bad blob rejects the whole
+/// batch and stores nothing), downloads never return partial sets, framing
+/// is validated, and viewers cannot use them.
+#[test]
+fn batched_blob_routes_verify_everything() {
+    use ant_remote::protocol::{BatchGetRequest, encode_frames};
+    let cluster = Cluster::start("batch", false);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let post = |path: &str, token: &str, body: Vec<u8>| {
+        let mut response = agent
+            .post(&format!("{}{path}", cluster.url))
+            .header("Authorization", &format!("Bearer {token}"))
+            .send(&body[..])
+            .expect("post");
+        let status = response.status().as_u16();
+        let bytes = response.body_mut().read_to_vec().expect("body");
+        (status, bytes)
+    };
+    let good = ant_remote::blobs::digest_bytes(b"good").to_string();
+    let other = ant_remote::blobs::digest_bytes(b"other").to_string();
+
+    // One mismatched blob rejects the batch; the good one is not stored.
+    let tampered = encode_frames(&[(good.as_str(), b"good"), (other.as_str(), b"not other")]);
+    let (status, _) = post("/v1/blobs/batch-put", CLIENT_TOKEN, tampered);
+    assert_eq!(status, 400);
+    let client = cluster.client(CLIENT_TOKEN);
+    assert_eq!(
+        client.missing(vec![good.clone()]).expect("missing"),
+        vec![good.clone()]
+    );
+
+    // Garbage framing and viewers are refused.
+    let (status, _) = post("/v1/blobs/batch-put", CLIENT_TOKEN, vec![0, 0, 0]);
+    assert_eq!(status, 400);
+    let (status, _) = post("/v1/blobs/batch-put", VIEWER_TOKEN, encode_frames(&[]));
+    assert_eq!(status, 403);
+
+    // A valid batch round-trips byte for byte, in request order.
+    client
+        .put_blobs(&[b"good".to_vec(), b"other".to_vec()])
+        .expect("batch put");
+    let blobs = client
+        .get_blobs(&[other.clone(), good.clone()])
+        .expect("batch get");
+    assert_eq!(blobs, vec![b"other".to_vec(), b"good".to_vec()]);
+
+    // A download naming a missing blob fails instead of returning a subset.
+    let absent = ant_remote::blobs::digest_bytes(b"absent").to_string();
+    let request = serde_json::to_vec(&BatchGetRequest {
+        digests: vec![good.clone(), absent],
+    })
+    .expect("json");
+    let (status, _) = post("/v1/blobs/batch-get", CLIENT_TOKEN, request.clone());
+    assert_eq!(status, 404);
+    let (status, _) = post("/v1/blobs/batch-get", VIEWER_TOKEN, request);
+    assert_eq!(status, 403);
+}

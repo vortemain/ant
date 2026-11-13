@@ -355,6 +355,8 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
             require(role, Role::Worker).and_then(|_| cache_put(state, request, key))
         }
         (tiny_http::Method::Post, ["v1", "blobs", "missing"]) => missing(state, request),
+        (tiny_http::Method::Post, ["v1", "blobs", "batch-get"]) => batch_get(state, request),
+        (tiny_http::Method::Post, ["v1", "blobs", "batch-put"]) => batch_put(state, request),
         (tiny_http::Method::Put, ["v1", "blobs", digest]) => put_blob(state, request, digest),
         (tiny_http::Method::Get, ["v1", "blobs", digest]) => get_blob(state, digest),
         (tiny_http::Method::Post, ["v1", "jobs"]) => {
@@ -504,6 +506,70 @@ fn missing(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Rep
         }
     }
     Ok(json_reply(200, &MissingResponse { missing }))
+}
+
+/// Return many blobs in one response, framed (D-023). Every requested blob
+/// must exist and is re-verified on read, exactly like `GET /v1/blobs/{d}`.
+fn batch_get(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Reply> {
+    let body = read_body(state, request)?;
+    let query: crate::protocol::BatchGetRequest = parse_json(&body)?;
+    if query.digests.len() > crate::protocol::MAX_BATCH_BLOBS {
+        return Err(error_reply(
+            400,
+            &format!(
+                "at most {} digests per batch",
+                crate::protocol::MAX_BATCH_BLOBS
+            ),
+        ));
+    }
+    let mut blobs = Vec::with_capacity(query.digests.len());
+    for text in &query.digests {
+        let digest = parse_digest(text)?;
+        match state.blobs.get(&digest) {
+            Ok(Some(bytes)) => blobs.push(bytes),
+            Ok(None) => return Err(error_reply(404, &format!("no such blob {text}"))),
+            Err(error) => return Err(error_reply(500, &error)),
+        }
+    }
+    let frames: Vec<(&str, &[u8])> = query
+        .digests
+        .iter()
+        .zip(&blobs)
+        .map(|(digest, bytes)| (digest.as_str(), bytes.as_slice()))
+        .collect();
+    Ok((
+        200,
+        crate::protocol::encode_frames(&frames),
+        "application/octet-stream",
+    ))
+}
+
+/// Store many blobs from one framed body (D-023). Each blob is re-hashed
+/// against its stated digest; one mismatch rejects the whole batch.
+fn batch_put(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Reply> {
+    let body = read_body(state, request)?;
+    let frames = crate::protocol::decode_frames(&body).map_err(|error| error_reply(400, &error))?;
+    let mut parsed = Vec::with_capacity(frames.len());
+    for (text, bytes) in &frames {
+        let digest = parse_digest(text)?;
+        if crate::blobs::digest_bytes(bytes) != digest {
+            return Err(error_reply(
+                400,
+                &format!("blob content does not match {text}"),
+            ));
+        }
+        parsed.push((digest, bytes));
+    }
+    for (digest, bytes) in parsed {
+        state
+            .blobs
+            .put(&digest, bytes)
+            .map_err(|error| error_reply(500, &error))?;
+    }
+    Ok(json_reply(
+        201,
+        &serde_json::json!({ "stored": frames.len() }),
+    ))
 }
 
 fn put_blob(state: &State, request: &mut tiny_http::Request, digest: &str) -> Result<Reply, Reply> {

@@ -185,6 +185,77 @@ impl Coordinator {
         Self::check(status, &body, "cache store")
     }
 
+    /// Upload many blobs in batched requests (D-023), split by count and by
+    /// [`crate::protocol::BATCH_TARGET_BYTES`].
+    pub fn put_blobs(&self, blobs: &[Vec<u8>]) -> Result<(), String> {
+        let mut batch: Vec<(String, &[u8])> = Vec::new();
+        let mut size = 0usize;
+        for bytes in blobs {
+            if !batch.is_empty()
+                && (batch.len() >= crate::protocol::MAX_BATCH_BLOBS
+                    || size + bytes.len() > crate::protocol::BATCH_TARGET_BYTES)
+            {
+                self.send_batch(&batch)?;
+                batch.clear();
+                size = 0;
+            }
+            batch.push((digest_bytes(bytes).to_string(), bytes.as_slice()));
+            size += bytes.len();
+        }
+        if !batch.is_empty() {
+            self.send_batch(&batch)?;
+        }
+        Ok(())
+    }
+
+    fn send_batch(&self, batch: &[(String, &[u8])]) -> Result<(), String> {
+        let frames: Vec<(&str, &[u8])> = batch.iter().map(|(d, b)| (d.as_str(), *b)).collect();
+        let payload = crate::protocol::encode_frames(&frames);
+        let response = self
+            .agent
+            .post(&self.url("/v1/blobs/batch-put"))
+            .header("Authorization", &self.token.header_value())
+            .header("Content-Type", "application/octet-stream")
+            .send(&payload[..])
+            .map_err(|error| format!("batch upload failed: {error}"))?;
+        let (status, body) = self.read(response)?;
+        Self::check(status, &body, "batch upload")
+    }
+
+    /// Download many blobs in batched requests (D-023); every blob is
+    /// verified against its digest before it is returned. Results are in
+    /// the order of `digests`.
+    pub fn get_blobs(&self, digests: &[String]) -> Result<Vec<Vec<u8>>, String> {
+        let mut out = Vec::with_capacity(digests.len());
+        for chunk in digests.chunks(crate::protocol::MAX_BATCH_BLOBS / 4) {
+            let request = crate::protocol::BatchGetRequest {
+                digests: chunk.to_vec(),
+            };
+            let payload = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+            let response = self
+                .agent
+                .post(&self.url("/v1/blobs/batch-get"))
+                .header("Authorization", &self.token.header_value())
+                .header("Content-Type", "application/json")
+                .send(&payload[..])
+                .map_err(|error| format!("batch download failed: {error}"))?;
+            let (status, body) = self.read(response)?;
+            Self::check(status, &body, "batch download")?;
+            let frames = crate::protocol::decode_frames(&body)?;
+            if frames.len() != chunk.len() {
+                return Err("batch download returned the wrong number of blobs".to_owned());
+            }
+            for ((digest, bytes), wanted) in frames.into_iter().zip(chunk) {
+                let expected: ContentDigest = wanted.parse()?;
+                if &digest != wanted || digest_bytes(&bytes) != expected {
+                    return Err(format!("batch download: blob {wanted} failed verification"));
+                }
+                out.push(bytes);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn put_blob(&self, bytes: &[u8]) -> Result<ContentDigest, String> {
         let digest = digest_bytes(bytes);
         let response = self
