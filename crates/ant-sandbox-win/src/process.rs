@@ -18,7 +18,9 @@ use windows_sys::Win32::System::Console::GetStdHandle;
 use windows_sys::Win32::System::Console::STD_ERROR_HANDLE;
 use windows_sys::Win32::System::Console::STD_INPUT_HANDLE;
 use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
+use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 use windows_sys::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
+use windows_sys::Win32::System::Threading::ResumeThread;
 use windows_sys::Win32::System::Threading::CreateProcessAsUserW;
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
@@ -90,6 +92,12 @@ impl Child {
         self.exit_code.unwrap_or(0)
     }
 
+    /// Peak committed memory of the job (child plus descendants), when the
+    /// child is job-tracked.
+    pub fn peak_memory_bytes(&self) -> Option<u64> {
+        self.job.as_ref().and_then(|job| crate::job::peak_job_memory(job).ok())
+    }
+
     #[allow(dead_code)]
     pub fn process_id(&self) -> u32 {
         self.process.dwProcessId
@@ -113,6 +121,7 @@ pub(crate) fn spawn(
     argv: &[String],
     cwd: &Path,
     environment: &[(String, String)],
+    memory_limit_bytes: Option<u64>,
 ) -> Result<Child, SandboxError> {
     let command_line = crate::winutil::argv_to_command_line(argv);
     let mut command_line_wide = crate::winutil::to_wide(&command_line);
@@ -165,7 +174,10 @@ pub(crate) fn spawn(
             std::ptr::null(),
             std::ptr::null(),
             1, // inherit handles
-            CREATE_UNICODE_ENVIRONMENT,
+            // With a memory cap the process starts suspended so the cap is
+            // in force before its first instruction runs.
+            CREATE_UNICODE_ENVIRONMENT
+                | if memory_limit_bytes.is_some() { CREATE_SUSPENDED } else { 0 },
             environment_block.as_ptr() as *const c_void,
             cwd_wide.as_ptr(),
             &startup,
@@ -196,10 +208,34 @@ pub(crate) fn spawn(
         job = Some(open_job);
     }
 
-    Ok(Child {
+    let child = Child {
         process: process_info,
         exit_code: None,
         descendants_tracked,
         job,
-    })
+    };
+    if let Some(limit) = memory_limit_bytes {
+        // Fail closed: a requested cap that cannot be applied means the
+        // (still suspended) process is terminated, never run uncapped.
+        let applied = match child.job.as_ref() {
+            Some(job) => crate::job::set_job_memory_limit(job, limit),
+            None => Err(SandboxError::ConfinementUnavailable {
+                path: cwd.to_path_buf(),
+                reason: "memory limit requested but the process could not join a job object".to_owned(),
+            }),
+        };
+        if let Err(error) = applied {
+            // SAFETY: handle is open; the process never ran user code.
+            unsafe { TerminateProcess(child.process.hProcess, 1) };
+            return Err(error);
+        }
+        // SAFETY: `hThread` is the owned primary-thread handle of the
+        // suspended process.
+        if unsafe { ResumeThread(child.process.hThread) } == u32::MAX {
+            let code = unsafe { GetLastError() };
+            unsafe { TerminateProcess(child.process.hProcess, 1) };
+            return Err(SandboxError::Windows { call: "ResumeThread", code });
+        }
+    }
+    Ok(child)
 }

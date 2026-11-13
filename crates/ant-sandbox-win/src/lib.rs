@@ -56,6 +56,9 @@ pub use error::SandboxError;
 mod acl;
 #[cfg(windows)]
 mod error;
+/// Job-object memory caps and suspended-start helpers (Windows only).
+#[cfg(windows)]
+pub mod job;
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
@@ -124,9 +127,23 @@ impl Sandbox {
         cwd: &std::path::Path,
         environment: &[(String, String)],
     ) -> Result<Child, SandboxError> {
+        self.spawn_with_memory_limit(argv, cwd, environment, None)
+    }
+
+    /// Like [`Sandbox::spawn`], optionally capping the committed memory of
+    /// the child and all its descendants (job-wide) at `memory_limit_bytes`.
+    /// With a cap the process starts suspended and is resumed only after the
+    /// cap reads back as applied; any failure terminates it unrun.
+    pub fn spawn_with_memory_limit(
+        &self,
+        argv: &[String],
+        cwd: &std::path::Path,
+        environment: &[(String, String)],
+        memory_limit_bytes: Option<u64>,
+    ) -> Result<Child, SandboxError> {
         #[cfg(not(windows))]
         {
-            let _ = (argv, cwd, environment);
+            let _ = (argv, cwd, environment, memory_limit_bytes);
             Err(SandboxError::UnsupportedPlatform)
         }
         #[cfg(windows)]
@@ -137,7 +154,8 @@ impl Sandbox {
                     reason: "empty argv".to_owned(),
                 });
             }
-            process::spawn(self.token.0, argv, cwd, environment).map(|inner| Child { inner })
+            process::spawn(self.token.0, argv, cwd, environment, memory_limit_bytes)
+                .map(|inner| Child { inner })
         }
     }
 }
@@ -180,6 +198,19 @@ impl Child {
         #[cfg(not(windows))]
         {
             false
+        }
+    }
+
+    /// Peak committed memory of the child and its descendants, in bytes,
+    /// when they are tracked by a job object.
+    pub fn peak_memory_bytes(&self) -> Option<u64> {
+        #[cfg(windows)]
+        {
+            self.inner.peak_memory_bytes()
+        }
+        #[cfg(not(windows))]
+        {
+            None
         }
     }
 

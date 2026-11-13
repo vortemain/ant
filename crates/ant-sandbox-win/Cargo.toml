@@ -21,6 +21,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
     "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 # Safe wrapper for Windows job objects (descendant cleanup), shared with the
 # direct local executor. Justified in docs/plan.md decision D-006.

@@ -1267,3 +1267,69 @@ fn keep_going_reports_the_worst_outcome_and_is_plan_only() {
     assert_eq!(code, 1);
     assert!(stderr.contains("--keep-going applies only to plan execution"), "stderr was {stderr:?}");
 }
+
+/// PowerShell action that commits `alloc_mb` MiB on top of its own baseline
+/// (~80 MiB) and exits nonzero if the allocation is refused.
+#[cfg(windows)]
+fn alloc_action(alloc_mb: u64, memory_mb: u64) -> serde_json::Value {
+    json!({
+        "action": {
+            "schema_version": 1,
+            "id": "alloc",
+            "argv": ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                format!("$ErrorActionPreference='Stop'; $b = New-Object byte[] ({alloc_mb}MB); $b[0]=1; exit 0")],
+            "working_directory": ".",
+            "inputs": [], "outputs": [], "environment": [],
+            "cache_policy": "never",
+            "timeout_ms": 60000,
+            "resources": { "memory_mb": memory_mb }
+        },
+        "dependencies": []
+    })
+}
+
+/// `--enforce-memory` makes a declared `memory_mb` a real job-wide cap on
+/// both executor paths: an allocation that fits succeeds, one that would
+/// exceed the cap is refused inside the process, and the same plan without
+/// the flag is unaffected (the control).
+#[cfg(windows)]
+#[test]
+fn enforce_memory_caps_committed_memory() {
+    let dir = TempDir::new("enforce-memory");
+    let workspace = dir.path().to_string_lossy().into_owned();
+
+    let fits = write_plan(&dir, &[alloc_action(20, 400)]);
+    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &fits, "--enforce-memory"]);
+    assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
+    assert!(
+        stdout.contains("memory_limit_bytes=419430400 memory_limit_hit=false"),
+        "stdout was {stdout:?}"
+    );
+
+    let too_big = write_plan(&dir, &[alloc_action(600, 300)]);
+    let (code, stdout, _) = run_ant(&["run", "--workspace", &workspace, "--plan", &too_big]);
+    assert_eq!(code, 0, "control: without the flag the allocation succeeds; stdout was {stdout:?}");
+    assert!(stdout.contains("memory_limit_bytes=none"), "stdout was {stdout:?}");
+
+    for extra in [&[][..], &["--sandbox"][..]] {
+        let mut args = vec!["run", "--workspace", &workspace, "--plan", &too_big, "--enforce-memory"];
+        args.extend_from_slice(extra);
+        let (code, stdout, _) = run_ant(&args);
+        assert_eq!(code, 1, "{extra:?}: the cap must refuse the allocation; stdout was {stdout:?}");
+        assert!(stdout.contains("action=alloc status=failed"), "{extra:?}: {stdout:?}");
+        assert!(stdout.contains("memory_limit_hit=true"), "{extra:?}: {stdout:?}");
+    }
+}
+
+#[test]
+fn enforce_memory_is_plan_only_and_fails_closed_off_windows() {
+    let dir = TempDir::new("enforce-memory-flags");
+    let workspace = dir.path().to_string_lossy().into_owned();
+    let (code, _, stderr) = run_ant(&["run", "--workspace", &workspace, "--enforce-memory", "--", "cmd"]);
+    assert_eq!(code, 1);
+    if cfg!(windows) {
+        assert!(stderr.contains("--enforce-memory applies only to plan execution"), "stderr was {stderr:?}");
+    } else {
+        assert!(stderr.contains("Windows job objects only") || stderr.contains("plan execution"), "stderr was {stderr:?}");
+    }
+}

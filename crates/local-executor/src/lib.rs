@@ -37,6 +37,9 @@ pub enum ExecutionError {
     /// this platform). The sandbox fails closed: this error means the action
     /// was NOT executed unsandboxed.
     Sandbox(String),
+    /// A requested resource limit could not be applied; the process was
+    /// not run (fail closed).
+    ResourceLimit(String),
 }
 
 impl fmt::Display for ExecutionError {
@@ -62,6 +65,7 @@ impl fmt::Display for ExecutionError {
             Self::Cancelled => write!(f, "action cancelled before process start"),
             Self::Spawn(e) => write!(f, "could not start action process: {e}"),
             Self::Sandbox(message) => write!(f, "sandbox unavailable: {message}"),
+            Self::ResourceLimit(message) => write!(f, "resource limit unavailable: {message}"),
         }
     }
 }
@@ -76,6 +80,11 @@ pub struct ExecutionResult {
     pub timed_out: bool,
     pub input_digests: Vec<ActionContentDigest>,
     pub output_digests: Vec<ActionContentDigest>,
+    /// The job-wide committed-memory cap applied to this run, if any.
+    pub memory_limit_bytes: Option<u64>,
+    /// Measured peak committed memory of the process tree, when it was
+    /// tracked by a job object (Windows); `None` when not measured.
+    pub peak_memory_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +150,24 @@ pub struct PreparedAction {
     /// Whether the digests above include filesystem metadata. `execute_prepared`
     /// re-verifies inputs in the same mode so the comparison is meaningful.
     pub metadata_fingerprinting: bool,
+    /// Job-wide committed-memory cap to enforce at execution, in bytes.
+    /// `None` (the default) runs uncapped; see [`PreparedAction::enforce_memory_limit`].
+    pub memory_limit_bytes: Option<u64>,
+}
+
+impl PreparedAction {
+    /// Turn the action's declared `resources.memory_mb` into an enforced
+    /// job-wide cap for execution (Windows job objects). Actions that declare
+    /// no memory stay uncapped. Execution fails closed — the process never
+    /// runs uncapped — when a cap is requested but cannot be applied,
+    /// including on platforms without job objects.
+    pub fn enforce_memory_limit(&mut self) {
+        self.memory_limit_bytes = self
+            .action
+            .resource_request()
+            .memory_mb
+            .map(|mib| mib.saturating_mul(1024 * 1024));
+    }
 }
 
 /// Validate an action and verify all declared inputs, computing their
@@ -199,7 +226,13 @@ fn prepare_with_mode(
         reject_existing_symlink_components(&workspace, &output.path)
             .map_err(ExecutionError::OutputDigest)?;
     }
-    Ok(PreparedAction { action: action.clone(), workspace, input_digests, metadata_fingerprinting })
+    Ok(PreparedAction {
+        action: action.clone(),
+        workspace,
+        input_digests,
+        metadata_fingerprinting,
+        memory_limit_bytes: None,
+    })
 }
 
 /// Execute an action prepared by `prepare` or `prepare_with_metadata` and
@@ -226,21 +259,57 @@ pub fn execute_prepared(
     command.args(&action.argv[1..]).current_dir(cwd).env_clear();
     command.envs(build_digest::local_runtime_environment());
     command.envs(action.environment.iter().map(|(key, value)| (key, value)));
+    #[cfg(not(windows))]
+    if prepared.memory_limit_bytes.is_some() {
+        return Err(ExecutionError::ResourceLimit(
+            "memory limits are enforced with Windows job objects only".to_owned(),
+        ));
+    }
+    #[cfg(windows)]
+    if prepared.memory_limit_bytes.is_some() {
+        use std::os::windows::process::CommandExt as _;
+        // CREATE_SUSPENDED: the cap is applied before the first instruction.
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        command.creation_flags(CREATE_SUSPENDED);
+    }
     let mut child = command.spawn().map_err(ExecutionError::Spawn)?;
     // Windows only: descendants are placed in a kill-on-close job object so a
     // cancelled or timed-out action cannot leave orphaned grandchildren. The
     // guard must stay alive until the child has exited.
     #[cfg(windows)]
-    let _job_guard = attach_child_to_job(&child);
-    #[cfg(not(windows))]
-    let _job_guard: Option<()> = None;
+    let job_guard = match prepared.memory_limit_bytes {
+        None => attach_child_to_job(&child),
+        Some(limit) => match attach_capped_and_resume(&child, limit) {
+            Ok(job) => Some(job),
+            Err(message) => {
+                // The process is still suspended and never ran user code.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ExecutionError::ResourceLimit(message));
+            }
+        },
+    };
     let timeout = action.timeout_ms.map(Duration::from_millis);
     let (status, cancelled, timed_out) = wait_for_child(&mut child, cancellation, timeout)?;
+    #[cfg(windows)]
+    let peak_memory_bytes =
+        job_guard.as_ref().and_then(|job| ant_sandbox_win::job::peak_job_memory(job).ok());
+    #[cfg(not(windows))]
+    let peak_memory_bytes = None;
     let mut output_digests = Vec::new();
     if status.success() && !cancelled && !timed_out {
         output_digests = verify_inputs_and_digest_outputs(prepared)?;
     }
-    Ok(ExecutionResult { action_id: action.id.clone(), status, cancelled, timed_out, input_digests: prepared.input_digests.clone(), output_digests })
+    Ok(ExecutionResult {
+        action_id: action.id.clone(),
+        status,
+        cancelled,
+        timed_out,
+        input_digests: prepared.input_digests.clone(),
+        output_digests,
+        memory_limit_bytes: prepared.memory_limit_bytes,
+        peak_memory_bytes,
+    })
 }
 
 /// Re-verify declared inputs in the prepared digest mode and digest declared
@@ -368,8 +437,11 @@ pub fn execute_sandboxed_prepared(
     environment.extend(action.environment.iter().cloned());
 
     let mut child = sandbox
-        .spawn(&action.argv, &cwd, &environment)
-        .map_err(|error| ExecutionError::Sandbox(error.to_string()))?;
+        .spawn_with_memory_limit(&action.argv, &cwd, &environment, prepared.memory_limit_bytes)
+        .map_err(|error| match prepared.memory_limit_bytes {
+            Some(_) => ExecutionError::ResourceLimit(error.to_string()),
+            None => ExecutionError::Sandbox(error.to_string()),
+        })?;
     let timeout = action.timeout_ms.map(Duration::from_millis);
     let start = Instant::now();
     let (code, cancelled, timed_out) = loop {
@@ -415,6 +487,8 @@ pub fn execute_sandboxed_prepared(
         timed_out,
         input_digests: prepared.input_digests.clone(),
         output_digests,
+        memory_limit_bytes: prepared.memory_limit_bytes,
+        peak_memory_bytes: child.peak_memory_bytes(),
     })
 }
 
@@ -484,6 +558,26 @@ fn strip_verbatim_prefix(path: &Path) -> PathBuf {
         PathBuf::from(format!(r"\\{rest}"))
     } else {
         path.to_path_buf()
+    }
+}
+
+/// Attach a `CREATE_SUSPENDED` child to a kill-on-close job, cap the job's
+/// committed memory, and only then resume it. Any failure is returned so the
+/// caller can kill the never-resumed process (fail closed).
+#[cfg(windows)]
+fn attach_capped_and_resume(child: &Child, limit_bytes: u64) -> Result<win32job::Job, String> {
+    use std::os::windows::io::AsRawHandle;
+    let mut info = win32job::ExtendedLimitInfo::new();
+    info.limit_kill_on_job_close();
+    let job = win32job::Job::create_with_limit_info(&info)
+        .map_err(|error| format!("cannot create job object: {error}"))?;
+    job.assign_process(child.as_raw_handle() as isize)
+        .map_err(|error| format!("cannot assign process to job object: {error}"))?;
+    ant_sandbox_win::job::set_job_memory_limit(&job, limit_bytes).map_err(|error| error.to_string())?;
+    match ant_sandbox_win::job::resume_process_threads(child.id()) {
+        Ok(0) => Err("no thread found to resume after applying the memory limit".to_owned()),
+        Ok(_) => Ok(job),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -668,6 +762,39 @@ mod tests {
             result.output_digests[0].digest,
             digest_file(&dir.path().join("out.txt")).expect("digest")
         );
+    }
+
+    #[test]
+    fn memory_limit_is_opt_in_and_derived_from_declared_memory() {
+        let dir = TempDir::new("mem-optin");
+        let mut undeclared = prepare(dir.path(), &action("plain", copy_command())).expect("prepare");
+        assert_eq!(undeclared.memory_limit_bytes, None, "no cap unless requested");
+        undeclared.enforce_memory_limit();
+        assert_eq!(undeclared.memory_limit_bytes, None, "undeclared memory stays uncapped");
+
+        let mut declared = action("declared", copy_command());
+        declared.resources = Some(build_action::ResourceRequest { cpu: 1, memory_mb: Some(64) });
+        let mut prepared = prepare(dir.path(), &declared).expect("prepare");
+        prepared.enforce_memory_limit();
+        assert_eq!(prepared.memory_limit_bytes, Some(64 * 1024 * 1024));
+    }
+
+    /// The capped path spawns suspended, applies the cap, and resumes; a
+    /// trivial command must run normally and report its measured peak.
+    #[cfg(windows)]
+    #[test]
+    fn capped_execution_resumes_the_child_and_measures_peak() {
+        let dir = TempDir::new("mem-capped");
+        let mut capped = action("capped", vec!["cmd".to_owned(), "/C".to_owned(), "echo ok> out.txt".to_owned()]);
+        capped.resources = Some(build_action::ResourceRequest { cpu: 1, memory_mb: Some(256) });
+        let mut prepared = prepare(dir.path(), &capped).expect("prepare");
+        prepared.enforce_memory_limit();
+        let result = execute_prepared(&prepared, &CancellationToken::new()).expect("execute");
+        assert!(result.success(), "status {:?}", result.status);
+        assert!(dir.path().join("out.txt").exists(), "the resumed child must actually run");
+        assert_eq!(result.memory_limit_bytes, Some(256 * 1024 * 1024));
+        let peak = result.peak_memory_bytes.expect("peak measured through the job");
+        assert!(peak > 0 && peak < 256 * 1024 * 1024, "peak {peak}");
     }
 
     #[test]

@@ -169,6 +169,8 @@ pub struct RunOptions {
     pub capacity: Capacity,
     pub keep_going: bool,
     pub sandbox: bool,
+    /// Enforce each action's declared `memory_mb` as a job-wide cap.
+    pub enforce_memory: bool,
 }
 
 /// Clamp an action's request to the run capacity. Returns the weight and
@@ -210,6 +212,8 @@ struct Shared {
     sandbox: bool,
     /// Cache participation (`--cache-dir`); mechanics behind the D-003 gate.
     participant: CacheParticipant,
+    /// `--enforce-memory`: declared `memory_mb` becomes a job-wide cap.
+    enforce_memory: bool,
 }
 
 impl Shared {
@@ -241,7 +245,7 @@ pub fn run_plan(
     cache_dir: Option<&Path>,
     events: &Mutex<EventStream>,
 ) -> Result<u8, String> {
-    let RunOptions { capacity, keep_going, sandbox } = options;
+    let RunOptions { capacity, .. } = options;
     if capacity.cpu == 0 {
         return Err("--jobs requires a positive integer".to_owned());
     }
@@ -285,7 +289,7 @@ pub fn run_plan(
     // cache participation and a silently ignored flag would hide the mistake.
     let participant = CacheParticipant::new(cache_dir)?;
     let result = if jobs == 1 {
-        run_sequential(workspace, cancellation, &tasks, keep_going, sandbox, &participant, events)
+        run_sequential(workspace, cancellation, &tasks, options, &participant, events)
     } else {
         run_parallel(workspace, cancellation, tasks, options, participant, events)
     };
@@ -313,11 +317,11 @@ fn run_sequential(
     workspace: &Path,
     cancellation: &CancellationToken,
     tasks: &[Task],
-    keep_going: bool,
-    sandbox: bool,
+    options: RunOptions,
     participant: &CacheParticipant,
     events: &Mutex<EventStream>,
 ) -> PlanResult {
+    let RunOptions { keep_going, sandbox, enforce_memory, .. } = options;
     let mut executed_ids = BTreeSet::new();
     let mut termination = Termination::Success;
     // Actions that did not succeed (failed or never ran); with keep-going,
@@ -336,7 +340,7 @@ fn run_sequential(
         println!("action={id} status=started");
         events.lock().expect("events lock").emit(EventKind::ActionStarted { action_id: id.clone() });
         executed_ids.insert(id.clone());
-        match cache_runner::run_action(participant, workspace, &task.action, cancellation, sandbox) {
+        match cache_runner::run_action(participant, workspace, &task.action, cancellation, sandbox, enforce_memory) {
             Ok(ActionRun::Reused { candidate, input_digests, output_digests }) => {
                 println!("action={id} status=reused");
                 print_digests("input", &input_digests);
@@ -389,6 +393,7 @@ fn run_sequential(
                 );
                 print_digests("input", &result.input_digests);
                 print_digests("output", &result.output_digests);
+                print_memory(&result);
                 println!(
                     "action={} key_candidate={} cache_eligible={} blockers={:?}",
                     result.action_id, candidate.digest, candidate.cache_eligible, candidate.reasons
@@ -446,7 +451,7 @@ fn run_parallel(
     participant: CacheParticipant,
     events: &Mutex<EventStream>,
 ) -> PlanResult {
-    let RunOptions { capacity, keep_going, sandbox } = options;
+    let RunOptions { capacity, .. } = options;
     let total = tasks.len();
     let mut position: HashMap<String, usize> = HashMap::with_capacity(total);
     for (index, task) in tasks.iter().enumerate() {
@@ -489,14 +494,15 @@ fn run_parallel(
         executed: (0..total).map(|_| AtomicBool::new(false)).collect(),
         executed_count: AtomicUsize::new(0),
         stop_starting: AtomicBool::new(false),
-        keep_going,
+        keep_going: options.keep_going,
         failed: AtomicBool::new(false),
         timed_out: AtomicBool::new(false),
         cancelled: AtomicBool::new(false),
         first_error: Mutex::new(None),
         output: Mutex::new(()),
-        sandbox,
+        sandbox: options.sandbox,
         participant,
+        enforce_memory: options.enforce_memory,
     });
     let workspace = workspace.to_path_buf();
     let cancellation = cancellation.clone();
@@ -631,6 +637,7 @@ fn run_task(
         &shared.tasks[index].action,
         cancellation,
         shared.sandbox,
+        shared.enforce_memory,
     ) {
         Ok(run) => run,
         Err(ExecutionError::Cancelled) => {
@@ -743,6 +750,10 @@ fn run_task(
                     "action={id} status=failed exit_code={}",
                     exit_code.map_or_else(|| "signal".to_owned(), |n| n.to_string())
                 ));
+                {
+                    let _guard = shared.output.lock().expect("output lock");
+                    print_memory(&result);
+                }
                 events.lock().expect("events lock").emit(EventKind::ActionFinished {
                     action_id: id.clone(),
                     status: ActionStatus::Failed,
@@ -771,6 +782,7 @@ fn run_task(
                 let _guard = shared.output.lock().expect("output lock");
                 print_digests("input", &result.input_digests);
                 print_digests("output", &result.output_digests);
+                print_memory(&result);
                 println!(
                     "action={id} key_candidate={} cache_eligible={} blockers={:?}",
                     candidate.digest, candidate.cache_eligible, candidate.reasons
@@ -866,6 +878,23 @@ fn named_digests(digests: &[ActionContentDigest]) -> Vec<NamedDigest> {
             digest: entry.digest.to_string(),
         })
         .collect()
+}
+
+/// Print the measured peak memory (and the enforced cap, if any) when the
+/// executor measured it. Windows counts a commit charge the cap rejected in
+/// the job's peak (verified empirically), so a peak above the cap means the
+/// cap refused at least one allocation.
+fn print_memory(result: &local_executor::ExecutionResult) {
+    if let Some(peak) = result.peak_memory_bytes {
+        let (limit, hit) = match result.memory_limit_bytes {
+            Some(limit) => (limit.to_string(), peak > limit),
+            None => ("none".to_owned(), false),
+        };
+        println!(
+            "action={} peak_memory_bytes={peak} memory_limit_bytes={limit} memory_limit_hit={hit}",
+            result.action_id
+        );
+    }
 }
 
 pub fn print_digests(kind: &str, digests: &[ActionContentDigest]) {

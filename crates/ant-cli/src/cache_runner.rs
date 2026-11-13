@@ -86,8 +86,12 @@ pub fn run_action(
     action: &Action,
     cancellation: &CancellationToken,
     sandbox: bool,
+    enforce_memory: bool,
 ) -> Result<ActionRun, ExecutionError> {
-    let prepared = local_executor::prepare_with_metadata(workspace, action)?;
+    let mut prepared = local_executor::prepare_with_metadata(workspace, action)?;
+    if enforce_memory {
+        prepared.enforce_memory_limit();
+    }
     let fingerprint = if sandbox {
         ExecutionFingerprint::local_sandboxed(workspace)
     } else {
