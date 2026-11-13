@@ -56,7 +56,11 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 fn run_script(script: &str, dry_run: bool) -> Result<(bool, String), String> {
+    // When Ant itself runs under PowerShell 7 (pwsh), the inherited
+    // PSModulePath makes Windows PowerShell 5.1 load PS7 module versions and
+    // fail on built-in cmdlets; clearing it restores 5.1's defaults.
     let output = Command::new("powershell")
+        .env_remove("PSModulePath")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -175,6 +179,12 @@ pub fn load_account() -> Result<&'static local_executor::IsolatedAccount, String
 
 /// Hidden `ant __sandbox-runner --workspace W -- PROGRAM [ARG...]`, started
 /// as the sandbox account by the executor. Returns the action's exit code.
+#[cfg(not(windows))]
+pub fn runner_main(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<u8, String> {
+    Err("the sandbox runner exists for Windows network isolation only".to_owned())
+}
+
+#[cfg(windows)]
 pub fn runner_main(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u8, String> {
     let mut workspace = None;
     let mut argv = Vec::new();

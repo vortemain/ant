@@ -79,7 +79,10 @@ mod winutil;
 pub struct Sandbox {
     #[cfg(windows)]
     token: token::TokenHandle,
+    // Never constructed off Windows (every constructor fails closed there);
+    // the field only keeps the type's shape identical across platforms.
     #[cfg(not(windows))]
+    #[allow(dead_code)]
     token: stub::TokenHandle,
     /// The canonical workspace the grants and token are scoped to.
     pub workspace: std::path::PathBuf,
@@ -96,7 +99,7 @@ impl Sandbox {
         #[cfg(not(windows))]
         {
             let _ = workspace;
-            return Err(SandboxError::UnsupportedPlatform);
+            Err(SandboxError::UnsupportedPlatform)
         }
         #[cfg(windows)]
         {

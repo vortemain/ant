@@ -169,7 +169,9 @@ mod tests {
     #[test]
     fn decrypts_a_powershell_secure_string_for_the_current_user() {
         // Produce a real current-user DPAPI blob the way setup.ps1 does.
+        // Same PSModulePath isolation as production (see ant-cli isolation.rs).
         let output = std::process::Command::new("powershell")
+            .env_remove("PSModulePath")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -178,7 +180,11 @@ mod tests {
             ])
             .output()
             .expect("powershell");
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "powershell failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let hex = String::from_utf8(output.stdout).expect("utf8");
         let secret = unprotect_secure_string_hex(&hex).expect("decrypt");
         let expected: Vec<u16> = "ant-test-secret".encode_utf16().chain([0]).collect();
