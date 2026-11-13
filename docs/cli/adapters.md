@@ -231,6 +231,43 @@ do not run under `--sandbox` with the Visual Studio generator (see below).
 The CMake e2e test locates `cmake` on PATH or through `vswhere`, and prints a
 skip notice on machines with neither.
 
+## The `gradle` adapter (P4, D-024)
+
+Detects a Gradle **wrapper** project (`settings.gradle[.kts]` plus `gradlew`
+/ `gradlew.bat` at the project root) and emits one action that runs the
+wrapper task (`--option task=assembleDebug|assembleRelease`, default
+`assembleDebug`) with `--no-daemon --console=plain`.
+
+- **Inputs:** the whole project except Gradle's outputs and caches. Every
+  module directory (one with `build.gradle[.kts]`) is listed child by child
+  without its `build/`; `.gradle/`, `.kotlin/`, `.idea/`, `.cxx/`, `.ant/`,
+  and `.git/` are never inputs. So keys do not change when a previous build
+  left `build/` directories behind.
+- **Outputs:** for `assembleDebug`, each Android application module's
+  (`android.application` plugin) debug APK at
+  `<module>/build/outputs/apk/debug/<module>-debug.apk`. Product flavors or
+  renamed outputs fail with "declared output was not created". Other tasks
+  declare no outputs.
+- **Environment:** `GRADLE_USER_HOME=.ant/gradle-home`,
+  `ANDROID_USER_HOME=.ant/android-home`, temp dirs under `.ant/tmp`, all
+  workspace-relative (made absolute at launch by a small `sh` wrapper on
+  Unix) so nothing is written outside the workspace and keys stay
+  path-independent. `JAVA_HOME`, `ANDROID_HOME`, and `ANDROID_SDK_ROOT` pass
+  through on Unix and their values are key material.
+- **Caching:** Gradle downloads dependencies and its own distribution, which
+  a sandboxed worker (no network) cannot do and which would be undeclared
+  inputs. The action is `cache_policy: eligible` only when both are inside
+  the project: a read-only dependency cache at `.gradle-deps/` (a copy of a
+  Gradle home's `caches/modules-2` without lock files; passed as
+  `GRADLE_RO_DEP_CACHE`) and a local `distributionUrl` (for example the
+  distribution zip next to `gradle-wrapper.properties`). Then the action runs
+  `--offline` with the Kotlin compiler in-process. Otherwise it is
+  `cache_policy: never`.
+- **Honest limits:** the JDK and Android SDK are host installations,
+  identified only by the environment values above (not digested); the
+  toolchain identity is the wrapper jar digest, the distribution, and
+  `java --version`. Only the single-root wrapper layout is supported.
+
 ## Sandbox compatibility
 
 Generated cargo and npm plans run under `ant run --sandbox` on Windows. This

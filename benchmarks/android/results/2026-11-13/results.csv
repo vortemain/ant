@@ -1,0 +1,17 @@
+scenario,rep,seconds,executed,reused,notes
+prep-online,1,198.93,-,-,fills the dependency cache; not a comparison
+gradle-cold,1,156.88,-,-,empty build cache; daemon start; distribution unpack
+gradle-no-change,1,2.18,-,-,same checkout, warm daemon
+gradle-no-change,2,1.76,-,-,same checkout, warm daemon
+gradle-no-change,3,1.57,-,-,same checkout, warm daemon
+gradle-fresh-checkout,1,4.58,-,-,new checkout; warm daemon + local build cache
+gradle-fresh-checkout,2,4.41,-,-,new checkout; warm daemon + local build cache
+gradle-fresh-checkout,3,4.00,-,-,new checkout; warm daemon + local build cache
+ant-adapt,1,0.36,-,-,plan generation
+ant-remote-cold,1,158.97,1,0,empty shared cache; sandboxed, offline
+ant-remote-no-change,1,0.66,0,1,same checkout
+ant-remote-no-change,2,0.86,0,1,same checkout
+ant-remote-no-change,3,0.86,0,1,same checkout
+ant-remote-fresh-checkout,1,0.65,0,1,new checkout, other path, new mtimes
+ant-remote-fresh-checkout,2,0.85,0,1,new checkout, other path, new mtimes
+ant-remote-fresh-checkout,3,0.65,0,1,new checkout, other path, new mtimes

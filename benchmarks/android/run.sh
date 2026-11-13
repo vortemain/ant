@@ -89,7 +89,7 @@ record gradle-cold 1 "$(elapsed "$s" "$e")" - - "empty build cache; daemon start
 test -f "$WORK/gradle-a/$APK"
 for rep in $(seq 1 "$REPS"); do
   s=$(now); gradle "$WORK/gradle-a"; e=$(now)
-  record gradle-no-change "$rep" "$(elapsed "$s" "$e")" - - "same checkout, warm daemon"
+  record gradle-no-change "$rep" "$(elapsed "$s" "$e")" - - "same checkout; warm daemon"
 done
 for rep in $(seq 1 "$REPS"); do
   checkout "$WORK/gradle-fresh-$rep"
@@ -127,7 +127,7 @@ s=$(now)
 remote "$WORK/ant-a" "$OUT/remote-cold.log" || { cat "$OUT/remote-cold.log"; tail -80 "$WORK/worker.out"; exit 1; }
 e=$(now)
 read -r ex re < <(counts "$OUT/remote-cold.log")
-record ant-remote-cold 1 "$(elapsed "$s" "$e")" "$ex" "$re" "empty shared cache; sandboxed, offline"
+record ant-remote-cold 1 "$(elapsed "$s" "$e")" "$ex" "$re" "empty shared cache; sandboxed; offline"
 test -f "$WORK/ant-a/$APK"
 for rep in $(seq 1 "$REPS"); do
   s=$(now); remote "$WORK/ant-a" "$OUT/remote-nochange-$rep.log"; e=$(now)
@@ -138,7 +138,7 @@ for rep in $(seq 1 "$REPS"); do
   checkout "$WORK/ant-fresh-$rep"
   s=$(now); remote "$WORK/ant-fresh-$rep" "$OUT/remote-fresh-$rep.log"; e=$(now)
   read -r ex re < <(counts "$OUT/remote-fresh-$rep.log")
-  record ant-remote-fresh-checkout "$rep" "$(elapsed "$s" "$e")" "$ex" "$re" "new checkout, other path, new mtimes"
+  record ant-remote-fresh-checkout "$rep" "$(elapsed "$s" "$e")" "$ex" "$re" "new checkout; other path; new mtimes"
 done
 
 # The APK installed from the shared cache is a real Android package.

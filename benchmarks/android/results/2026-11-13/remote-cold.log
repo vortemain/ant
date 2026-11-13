@@ -1,0 +1,3 @@
+action=assembleDebug status=started remote=true
+action=assembleDebug status=succeeded exit_code=0 remote_job=job-1 worker=bench-worker
+output=app/build/outputs/apk/debug/app-debug.apk digest=sha256:5d7692739bddd02588ec1aaf1eb76f38fb858daa0b81664dd322a5729aa89c37
