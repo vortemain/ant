@@ -256,6 +256,34 @@ impl Coordinator {
         Ok(out)
     }
 
+    /// Fetch a tool task-cache entry (D-025); `None` on a miss.
+    pub fn task_cache_get(&self, tool: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
+        let response = self
+            .agent
+            .get(&self.url(&format!("/v1/task-cache/{tool}/{key}")))
+            .header("Authorization", &self.token.header_value())
+            .call()
+            .map_err(|error| format!("task cache lookup failed: {error}"))?;
+        let (status, body) = self.read(response)?;
+        if status == 404 {
+            return Ok(None);
+        }
+        Self::check(status, &body, "task cache lookup")?;
+        Ok(Some(body))
+    }
+
+    /// Store a tool task-cache entry (worker tokens only, D-025).
+    pub fn task_cache_put(&self, tool: &str, key: &str, bytes: &[u8]) -> Result<(), String> {
+        let response = self
+            .agent
+            .put(&self.url(&format!("/v1/task-cache/{tool}/{key}")))
+            .header("Authorization", &self.token.header_value())
+            .send(bytes)
+            .map_err(|error| format!("task cache store failed: {error}"))?;
+        let (status, body) = self.read(response)?;
+        Self::check(status, &body, "task cache store")
+    }
+
     pub fn put_blob(&self, bytes: &[u8]) -> Result<ContentDigest, String> {
         let digest = digest_bytes(bytes);
         let response = self

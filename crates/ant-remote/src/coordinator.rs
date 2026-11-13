@@ -14,6 +14,8 @@
 //! | POST   | `/v1/jobs/{id}/result`    | worker (the lease holder) |
 //! | GET    | `/v1/cache/{key}`         | client/worker |
 //! | PUT    | `/v1/cache/{key}`         | worker (D-019: only workers write) |
+//! | GET    | `/v1/task-cache/{tool}/{key}` | client/worker (D-025) |
+//! | PUT    | `/v1/task-cache/{tool}/{key}` | worker (D-025: only workers write) |
 //! | GET    | `/v1/jobs`                | client/viewer |
 //! | GET    | `/v1/workers`             | client/viewer |
 //! | GET    | `/`, `/ui`, `/ui/app.*`   | none (static dashboard; contains no data) |
@@ -347,12 +349,18 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         (tiny_http::Method::Get, ["v1", "workers"]) => {
             require_reader(role).map(|_| list_workers(state))
         }
-        (_, ["v1", "blobs" | "cache", ..]) if role == Role::Viewer => {
+        (_, ["v1", "blobs" | "cache" | "task-cache", ..]) if role == Role::Viewer => {
             Err(error_reply(403, "viewer tokens are read-only"))
         }
         (tiny_http::Method::Get, ["v1", "cache", key]) => cache_get(state, key),
         (tiny_http::Method::Put, ["v1", "cache", key]) => {
             require(role, Role::Worker).and_then(|_| cache_put(state, request, key))
+        }
+        (tiny_http::Method::Get, ["v1", "task-cache", tool, key]) => {
+            task_cache_get(state, tool, key)
+        }
+        (tiny_http::Method::Put, ["v1", "task-cache", tool, key]) => {
+            require(role, Role::Worker).and_then(|_| task_cache_put(state, request, tool, key))
         }
         (tiny_http::Method::Post, ["v1", "blobs", "missing"]) => missing(state, request),
         (tiny_http::Method::Post, ["v1", "blobs", "batch-get"]) => batch_get(state, request),
@@ -433,6 +441,68 @@ fn cache_put(state: &State, request: &mut tiny_http::Request, key: &str) -> Resu
     std::fs::create_dir_all(dir).map_err(|error| error_reply(500, &error.to_string()))?;
     let temp = dir.join(format!(".{}.tmp", std::process::id()));
     std::fs::write(&temp, serde_json::to_vec(&entry).expect("serializable"))
+        .and_then(|()| std::fs::rename(&temp, &path))
+        .map_err(|error| error_reply(500, &error.to_string()))?;
+    Ok(json_reply(201, &serde_json::json!({ "stored": true })))
+}
+
+/// Index file for a tool-level task cache entry (D-025). Only known tools
+/// and plain hex keys (as Gradle's build cache uses) are accepted.
+fn task_cache_path(state: &State, tool: &str, key: &str) -> Result<PathBuf, Reply> {
+    if !TASK_CACHE_TOOLS.contains(&tool) {
+        return Err(error_reply(404, "unknown task cache"));
+    }
+    if !(8..=128).contains(&key.len()) || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(error_reply(400, "task cache keys are 8-128 hex characters"));
+    }
+    Ok(state
+        .config
+        .data_dir
+        .join("task-cache")
+        .join(tool)
+        .join(key.to_ascii_lowercase()))
+}
+
+/// Tools whose own build caches the coordinator serves (D-025).
+const TASK_CACHE_TOOLS: &[&str] = &["gradle"];
+
+/// An entry is an index file naming a stored blob; a hit only when the blob
+/// is still stored (and it is re-verified on read like every blob).
+fn task_cache_get(state: &State, tool: &str, key: &str) -> Result<Reply, Reply> {
+    let path = task_cache_path(state, tool, key)?;
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Err(error_reply(404, "no task cache entry"));
+    };
+    let digest = parse_digest(text.trim())?;
+    match state.blobs.get(&digest) {
+        Ok(Some(bytes)) => Ok((200, bytes, "application/octet-stream")),
+        Ok(None) => Err(error_reply(
+            404,
+            "task cache entry refers to a missing blob",
+        )),
+        Err(error) => Err(error_reply(500, &error)),
+    }
+}
+
+/// Store a task output produced on a worker. Later writes for a key replace
+/// earlier ones (the tool owns its key semantics).
+fn task_cache_put(
+    state: &State,
+    request: &mut tiny_http::Request,
+    tool: &str,
+    key: &str,
+) -> Result<Reply, Reply> {
+    let path = task_cache_path(state, tool, key)?;
+    let body = read_body(state, request)?;
+    let digest = crate::blobs::digest_bytes(&body);
+    state
+        .blobs
+        .put(&digest, &body)
+        .map_err(|error| error_reply(500, &error))?;
+    let dir = path.parent().expect("task cache dir");
+    std::fs::create_dir_all(dir).map_err(|error| error_reply(500, &error.to_string()))?;
+    let temp = dir.join(format!(".{key}.{}.tmp", std::process::id()));
+    std::fs::write(&temp, digest.to_string())
         .and_then(|()| std::fs::rename(&temp, &path))
         .map_err(|error| error_reply(500, &error.to_string()))?;
     Ok(json_reply(201, &serde_json::json!({ "stored": true })))

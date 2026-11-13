@@ -19,6 +19,9 @@ pub struct WorkerConfig {
     pub worker_id: String,
     pub work_dir: PathBuf,
     pub sandbox: bool,
+    /// Serve the shared Gradle task cache to sandboxed actions that ask for
+    /// it (D-025; Linux `--sandbox` only).
+    pub task_cache: bool,
     /// Exit after one job (or after the first empty poll when no job is
     /// queued yet and `once` is set). Used by tests and one-shot workers.
     pub once: bool,
@@ -261,6 +264,39 @@ fn observe_toolchain(
     })
 }
 
+/// Run the prepared action in the sandbox, behind the Gradle task-cache
+/// bridge when the worker serves it and the action asks for it (D-025).
+fn execute_with_task_cache(
+    coordinator: &Coordinator,
+    config: &WorkerConfig,
+    workspace: &Path,
+    prepared: &mut local_executor::PreparedAction,
+) -> Result<Result<local_executor::ExecutionResult, local_executor::ExecutionError>, String> {
+    let run = |prepared: &local_executor::PreparedAction| {
+        local_executor::execute_sandboxed_prepared(prepared, &CancellationToken::new())
+    };
+    if !(config.task_cache && crate::gradle_cache::wants_task_cache(&prepared.action)) {
+        return Ok(run(prepared));
+    }
+    #[cfg(unix)]
+    {
+        let ant = std::env::current_exe().map_err(|error| error.to_string())?;
+        let bridge_dir = workspace.with_extension("bridge");
+        prepared.sandbox_binds.push((
+            bridge_dir.clone(),
+            PathBuf::from(crate::gradle_cache::BRIDGE_DIR),
+        ));
+        prepared.action.argv = crate::gradle_cache::bridged_argv(&ant, &prepared.action.argv);
+        let prepared = &*prepared;
+        crate::gradle_cache::serve_while(coordinator, &bridge_dir, || run(prepared))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (coordinator, workspace);
+        Ok(run(prepared))
+    }
+}
+
 /// The declared inputs' content digests computed from the job's entries
 /// alone (no file is read): a file input is its entry's digest, a tree input
 /// is `digest_tree_from_entries` over the entries below it. `None` when an
@@ -388,7 +424,7 @@ fn run_cacheable(
             key = None;
         }
     }
-    let executed = local_executor::execute_sandboxed_prepared(&prepared, &CancellationToken::new())
+    let executed = execute_with_task_cache(coordinator, config, &workspace, &mut prepared)?
         .map_err(|error| error.to_string())?;
     let mut outputs = Vec::new();
     if executed.success() {

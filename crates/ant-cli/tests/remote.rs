@@ -588,3 +588,87 @@ fn batched_blob_routes_verify_everything() {
     let (status, _) = post("/v1/blobs/batch-get", VIEWER_TOKEN, request);
     assert_eq!(status, 403);
 }
+
+/// The Gradle task cache (D-025): only workers write, anyone with a client
+/// or worker token reads, viewers are refused, keys and tools are checked.
+#[test]
+fn task_cache_routes_are_worker_written() {
+    let cluster = Cluster::start("task-cache", false);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let call = |method: &str, path: &str, token: &str, body: &[u8]| {
+        let url = format!("{}{path}", cluster.url);
+        let auth = format!("Bearer {token}");
+        let mut response = match method {
+            "PUT" => agent
+                .put(&url)
+                .header("Authorization", &auth)
+                .send(body)
+                .expect("put"),
+            _ => agent
+                .get(&url)
+                .header("Authorization", &auth)
+                .call()
+                .expect("get"),
+        };
+        let status = response.status().as_u16();
+        (status, response.body_mut().read_to_vec().expect("body"))
+    };
+    let path = "/v1/task-cache/gradle/0123456789abcdef";
+    assert_eq!(call("GET", path, CLIENT_TOKEN, b"").0, 404, "miss");
+    assert_eq!(
+        call("PUT", path, CLIENT_TOKEN, b"poison").0,
+        403,
+        "clients never write"
+    );
+    assert_eq!(
+        call("PUT", path, VIEWER_TOKEN, b"poison").0,
+        403,
+        "viewers never write"
+    );
+    assert_eq!(call("PUT", path, WORKER_TOKEN, b"task output").0, 201);
+    assert_eq!(
+        call("GET", path, CLIENT_TOKEN, b""),
+        (200, b"task output".to_vec())
+    );
+    assert_eq!(
+        call("GET", path, VIEWER_TOKEN, b"").0,
+        403,
+        "viewers never read blobs"
+    );
+    assert_eq!(
+        call("PUT", "/v1/task-cache/gradle/not-hex", WORKER_TOKEN, b"x").0,
+        400
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/v1/task-cache/other/0123456789abcdef",
+            WORKER_TOKEN,
+            b"x"
+        )
+        .0,
+        404,
+        "only known tools"
+    );
+    // The typed client used by workers round-trips too.
+    let worker = cluster.client(WORKER_TOKEN);
+    worker
+        .task_cache_put("gradle", "fedcba9876543210", b"second")
+        .expect("put");
+    assert_eq!(
+        worker
+            .task_cache_get("gradle", "fedcba9876543210")
+            .expect("get"),
+        Some(b"second".to_vec())
+    );
+    assert_eq!(
+        worker
+            .task_cache_get("gradle", "aaaaaaaaaaaa")
+            .expect("miss"),
+        None
+    );
+}

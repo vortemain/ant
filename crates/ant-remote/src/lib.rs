@@ -10,6 +10,7 @@ pub mod auth;
 pub mod blobs;
 pub mod client;
 pub mod coordinator;
+pub mod gradle_cache;
 pub mod http;
 pub mod protocol;
 pub mod ui;

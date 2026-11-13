@@ -424,6 +424,7 @@ fn start_cluster(dir: &Path) -> (String, PathBuf, Guard, Guard) {
                 "--id",
                 "exec-worker",
                 "--sandbox",
+                "--task-cache",
                 "--token-file",
             ])
             .arg(&worker_token)
@@ -539,4 +540,76 @@ fn remote_builds_preserve_the_executable_bit() {
         String::from_utf8_lossy(&ran.stdout).trim(),
         "built remotely"
     );
+}
+
+/// The Gradle task-cache bridge (D-025): a sandboxed action that asks for it
+/// gets a loopback URL and an init script, can store an entry through the
+/// worker (its token never enters the sandbox), and a later job reads it
+/// back; the sandbox still has no other network.
+#[test]
+fn task_cache_bridge_reaches_the_coordinator_and_nothing_else() {
+    if !sandbox_ready() {
+        return;
+    }
+    let curl = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("curl"))
+        .find(|path| path.is_file());
+    let Some(curl) = curl else {
+        eprintln!("skipping: curl is not installed");
+        return;
+    };
+    let dir = TempDir::new("task-cache");
+    let (url, client_token, _coordinator, _worker) = start_cluster(dir.path());
+    let curl = curl.to_string_lossy();
+    let key = "0123456789abcdef";
+    let script_put = format!(
+        "printf cached-bytes > v && {curl} -sf -X PUT --data-binary @v \"${{ANT_GRADLE_CACHE_URL}}{key}\"          && test -f \"$GRADLE_USER_HOME/init.d/ant-task-cache.gradle\"          && ! {curl} -sf --max-time 3 http://1.1.1.1/ > /dev/null && echo stored > out.txt"
+    );
+    let script_get = format!("{curl} -sf \"${{ANT_GRADLE_CACHE_URL}}{key}\" > out.txt");
+    let plan_for = |id: &str, script: &str| {
+        json!({
+            "schema_version": 1,
+            "actions": [{
+                "action": {
+                    "schema_version": 1, "id": id,
+                    "argv": ["sh", "-c", script],
+                    "working_directory": ".",
+                    "inputs": [], "outputs": [{ "path": "out.txt", "kind": "file" }],
+                    "environment": [["ANT_GRADLE_TASK_CACHE", "1"], ["GRADLE_USER_HOME", ".ant/gh"]],
+                    "cache_policy": "never", "timeout_ms": 60000
+                },
+                "dependencies": []
+            }]
+        })
+    };
+    let run = |id: &str, script: &str| {
+        let ws = dir.path().join(id);
+        fs::create_dir_all(&ws).expect("ws");
+        let plan_path = dir.path().join(format!("{id}.json"));
+        fs::write(
+            &plan_path,
+            serde_json::to_vec_pretty(&plan_for(id, script)).expect("json"),
+        )
+        .expect("plan");
+        let (code, stdout, stderr) = run_ant(&[
+            "remote",
+            "run",
+            "--coordinator",
+            &url,
+            "--token-file",
+            &client_token.to_string_lossy(),
+            "--workspace",
+            &ws.to_string_lossy(),
+            "--plan",
+            &plan_path.to_string_lossy(),
+        ]);
+        assert_eq!(code, 0, "{id}: {stdout:?} {stderr:?}");
+        fs::read_to_string(ws.join("out.txt")).expect("output")
+    };
+    assert_eq!(
+        run("put", &script_put),
+        "stored
+"
+    );
+    assert_eq!(run("get", &script_get), "cached-bytes");
 }
