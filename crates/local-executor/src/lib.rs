@@ -180,6 +180,10 @@ pub struct PreparedAction {
     /// (and may embed in outputs) are identical across jobs and machines.
     /// Remote workers use it to make cache keys path-independent (D-019).
     pub sandbox_mount: Option<PathBuf>,
+    /// Linux sandbox only: extra host directories bound read-write into the
+    /// sandbox as `(host, inside)`, after the workspace. Remote workers use
+    /// it for the task-cache bridge socket (D-025); nothing else is exposed.
+    pub sandbox_binds: Vec<(PathBuf, PathBuf)>,
 }
 
 impl PreparedAction {
@@ -276,6 +280,7 @@ fn prepare_with_mode(
         metadata_fingerprinting,
         memory_limit_bytes: None,
         sandbox_mount: None,
+        sandbox_binds: Vec::new(),
     })
 }
 
@@ -794,7 +799,11 @@ pub fn execute_sandboxed_prepared(
     command
         .arg("--bind")
         .arg(&prepared.workspace)
-        .arg(&inner_workspace)
+        .arg(&inner_workspace);
+    for (host, inside) in &prepared.sandbox_binds {
+        command.arg("--bind").arg(host).arg(inside);
+    }
+    command
         .arg("--chdir")
         .arg(&inner_cwd)
         .arg("--")

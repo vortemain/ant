@@ -63,6 +63,10 @@ fn run() -> Result<u8, String> {
     if command == "sandbox" {
         return isolation::sandbox_command(args);
     }
+    if command == "__gradle-cache-bridge" {
+        let code = ant_remote::gradle_cache::bridge_main(args.collect())?;
+        return Ok(u8::try_from(code).unwrap_or(1));
+    }
     if command == "__sandbox-runner" {
         return isolation::runner_main(args);
     }

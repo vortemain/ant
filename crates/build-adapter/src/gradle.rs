@@ -230,6 +230,9 @@ impl BuildAdapter for GradleAdapter {
                 DEPENDENCY_CACHE_DIR.to_owned(),
             ));
         }
+        if fully_declared {
+            environment.push(("ANT_GRADLE_TASK_CACHE".to_owned(), "1".to_owned()));
+        }
         environment.sort();
 
         let mut argv: Vec<String> = if cfg!(windows) {
@@ -251,6 +254,9 @@ impl BuildAdapter for GradleAdapter {
             // No Kotlin daemon: it would write under the (read-only) user
             // home and outlive the action.
             argv.push("-Pkotlin.compiler.execution.strategy=in-process".to_owned());
+            // Task outputs may come from (and go to) the shared Gradle
+            // task cache when a worker serves it (D-025).
+            argv.push("--build-cache".to_owned());
         }
         argv.push(task.to_owned());
 

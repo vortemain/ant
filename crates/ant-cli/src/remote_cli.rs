@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const COORDINATOR_USAGE: &str = "usage: ant coordinator --data-dir DIR --client-token-file FILE --worker-token-file FILE [--viewer-token-file FILE] [--listen ADDR] [--allow-non-loopback] [--max-body-mb N]";
-const WORKER_USAGE: &str = "usage: ant worker --coordinator URL --token-file FILE --work-dir DIR [--id NAME] [--sandbox] [--once] [--allow-insecure-http]";
+const WORKER_USAGE: &str = "usage: ant worker --coordinator URL --token-file FILE --work-dir DIR [--id NAME] [--sandbox] [--task-cache] [--once] [--allow-insecure-http]";
 const REMOTE_USAGE: &str = "usage: ant remote run --coordinator URL --token-file FILE --plan PLAN.json [--workspace PATH] [--allow-insecure-http]";
 
 /// Minimal flag parser: `--flag VALUE` pairs and boolean `--flag`s.
@@ -137,7 +137,12 @@ pub fn worker_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
     let flags = Flags::parse(
         args,
         &["--coordinator", "--token-file", "--work-dir", "--id"],
-        &["--sandbox", "--once", "--allow-insecure-http"],
+        &[
+            "--sandbox",
+            "--task-cache",
+            "--once",
+            "--allow-insecure-http",
+        ],
         WORKER_USAGE,
     )?;
     let coordinator = connect(&flags, WORKER_USAGE)?;
@@ -152,11 +157,15 @@ pub fn worker_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
         worker_id: flags.get("--id").map_or(default_id, str::to_owned),
         work_dir: PathBuf::from(flags.require("--work-dir", WORKER_USAGE)?),
         sandbox: flags.has("--sandbox"),
+        task_cache: flags.has("--task-cache"),
         once: flags.has("--once"),
         poll_interval: Duration::from_millis(250),
     };
     if config.sandbox && !cfg!(any(windows, target_os = "linux")) {
         return Err("--sandbox is implemented for Windows and Linux only".to_owned());
+    }
+    if config.task_cache && !(config.sandbox && cfg!(target_os = "linux")) {
+        return Err("--task-cache requires --sandbox on Linux (D-025)".to_owned());
     }
     ant_remote::worker::run(&coordinator, &config)?;
     Ok(0)

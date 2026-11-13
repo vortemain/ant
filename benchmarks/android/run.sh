@@ -96,6 +96,19 @@ for rep in $(seq 1 "$REPS"); do
   s=$(now); gradle "$WORK/gradle-fresh-$rep"; e=$(now)
   record gradle-fresh-checkout "$rep" "$(elapsed "$s" "$e")" - - "new checkout; warm daemon + local build cache"
 done
+# One edited Kotlin file (a new private top-level value: a real source
+# change that recompiles the module), in the same checkout with a warm
+# daemon: Gradle's incremental best case.
+edit() { printf '
+private val antBenchmarkEdit%s = %s
+' "$2" "$2" >> "$1/$EDIT_FILE"; }
+EDIT_FILE=$(cd "$SUBJECT" && find app/src/main -name '*.kt' | sort | head -1)
+echo "edit_file=$EDIT_FILE" >> "$OUT/environment.txt"
+for rep in $(seq 1 "$REPS"); do
+  edit "$WORK/gradle-a" "$rep"
+  s=$(now); gradle "$WORK/gradle-a"; e=$(now)
+  record gradle-one-file-change "$rep" "$(elapsed "$s" "$e")" - - "same checkout; warm daemon; incremental"
+done
 (cd "$WORK/gradle-a" && GRADLE_USER_HOME="$WORK/gradle-home" ./gradlew --stop -q) || true
 
 # --- coordinator + one sandboxed worker on loopback --------------------------
@@ -107,7 +120,7 @@ COORD=$!
 for _ in $(seq 1 50); do grep -q listening= "$WORK/coord.out" 2>/dev/null && break; sleep 0.1; done
 URL="http://$(grep -o 'listening=[^ ]*' "$WORK/coord.out" | cut -d= -f2)"
 "$ANT" worker --coordinator "$URL" --token-file "$WORK/worker.token" --work-dir "$WORK/work" \
-  --id bench-worker --sandbox > "$WORK/worker.out" 2>&1 &
+  --id bench-worker --sandbox --task-cache > "$WORK/worker.out" 2>&1 &
 WORKER=$!
 trap 'cp "$WORK/worker.out" "$OUT/worker.log" 2>/dev/null; kill $WORKER $COORD 2>/dev/null || true' EXIT
 
@@ -140,6 +153,23 @@ for rep in $(seq 1 "$REPS"); do
   read -r ex re < <(counts "$OUT/remote-fresh-$rep.log")
   record ant-remote-fresh-checkout "$rep" "$(elapsed "$s" "$e")" "$ex" "$re" "new checkout; other path; new mtimes"
 done
+
+# One edited file through Ant: the whole-action cache misses, the worker
+# starts from an empty workspace, and Gradle's task cache on the
+# coordinator (D-025) supplies every unchanged task's outputs.
+for rep in $(seq 1 "$REPS"); do
+  edit "$WORK/ant-a" "$rep"
+  s=$(now); remote "$WORK/ant-a" "$OUT/remote-edit-$rep.log" || { cat "$OUT/remote-edit-$rep.log"; tail -80 "$WORK/worker.out"; exit 1; }; e=$(now)
+  read -r ex re < <(counts "$OUT/remote-edit-$rep.log")
+  record ant-remote-one-file-change "$rep" "$(elapsed "$s" "$e")" "$ex" "$re" "fresh worker workspace; shared task cache"
+done
+# The same edit in another checkout (a teammate pulling it): whole-action hit.
+checkout "$WORK/ant-teammate"
+for rep in $(seq 1 "$REPS"); do edit "$WORK/ant-teammate" "$rep"; done
+s=$(now); remote "$WORK/ant-teammate" "$OUT/remote-teammate.log"; e=$(now)
+read -r ex re < <(counts "$OUT/remote-teammate.log")
+record ant-remote-teammate-after-edit 1 "$(elapsed "$s" "$e")" "$ex" "$re" "other checkout with the same edits"
+echo "task_cache_entries=$(find "$WORK/coord/task-cache" -type f 2>/dev/null | wc -l)" >> "$OUT/environment.txt"
 
 # The APK installed from the shared cache is a real Android package.
 FRESH_APK="$WORK/ant-fresh-1/$APK"
