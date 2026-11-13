@@ -29,11 +29,11 @@ use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
 use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_SID;
 use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_UNKNOWN;
 use windows_sys::Win32::Security::Authorization::TRUSTEE_W;
+use windows_sys::Win32::Security::CONTAINER_INHERIT_ACE;
 use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::EqualSid;
 use windows_sys::Win32::Security::GetAce;
 use windows_sys::Win32::Security::GetAclInformation;
-use windows_sys::Win32::Security::CONTAINER_INHERIT_ACE;
 use windows_sys::Win32::Security::OBJECT_INHERIT_ACE;
 use windows_sys::Win32::Storage::FileSystem::CreateFileW;
 use windows_sys::Win32::Storage::FileSystem::DELETE;
@@ -48,11 +48,8 @@ use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
 use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 
 /// Write capability = read/write/execute plus delete of contained objects.
-pub(crate) const WRITE_ALLOW_MASK: u32 = FILE_GENERIC_READ
-    | FILE_GENERIC_WRITE
-    | FILE_GENERIC_EXECUTE
-    | DELETE
-    | FILE_DELETE_CHILD;
+pub(crate) const WRITE_ALLOW_MASK: u32 =
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE | FILE_DELETE_CHILD;
 
 const SE_FILE_OBJECT: i32 = 1;
 
@@ -157,9 +154,7 @@ pub(crate) fn grant_mask(path: &Path, psid: *const c_void, mask: u32) -> Result<
         let mut new_dacl: *mut ACL = std::ptr::null_mut();
         // SAFETY: `dacl` is the valid existing DACL; on success we own
         // `new_dacl` and free it on every path below.
-        let merge = unsafe {
-            SetEntriesInAclW(1, &entry, dacl, &mut new_dacl)
-        };
+        let merge = unsafe { SetEntriesInAclW(1, &entry, dacl, &mut new_dacl) };
         if merge != ERROR_SUCCESS {
             return Err(SandboxError::Windows {
                 call: "SetEntriesInAclW",

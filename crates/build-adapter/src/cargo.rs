@@ -47,8 +47,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{
-    canonical_root, check_option_keys, executable_version, locate_executable, relative_to,
-    AdapterError, AdapterOptions, BuildAdapter, Detection, OptionSpec,
+    AdapterError, AdapterOptions, BuildAdapter, Detection, OptionSpec, canonical_root,
+    check_option_keys, executable_version, locate_executable, relative_to,
 };
 
 pub struct CargoAdapter;
@@ -69,8 +69,14 @@ struct Profile {
 fn profile(options: &AdapterOptions) -> Result<Profile, AdapterError> {
     match options.get("profile") {
         // The default dev profile keeps the pre-options argv exactly.
-        None | Some("dev") => Ok(Profile { flags: &[], directory: "debug" }),
-        Some("release") => Ok(Profile { flags: &["--release"], directory: "release" }),
+        None | Some("dev") => Ok(Profile {
+            flags: &[],
+            directory: "debug",
+        }),
+        Some("release") => Ok(Profile {
+            flags: &["--release"],
+            directory: "release",
+        }),
         // Custom profiles write to `<target-dir>/<name>` but whether one is
         // defined cannot be checked through `cargo metadata`; refuse rather
         // than emit a plan that may name a nonexistent profile.
@@ -109,22 +115,27 @@ impl BuildAdapter for CargoAdapter {
         check_option_keys(self, options)?;
         let profile = profile(options)?;
         let root = canonical_root(project_root)?;
-        let staging_value = PathBuf::from(".ant").join("tmp").to_string_lossy().into_owned();
+        let staging_value = PathBuf::from(".ant")
+            .join("tmp")
+            .to_string_lossy()
+            .into_owned();
         let cargo = locate_executable(&format!("cargo{}", std::env::consts::EXE_SUFFIX))?;
         // Digest the real backing file: PATH entries may be symlinks (e.g.
         // rustup shims), and digests reject symlinks by design.
-        let cargo_digest_target = cargo
-            .canonicalize()
-            .map_err(|error| AdapterError::Toolchain(format!(
+        let cargo_digest_target = cargo.canonicalize().map_err(|error| {
+            AdapterError::Toolchain(format!(
                 "cannot resolve cargo executable {}: {error}",
                 cargo.display()
-            )))?;
+            ))
+        })?;
         let version = executable_version(&cargo, &root)?;
         let toolchain_digest = build_digest::digest_file(&cargo_digest_target)
-            .map_err(|error| AdapterError::Toolchain(format!(
-                "cannot digest cargo executable {}: {error}",
-                cargo_digest_target.display()
-            )))?
+            .map_err(|error| {
+                AdapterError::Toolchain(format!(
+                    "cannot digest cargo executable {}: {error}",
+                    cargo_digest_target.display()
+                ))
+            })?
             .to_string();
         let metadata = cargo_metadata(&cargo, &root)?;
         let packages = metadata_value(&metadata, "packages")?
@@ -140,7 +151,10 @@ impl BuildAdapter for CargoAdapter {
         // root must be the workspace root; a member directory would make the
         // workspace manifest and sibling members unreachable.
         let canonical_workspace = workspace_root.canonicalize().map_err(|error| {
-            bad_metadata(&format!("cannot resolve workspace_root {}: {error}", workspace_root.display()))
+            bad_metadata(&format!(
+                "cannot resolve workspace_root {}: {error}",
+                workspace_root.display()
+            ))
         })?;
         if canonical_workspace != root {
             return Err(AdapterError::Project(format!(
@@ -165,7 +179,8 @@ impl BuildAdapter for CargoAdapter {
         })?;
         if target_rel.as_os_str().is_empty() {
             return Err(AdapterError::Project(
-                "cargo target directory is the project root itself; outputs would overlap sources".to_owned(),
+                "cargo target directory is the project root itself; outputs would overlap sources"
+                    .to_owned(),
             ));
         }
         let output_dir = target_rel.join(profile.directory);
@@ -173,15 +188,22 @@ impl BuildAdapter for CargoAdapter {
             .as_array()
             .ok_or_else(|| bad_metadata("workspace_members is not an array"))?
             .iter()
-            .map(|id| id.as_str().ok_or_else(|| bad_metadata("member id is not a string")))
+            .map(|id| {
+                id.as_str()
+                    .ok_or_else(|| bad_metadata("member id is not a string"))
+            })
             .collect::<Result<_, _>>()?;
 
         // Member packages sorted by name for a deterministic plan.
         let mut members: BTreeMap<&str, &serde_json::Value> = BTreeMap::new();
         for package in packages {
-            let id = package["id"].as_str().ok_or_else(|| bad_metadata("package has no id"))?;
+            let id = package["id"]
+                .as_str()
+                .ok_or_else(|| bad_metadata("package has no id"))?;
             if member_ids.contains(id) {
-                let name = package["name"].as_str().ok_or_else(|| bad_metadata("package has no name"))?;
+                let name = package["name"]
+                    .as_str()
+                    .ok_or_else(|| bad_metadata("package has no name"))?;
                 members.insert(name, package);
             }
         }
@@ -211,7 +233,10 @@ impl BuildAdapter for CargoAdapter {
                     .as_str()
                     .ok_or_else(|| bad_metadata("package manifest_path is missing"))?,
             );
-            let package_dir = relative_to(&workspace_root, manifest.parent().expect("manifest has a parent"))?;
+            let package_dir = relative_to(
+                &workspace_root,
+                manifest.parent().expect("manifest has a parent"),
+            )?;
             let manifest_rel = join_rel(&package_dir, "Cargo.toml");
 
             let mut inputs: BTreeMap<PathBuf, InputKind> = BTreeMap::new();
@@ -235,7 +260,9 @@ impl BuildAdapter for CargoAdapter {
             for config in &cargo_config {
                 declare_input(&mut inputs, config.clone(), InputKind::File);
             }
-            let package_id = package["id"].as_str().ok_or_else(|| bad_metadata("package has no id"))?;
+            let package_id = package["id"]
+                .as_str()
+                .ok_or_else(|| bad_metadata("package has no id"))?;
             if let Some(sources) = local_sources.get(package_id) {
                 for source in sources {
                     declare_input(&mut inputs, source.clone(), InputKind::Tree);
@@ -247,16 +274,18 @@ impl BuildAdapter for CargoAdapter {
                 .as_array()
                 .ok_or_else(|| bad_metadata("package targets are missing"))?;
             for target in targets {
-                let target_name =
-                    target["name"].as_str().ok_or_else(|| bad_metadata("target has no name"))?;
+                let target_name = target["name"]
+                    .as_str()
+                    .ok_or_else(|| bad_metadata("target has no name"))?;
                 let kinds = target["kind"]
                     .as_array()
                     .ok_or_else(|| bad_metadata("target has no kind"))?;
                 let is_bin = kinds.iter().any(|kind| kind.as_str() == Some("bin"));
                 let is_lib = kinds.iter().any(|kind| kind.as_str() == Some("lib"));
                 if is_bin {
-                    outputs.insert(output_dir
-                        .join(format!("{target_name}{}", std::env::consts::EXE_SUFFIX)));
+                    outputs.insert(
+                        output_dir.join(format!("{target_name}{}", std::env::consts::EXE_SUFFIX)),
+                    );
                 } else if is_lib {
                     // Crate names in artifact file names use underscores.
                     let crate_name = target_name.replace('-', "_");
@@ -327,7 +356,10 @@ impl BuildAdapter for CargoAdapter {
                     .collect(),
                 outputs: outputs
                     .into_iter()
-                    .map(|path| Output { path, kind: OutputKind::File })
+                    .map(|path| Output {
+                        path,
+                        kind: OutputKind::File,
+                    })
                     .collect(),
                 environment,
                 // Dependency source content is undeclared, so these actions
@@ -392,7 +424,9 @@ fn local_dependency_sources(
         .as_array()
         .ok_or_else(|| bad_metadata("packages is not an array"))?
     {
-        let id = package["id"].as_str().ok_or_else(|| bad_metadata("package has no id"))?;
+        let id = package["id"]
+            .as_str()
+            .ok_or_else(|| bad_metadata("package has no id"))?;
         if member_ids.contains(id) {
             continue;
         }
@@ -401,7 +435,9 @@ fn local_dependency_sources(
                 .as_str()
                 .ok_or_else(|| bad_metadata("package manifest_path is missing"))?,
         );
-        let dir = manifest.parent().ok_or_else(|| bad_metadata("manifest has no parent"))?;
+        let dir = manifest
+            .parent()
+            .ok_or_else(|| bad_metadata("manifest has no parent"))?;
         if let Ok(relative) = relative_to(workspace_root, dir)
             && !relative.as_os_str().is_empty()
         {
@@ -415,12 +451,17 @@ fn local_dependency_sources(
         .as_array()
         .ok_or_else(|| bad_metadata("resolve.nodes is missing"))?
     {
-        let id = node["id"].as_str().ok_or_else(|| bad_metadata("resolve node has no id"))?;
+        let id = node["id"]
+            .as_str()
+            .ok_or_else(|| bad_metadata("resolve node has no id"))?;
         let deps = node["dependencies"]
             .as_array()
             .ok_or_else(|| bad_metadata("resolve node has no dependencies"))?
             .iter()
-            .map(|dep| dep.as_str().ok_or_else(|| bad_metadata("resolve dependency is not a string")))
+            .map(|dep| {
+                dep.as_str()
+                    .ok_or_else(|| bad_metadata("resolve dependency is not a string"))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         edges.insert(id, deps);
     }
@@ -535,37 +576,66 @@ mod tests {
     fn generate_produces_deterministic_validated_member_actions() {
         let adapter = CargoAdapter;
         let dir = workspace();
-        let first = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
-        let second = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate again");
+        let first = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        let second = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate again");
         assert_eq!(first, second, "generation must be deterministic");
 
-        let ids: Vec<&str> = first.actions.iter().map(|entry| entry.action.id.as_str()).collect();
-        assert_eq!(ids, vec!["app-bin", "core-lib"], "members sorted by package name");
+        let ids: Vec<&str> = first
+            .actions
+            .iter()
+            .map(|entry| entry.action.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["app-bin", "core-lib"],
+            "members sorted by package name"
+        );
 
         let app = &first.actions[0].action;
         // Sorted, deduplicated member dependency edges.
         assert_eq!(first.actions[0].dependencies, vec!["core-lib".to_owned()]);
         // The bin output maps into the default target layout.
         assert_eq!(
-            app.outputs.iter().map(|output| output.path.clone()).collect::<Vec<_>>(),
+            app.outputs
+                .iter()
+                .map(|output| output.path.clone())
+                .collect::<Vec<_>>(),
             vec![PathBuf::from(format!(
                 "target/debug/app-bin{}",
                 std::env::consts::EXE_SUFFIX
             ))]
         );
         // Member inputs: manifest, src tree, and the workspace manifest.
-        let input_paths: Vec<&Path> = app.inputs.iter().map(|input| input.path.as_path()).collect();
+        let input_paths: Vec<&Path> = app
+            .inputs
+            .iter()
+            .map(|input| input.path.as_path())
+            .collect();
         assert!(input_paths.contains(&Path::new("app/Cargo.toml")));
         assert!(input_paths.contains(&Path::new("app/src")));
-        assert!(input_paths.contains(&Path::new("Cargo.toml")), "workspace manifest declared");
+        assert!(
+            input_paths.contains(&Path::new("Cargo.toml")),
+            "workspace manifest declared"
+        );
         // Tree-kind inputs are marked as trees.
-        let src_input = app.inputs.iter().find(|input| input.path == Path::new("app/src")).expect("src input");
+        let src_input = app
+            .inputs
+            .iter()
+            .find(|input| input.path == Path::new("app/src"))
+            .expect("src input");
         assert_eq!(src_input.kind, InputKind::Tree);
         // Undeclared dependency sources force policy never.
         assert_eq!(app.cache_policy, CachePolicy::Never);
         // Scratch writes are redirected into the workspace staging dir so the
         // plan is runnable under `ant run --sandbox`.
-        let staging = PathBuf::from(".ant").join("tmp").to_string_lossy().into_owned();
+        let staging = PathBuf::from(".ant")
+            .join("tmp")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             app.environment,
             vec![
@@ -577,12 +647,19 @@ mod tests {
         assert!(dir.path().join(".ant").join("tmp").is_dir());
         // Truthful toolchain identity from the real cargo.
         let toolchain = app.toolchain.as_ref().expect("toolchain identity");
-        assert!(toolchain.version.starts_with("cargo "), "was {:?}", toolchain.version);
+        assert!(
+            toolchain.version.starts_with("cargo "),
+            "was {:?}",
+            toolchain.version
+        );
         assert!(toolchain.executable_digest.starts_with("sha256:"));
 
         let core = &first.actions[1].action;
         assert_eq!(
-            core.outputs.iter().map(|output| output.path.clone()).collect::<Vec<_>>(),
+            core.outputs
+                .iter()
+                .map(|output| output.path.clone())
+                .collect::<Vec<_>>(),
             vec![PathBuf::from("target/debug/libcore_lib.rlib")]
         );
         assert!(first.actions[1].dependencies.is_empty());
@@ -603,10 +680,16 @@ mod tests {
         write(&dir.path().join("gen/src/lib.rs"), "pub fn x() {}\n");
         write(&dir.path().join("gen/build.rs"), "fn main() {}\n");
 
-        let plan = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
+        let plan = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
         assert_eq!(plan.actions.len(), 1);
         let action = &plan.actions[0].action;
-        let paths: Vec<&Path> = action.inputs.iter().map(|input| input.path.as_path()).collect();
+        let paths: Vec<&Path> = action
+            .inputs
+            .iter()
+            .map(|input| input.path.as_path())
+            .collect();
         // The build script can change the build result, so it must be declared.
         let build_script = paths
             .iter()
@@ -623,7 +706,11 @@ mod tests {
         // The generated package has no bin or lib output name mismatch: it is
         // a lib, so the rlib output is declared.
         assert_eq!(
-            action.outputs.iter().map(|output| output.path.clone()).collect::<Vec<_>>(),
+            action
+                .outputs
+                .iter()
+                .map(|output| output.path.clone())
+                .collect::<Vec<_>>(),
             vec![PathBuf::from("target/debug/libgen_lib.rlib")]
         );
     }
@@ -644,15 +731,24 @@ mod tests {
         );
         write(&dir.path().join("svc/src/main.rs"), "fn main() {}\n");
 
-        let plan = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
+        let plan = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
         assert_eq!(plan.actions.len(), 1);
         let action = &plan.actions[0].action;
         assert_eq!(action.id, "svc-bin");
         // The virtual root's manifest is not the package's own manifest, so
         // it must still be declared as an input (it drives inheritance).
-        let paths: Vec<&Path> = action.inputs.iter().map(|input| input.path.as_path()).collect();
+        let paths: Vec<&Path> = action
+            .inputs
+            .iter()
+            .map(|input| input.path.as_path())
+            .collect();
         assert!(paths.contains(&Path::new("svc/Cargo.toml")));
-        assert!(paths.contains(&Path::new("Cargo.toml")), "workspace manifest declared");
+        assert!(
+            paths.contains(&Path::new("Cargo.toml")),
+            "workspace manifest declared"
+        );
         assert!(paths.contains(&Path::new("svc/src")));
         assert!(plan.actions[0].dependencies.is_empty());
     }
@@ -665,7 +761,11 @@ mod tests {
         let detection = adapter.detect(dir.path()).expect("detect");
         assert!(!detection.supported);
         // Generation without detection is still honest: cargo metadata fails.
-        assert!(adapter.generate(dir.path(), &AdapterOptions::new()).is_err());
+        assert!(
+            adapter
+                .generate(dir.path(), &AdapterOptions::new())
+                .is_err()
+        );
     }
 
     fn options(pairs: &[(&str, &str)]) -> AdapterOptions {
@@ -687,7 +787,11 @@ mod tests {
     }
 
     fn output_paths(action: &Action) -> Vec<PathBuf> {
-        action.outputs.iter().map(|output| output.path.clone()).collect()
+        action
+            .outputs
+            .iter()
+            .map(|output| output.path.clone())
+            .collect()
     }
 
     #[test]
@@ -698,20 +802,33 @@ mod tests {
             .generate(dir.path(), &options(&[("profile", "release")]))
             .expect("generate");
         let app = &plan.actions[0].action;
-        assert_eq!(app.argv, vec!["cargo", "build", "--package", "app-bin", "--release"]);
+        assert_eq!(
+            app.argv,
+            vec!["cargo", "build", "--package", "app-bin", "--release"]
+        );
         assert_eq!(
             output_paths(app),
-            vec![PathBuf::from("target")
-                .join("release")
-                .join(format!("app-bin{}", std::env::consts::EXE_SUFFIX))]
+            vec![
+                PathBuf::from("target")
+                    .join("release")
+                    .join(format!("app-bin{}", std::env::consts::EXE_SUFFIX))
+            ]
         );
         assert_eq!(
             output_paths(&plan.actions[1].action),
-            vec![PathBuf::from("target").join("release").join("libcore_lib.rlib")]
+            vec![
+                PathBuf::from("target")
+                    .join("release")
+                    .join("libcore_lib.rlib")
+            ]
         );
         // An explicit dev profile is byte-identical to the default plan.
-        let default = adapter.generate(dir.path(), &AdapterOptions::new()).expect("default");
-        let dev = adapter.generate(dir.path(), &options(&[("profile", "dev")])).expect("dev");
+        let default = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("default");
+        let dev = adapter
+            .generate(dir.path(), &options(&[("profile", "dev")]))
+            .expect("dev");
         assert_eq!(default, dev);
     }
 
@@ -723,12 +840,23 @@ mod tests {
             .generate(dir.path(), &options(&[("profile", "bench")]))
             .expect_err("custom profile rejected");
         assert!(matches!(error, AdapterError::Option(_)), "{error:?}");
-        assert!(error.to_string().contains("supported: dev, release"), "{error}");
+        assert!(
+            error.to_string().contains("supported: dev, release"),
+            "{error}"
+        );
         let error = adapter
             .generate(dir.path(), &options(&[("outputs", "entry-points")]))
             .expect_err("foreign option rejected");
-        assert!(error.to_string().contains("does not accept option 'outputs'"), "{error}");
-        assert!(!dir.path().join(".ant").exists(), "no staging directory on option failure");
+        assert!(
+            error
+                .to_string()
+                .contains("does not accept option 'outputs'"),
+            "{error}"
+        );
+        assert!(
+            !dir.path().join(".ant").exists(),
+            "no staging directory on option failure"
+        );
     }
 
     #[test]
@@ -746,32 +874,41 @@ mod tests {
         let target = PathBuf::from("build").join("out");
         assert_eq!(
             output_paths(action),
-            vec![target
-                .join("release")
-                .join(format!("cfg-target{}", std::env::consts::EXE_SUFFIX))]
+            vec![
+                target
+                    .join("release")
+                    .join(format!("cfg-target{}", std::env::consts::EXE_SUFFIX))
+            ]
         );
         // The executor clears the child environment, so the target dir is
         // pinned explicitly (workspace-relative, platform separators).
         assert!(
-            action
-                .environment
-                .contains(&("CARGO_TARGET_DIR".to_owned(), target.to_string_lossy().into_owned())),
+            action.environment.contains(&(
+                "CARGO_TARGET_DIR".to_owned(),
+                target.to_string_lossy().into_owned()
+            )),
             "{:?}",
             action.environment
         );
         // The project config can change the build, so it is a declared input.
-        assert!(action
-            .inputs
-            .iter()
-            .any(|input| input.path == Path::new(".cargo").join("config.toml")));
+        assert!(
+            action
+                .inputs
+                .iter()
+                .any(|input| input.path == Path::new(".cargo").join("config.toml"))
+        );
         // The default layout does not pin anything (default plans unchanged).
         let plain = single_bin("plain-target");
-        let plan = adapter.generate(plain.path(), &AdapterOptions::new()).expect("generate");
-        assert!(plan.actions[0]
-            .action
-            .environment
-            .iter()
-            .all(|(key, _)| key != "CARGO_TARGET_DIR"));
+        let plan = adapter
+            .generate(plain.path(), &AdapterOptions::new())
+            .expect("generate");
+        assert!(
+            plan.actions[0]
+                .action
+                .environment
+                .iter()
+                .all(|(key, _)| key != "CARGO_TARGET_DIR")
+        );
     }
 
     #[test]
@@ -789,7 +926,10 @@ mod tests {
             error.to_string().contains("is outside the project root"),
             "{error}"
         );
-        assert!(!dir.path().join(".ant").exists(), "no staging directory on failure");
+        assert!(
+            !dir.path().join(".ant").exists(),
+            "no staging directory on failure"
+        );
     }
 
     #[test]
@@ -799,7 +939,12 @@ mod tests {
         let error = adapter
             .generate(&dir.path().join("app"), &AdapterOptions::new())
             .expect_err("member root rejected");
-        assert!(error.to_string().contains("point --project at the workspace root"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("point --project at the workspace root"),
+            "{error}"
+        );
     }
 
     /// A crates.io dependency served from a vendored directory source (the
@@ -819,7 +964,10 @@ mod tests {
             &dir.path().join("app/Cargo.toml"),
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nhelper = { path = \"../helper\" }\n",
         );
-        write(&dir.path().join("app/src/main.rs"), "fn main() { helper::h(); }\n");
+        write(
+            &dir.path().join("app/src/main.rs"),
+            "fn main() { helper::h(); }\n",
+        );
         // `helper` is an excluded (non-member) path dependency — in-workspace
         // path dependencies are otherwise auto-promoted to members — and
         // it depends on the vendored registry crate.
@@ -827,7 +975,10 @@ mod tests {
             &dir.path().join("helper/Cargo.toml"),
             "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntinydep = \"1\"\n",
         );
-        write(&dir.path().join("helper/src/lib.rs"), "pub fn h() -> u32 { tinydep::value() }\n");
+        write(
+            &dir.path().join("helper/src/lib.rs"),
+            "pub fn h() -> u32 { tinydep::value() }\n",
+        );
         write(
             &dir.path().join("other/Cargo.toml"),
             "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -835,7 +986,9 @@ mod tests {
         write(&dir.path().join("other/src/lib.rs"), "pub fn o() {}\n");
         write_vendored_tinydep(dir.path());
 
-        let plan = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
+        let plan = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
         let app = &plan.actions[0].action;
         assert_eq!(app.id, "app");
         let tree_inputs: Vec<&Path> = app
@@ -844,7 +997,10 @@ mod tests {
             .filter(|input| input.kind == InputKind::Tree)
             .map(|input| input.path.as_path())
             .collect();
-        assert!(tree_inputs.contains(&Path::new("helper")), "{tree_inputs:?}");
+        assert!(
+            tree_inputs.contains(&Path::new("helper")),
+            "{tree_inputs:?}"
+        );
         assert!(
             tree_inputs.contains(&Path::new("vendor").join("tinydep").as_path()),
             "transitive vendored source declared: {tree_inputs:?}"
@@ -868,7 +1024,10 @@ mod tests {
             &root.join("vendor/tinydep/Cargo.toml"),
             "[package]\nname = \"tinydep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
         );
-        write(&root.join("vendor/tinydep/src/lib.rs"), "pub fn value() -> u32 { 7 }\n");
+        write(
+            &root.join("vendor/tinydep/src/lib.rs"),
+            "pub fn value() -> u32 { 7 }\n",
+        );
         write(
             &root.join("vendor/tinydep/.cargo-checksum.json"),
             "{\"files\":{},\"package\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",

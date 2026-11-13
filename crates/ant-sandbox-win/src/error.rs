@@ -24,7 +24,11 @@ impl fmt::Display for SandboxError {
                 write!(f, "the sandbox is implemented for Windows only")
             }
             Self::WorkspaceUnavailable { path, reason } => {
-                write!(f, "workspace {} unusable for sandboxing: {reason}", path.display())
+                write!(
+                    f,
+                    "workspace {} unusable for sandboxing: {reason}",
+                    path.display()
+                )
             }
             Self::ConfinementUnavailable { path, reason } => {
                 write!(f, "cannot confine writes on {}: {reason}", path.display())

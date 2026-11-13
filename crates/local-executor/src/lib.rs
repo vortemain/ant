@@ -21,7 +21,10 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub enum ExecutionError {
     InvalidAction(ValidationError),
-    WorkspaceUnavailable { path: PathBuf, source: std::io::Error },
+    WorkspaceUnavailable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     WorkingDirectoryEscapesWorkspace(PathBuf),
     InputMissing(PathBuf),
     InputTypeMismatch(PathBuf),
@@ -54,13 +57,29 @@ impl fmt::Display for ExecutionError {
                 "working directory resolves outside the workspace: {}",
                 path.display()
             ),
-            Self::InputMissing(path) => write!(f, "declared input does not exist: {}", path.display()),
-            Self::InputTypeMismatch(path) => write!(f, "declared input has the wrong type: {}", path.display()),
+            Self::InputMissing(path) => {
+                write!(f, "declared input does not exist: {}", path.display())
+            }
+            Self::InputTypeMismatch(path) => {
+                write!(f, "declared input has the wrong type: {}", path.display())
+            }
             Self::InputDigest(error) => write!(f, "cannot digest declared input: {error}"),
-            Self::InputChangedDuringExecution(path) => write!(f, "declared input changed while action ran: {}", path.display()),
-            Self::OutputPathEscapesWorkspace(path) => write!(f, "declared output resolves outside the workspace: {}", path.display()),
-            Self::OutputMissing(path) => write!(f, "declared output was not created: {}", path.display()),
-            Self::OutputTypeMismatch(path) => write!(f, "declared output has the wrong type: {}", path.display()),
+            Self::InputChangedDuringExecution(path) => write!(
+                f,
+                "declared input changed while action ran: {}",
+                path.display()
+            ),
+            Self::OutputPathEscapesWorkspace(path) => write!(
+                f,
+                "declared output resolves outside the workspace: {}",
+                path.display()
+            ),
+            Self::OutputMissing(path) => {
+                write!(f, "declared output was not created: {}", path.display())
+            }
+            Self::OutputTypeMismatch(path) => {
+                write!(f, "declared output has the wrong type: {}", path.display())
+            }
             Self::OutputDigest(error) => write!(f, "cannot digest declared output: {error}"),
             Self::Cancelled => write!(f, "action cancelled before process start"),
             Self::Spawn(e) => write!(f, "could not start action process: {e}"),
@@ -113,7 +132,10 @@ impl CancellationToken {
 
     /// Cancel when either `cancel()` is called or this marker file exists.
     pub fn from_file(path: impl Into<PathBuf>) -> Self {
-        Self { cancelled: Arc::new(AtomicBool::new(false)), cancel_file: Some(path.into()) }
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_file: Some(path.into()),
+        }
     }
 
     pub fn cancel(&self) {
@@ -181,7 +203,10 @@ pub fn prepare(workspace: &Path, action: &Action) -> Result<PreparedAction, Exec
 /// (size and last-modification time). Use this mode only together with the
 /// matching `ExecutionFingerprint::local_metadata_fingerprinting` when
 /// reporting action keys: digests and key must be produced in the same mode.
-pub fn prepare_with_metadata(workspace: &Path, action: &Action) -> Result<PreparedAction, ExecutionError> {
+pub fn prepare_with_metadata(
+    workspace: &Path,
+    action: &Action,
+) -> Result<PreparedAction, ExecutionError> {
     prepare_with_mode(workspace, action, true)
 }
 
@@ -191,20 +216,30 @@ fn prepare_with_mode(
     metadata_fingerprinting: bool,
 ) -> Result<PreparedAction, ExecutionError> {
     action.validate().map_err(ExecutionError::InvalidAction)?;
-    let workspace = workspace.canonicalize().map_err(|source| {
-        ExecutionError::WorkspaceUnavailable { path: workspace.to_path_buf(), source }
-    })?;
+    let workspace =
+        workspace
+            .canonicalize()
+            .map_err(|source| ExecutionError::WorkspaceUnavailable {
+                path: workspace.to_path_buf(),
+                source,
+            })?;
     let requested_cwd = workspace.join(&action.working_directory);
-    let cwd = requested_cwd.canonicalize().map_err(|source| {
-        ExecutionError::WorkspaceUnavailable { path: requested_cwd.clone(), source }
-    })?;
+    let cwd =
+        requested_cwd
+            .canonicalize()
+            .map_err(|source| ExecutionError::WorkspaceUnavailable {
+                path: requested_cwd.clone(),
+                source,
+            })?;
     if !cwd.starts_with(&workspace) {
         return Err(ExecutionError::WorkingDirectoryEscapesWorkspace(cwd));
     }
     let mut input_digests = Vec::with_capacity(action.inputs.len());
     for input in &action.inputs {
         let path = workspace.join(&input.path);
-        let resolved = path.canonicalize().map_err(|_| ExecutionError::InputMissing(path.clone()))?;
+        let resolved = path
+            .canonicalize()
+            .map_err(|_| ExecutionError::InputMissing(path.clone()))?;
         reject_symlink_components(&workspace, &input.path).map_err(ExecutionError::InputDigest)?;
         if !resolved.starts_with(&workspace) {
             return Err(ExecutionError::WorkingDirectoryEscapesWorkspace(resolved));
@@ -218,7 +253,10 @@ fn prepare_with_mode(
         }
         let digest = digest_declared_path(&resolved, input.kind, metadata_fingerprinting)
             .map_err(ExecutionError::InputDigest)?;
-        input_digests.push(ActionContentDigest { path: input.path.clone(), digest });
+        input_digests.push(ActionContentDigest {
+            path: input.path.clone(),
+            digest,
+        });
     }
     for output in &action.outputs {
         workspace_path(&workspace, &output.path)
@@ -252,9 +290,13 @@ pub fn execute_prepared(
         return Err(ExecutionError::Cancelled);
     }
     let requested_cwd = workspace.join(&action.working_directory);
-    let cwd = requested_cwd.canonicalize().map_err(|source| {
-        ExecutionError::WorkspaceUnavailable { path: requested_cwd.clone(), source }
-    })?;
+    let cwd =
+        requested_cwd
+            .canonicalize()
+            .map_err(|source| ExecutionError::WorkspaceUnavailable {
+                path: requested_cwd.clone(),
+                source,
+            })?;
     let mut command = Command::new(&action.argv[0]);
     command.args(&action.argv[1..]).current_dir(cwd).env_clear();
     command.envs(build_digest::local_runtime_environment());
@@ -292,8 +334,9 @@ pub fn execute_prepared(
     let timeout = action.timeout_ms.map(Duration::from_millis);
     let (status, cancelled, timed_out) = wait_for_child(&mut child, cancellation, timeout)?;
     #[cfg(windows)]
-    let peak_memory_bytes =
-        job_guard.as_ref().and_then(|job| ant_sandbox_win::job::peak_job_memory(job).ok());
+    let peak_memory_bytes = job_guard
+        .as_ref()
+        .and_then(|job| ant_sandbox_win::job::peak_job_memory(job).ok());
     #[cfg(not(windows))]
     let peak_memory_bytes = None;
     let mut output_digests = Vec::new();
@@ -327,12 +370,16 @@ fn verify_inputs_and_digest_outputs(
         let digest = digest_declared_path(&path, input.kind, prepared.metadata_fingerprinting)
             .map_err(ExecutionError::InputDigest)?;
         if digest != before.digest {
-            return Err(ExecutionError::InputChangedDuringExecution(before.path.clone()));
+            return Err(ExecutionError::InputChangedDuringExecution(
+                before.path.clone(),
+            ));
         }
     }
     for output in &action.outputs {
         let path = workspace.join(&output.path);
-        let resolved = path.canonicalize().map_err(|_| ExecutionError::OutputMissing(path.clone()))?;
+        let resolved = path
+            .canonicalize()
+            .map_err(|_| ExecutionError::OutputMissing(path.clone()))?;
         reject_symlink_components(workspace, &output.path).map_err(ExecutionError::OutputDigest)?;
         if !resolved.starts_with(workspace) {
             return Err(ExecutionError::OutputPathEscapesWorkspace(resolved));
@@ -349,7 +396,10 @@ fn verify_inputs_and_digest_outputs(
             OutputKind::Tree => digest_tree(&resolved),
         }
         .map_err(ExecutionError::OutputDigest)?;
-        output_digests.push(ActionContentDigest { path: output.path.clone(), digest });
+        output_digests.push(ActionContentDigest {
+            path: output.path.clone(),
+            digest,
+        });
     }
     Ok(output_digests)
 }
@@ -410,13 +460,16 @@ pub fn execute_sandboxed_prepared(
     if cancellation.is_cancelled() {
         return Err(ExecutionError::Cancelled);
     }
-    let sandbox = ant_sandbox_win::Sandbox::prepare(&prepared.workspace).map_err(|error| {
-        ExecutionError::Sandbox(error.to_string())
-    })?;
+    let sandbox = ant_sandbox_win::Sandbox::prepare(&prepared.workspace)
+        .map_err(|error| ExecutionError::Sandbox(error.to_string()))?;
     let requested_cwd = prepared.workspace.join(&action.working_directory);
-    let cwd = requested_cwd.canonicalize().map_err(|source| {
-        ExecutionError::WorkspaceUnavailable { path: requested_cwd.clone(), source }
-    })?;
+    let cwd =
+        requested_cwd
+            .canonicalize()
+            .map_err(|source| ExecutionError::WorkspaceUnavailable {
+                path: requested_cwd.clone(),
+                source,
+            })?;
     // The canonicalized path carries a `\\?\` verbatim prefix on Windows.
     // That form is correct for the SID derivation and ACL grant (which use
     // the canonical bytes), but `cmd.exe` refuses verbatim paths as a cwd
@@ -432,12 +485,22 @@ pub fn execute_sandboxed_prepared(
     // restricted token is consistent with the direct run path.
     let mut environment: Vec<(String, String)> = build_digest::local_runtime_environment()
         .into_iter()
-        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
         .collect();
     environment.extend(action.environment.iter().cloned());
 
     let mut child = sandbox
-        .spawn_with_memory_limit(&action.argv, &cwd, &environment, prepared.memory_limit_bytes)
+        .spawn_with_memory_limit(
+            &action.argv,
+            &cwd,
+            &environment,
+            prepared.memory_limit_bytes,
+        )
         .map_err(|error| match prepared.memory_limit_bytes {
             Some(_) => ExecutionError::ResourceLimit(error.to_string()),
             None => ExecutionError::Sandbox(error.to_string()),
@@ -450,22 +513,29 @@ pub fn execute_sandboxed_prepared(
             // Drain the exit code so the result reports what the process
             // actually returned (terminating with 1 is the convention here).
             let code = loop {
-                match child.try_wait().map_err(|error| ExecutionError::Sandbox(error.to_string()))? {
+                match child
+                    .try_wait()
+                    .map_err(|error| ExecutionError::Sandbox(error.to_string()))?
+                {
                     Some(c) => break c,
                     None => std::thread::sleep(Duration::from_millis(40)),
                 }
             };
             break (code, true, false);
         }
-        if let Some(code) =
-            child.try_wait().map_err(|error| ExecutionError::Sandbox(error.to_string()))?
+        if let Some(code) = child
+            .try_wait()
+            .map_err(|error| ExecutionError::Sandbox(error.to_string()))?
         {
             break (code, false, false);
         }
         if timeout.is_some_and(|limit| start.elapsed() >= limit) {
             child.terminate();
             let code = loop {
-                match child.try_wait().map_err(|error| ExecutionError::Sandbox(error.to_string()))? {
+                match child
+                    .try_wait()
+                    .map_err(|error| ExecutionError::Sandbox(error.to_string()))?
+                {
                     Some(c) => break c,
                     None => std::thread::sleep(Duration::from_millis(40)),
                 }
@@ -536,15 +606,24 @@ pub fn execute_network_isolated_prepared(
     ant_sandbox_win::Sandbox::grant_workspace_to_sid(&prepared.workspace, &account.user_sid)
         .map_err(|error| ExecutionError::Sandbox(error.to_string()))?;
     let requested_cwd = prepared.workspace.join(&action.working_directory);
-    let cwd = requested_cwd.canonicalize().map_err(|source| {
-        ExecutionError::WorkspaceUnavailable { path: requested_cwd.clone(), source }
-    })?;
+    let cwd =
+        requested_cwd
+            .canonicalize()
+            .map_err(|source| ExecutionError::WorkspaceUnavailable {
+                path: requested_cwd.clone(),
+                source,
+            })?;
     let cwd = strip_verbatim_prefix(&cwd);
     let workspace = strip_verbatim_prefix(&prepared.workspace);
 
     let mut environment: Vec<(String, String)> = build_digest::local_runtime_environment()
         .into_iter()
-        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
         .collect();
     environment.extend(action.environment.iter().cloned());
 
@@ -610,7 +689,10 @@ fn wait_sandboxed_child(
     let start = Instant::now();
     let drain = |child: &mut ant_sandbox_win::Child| -> Result<u32, ExecutionError> {
         loop {
-            match child.try_wait().map_err(|error| ExecutionError::Sandbox(error.to_string()))? {
+            match child
+                .try_wait()
+                .map_err(|error| ExecutionError::Sandbox(error.to_string()))?
+            {
                 Some(code) => return Ok(code),
                 None => std::thread::sleep(Duration::from_millis(40)),
             }
@@ -621,7 +703,10 @@ fn wait_sandboxed_child(
             child.terminate();
             return Ok((drain(child)?, true, false));
         }
-        if let Some(code) = child.try_wait().map_err(|error| ExecutionError::Sandbox(error.to_string()))? {
+        if let Some(code) = child
+            .try_wait()
+            .map_err(|error| ExecutionError::Sandbox(error.to_string()))?
+        {
             return Ok((code, false, false));
         }
         if timeout.is_some_and(|limit| start.elapsed() >= limit) {
@@ -713,7 +798,8 @@ fn attach_capped_and_resume(child: &Child, limit_bytes: u64) -> Result<win32job:
         .map_err(|error| format!("cannot create job object: {error}"))?;
     job.assign_process(child.as_raw_handle() as isize)
         .map_err(|error| format!("cannot assign process to job object: {error}"))?;
-    ant_sandbox_win::job::set_job_memory_limit(&job, limit_bytes).map_err(|error| error.to_string())?;
+    ant_sandbox_win::job::set_job_memory_limit(&job, limit_bytes)
+        .map_err(|error| error.to_string())?;
     match ant_sandbox_win::job::resume_process_threads(child.id()) {
         Ok(0) => Err("no thread found to resume after applying the memory limit".to_owned()),
         Ok(_) => Ok(job),
@@ -754,8 +840,10 @@ fn digest_declared_path(
 fn reject_symlink_components(root: &Path, relative: &Path) -> Result<(), DigestError> {
     reject_existing_symlink_components(root, relative)?;
     let target = root.join(relative);
-    let metadata = std::fs::symlink_metadata(&target)
-        .map_err(|source| DigestError::Io { path: target.clone(), source })?;
+    let metadata = std::fs::symlink_metadata(&target).map_err(|source| DigestError::Io {
+        path: target.clone(),
+        source,
+    })?;
     if metadata.file_type().is_symlink() {
         return Err(DigestError::Symlink(target));
     }
@@ -773,7 +861,12 @@ fn reject_existing_symlink_components(root: &Path, relative: &Path) -> Result<()
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-                Err(source) => return Err(DigestError::Io { path: current, source }),
+                Err(source) => {
+                    return Err(DigestError::Io {
+                        path: current,
+                        source,
+                    });
+                }
             }
         }
     }
@@ -783,21 +876,26 @@ fn reject_existing_symlink_components(root: &Path, relative: &Path) -> Result<()
 /// Resolve a relative workspace path and ensure its nearest existing parent is
 /// rooted inside the workspace. Useful for future pre-execution output checks.
 pub fn workspace_path(workspace: &Path, relative: &Path) -> Result<PathBuf, ExecutionError> {
-    let root = workspace.canonicalize().map_err(|source| ExecutionError::WorkspaceUnavailable {
-        path: workspace.to_path_buf(),
-        source,
-    })?;
+    let root = workspace
+        .canonicalize()
+        .map_err(|source| ExecutionError::WorkspaceUnavailable {
+            path: workspace.to_path_buf(),
+            source,
+        })?;
     let candidate = root.join(relative);
     let mut ancestor = candidate.as_path();
     while !ancestor.exists() {
-        ancestor = ancestor.parent().ok_or_else(|| {
-            ExecutionError::WorkingDirectoryEscapesWorkspace(candidate.clone())
-        })?;
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| ExecutionError::WorkingDirectoryEscapesWorkspace(candidate.clone()))?;
     }
-    let resolved = ancestor.canonicalize().map_err(|source| ExecutionError::WorkspaceUnavailable {
-        path: ancestor.to_path_buf(),
-        source,
-    })?;
+    let resolved =
+        ancestor
+            .canonicalize()
+            .map_err(|source| ExecutionError::WorkspaceUnavailable {
+                path: ancestor.to_path_buf(),
+                source,
+            })?;
     if !resolved.starts_with(&root) {
         return Err(ExecutionError::WorkingDirectoryEscapesWorkspace(resolved));
     }
@@ -862,7 +960,11 @@ mod tests {
             "copy /Y in.txt out.txt >nul".to_owned(),
         ];
         #[cfg(not(windows))]
-        return vec!["sh".to_owned(), "-c".to_owned(), "cp in.txt out.txt".to_owned()];
+        return vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "cp in.txt out.txt".to_owned(),
+        ];
     }
 
     fn action(id: &str, argv: Vec<String>) -> Action {
@@ -886,8 +988,14 @@ mod tests {
         let dir = TempDir::new("success");
         dir.write("in.txt", b"input content");
         let mut action = action("copy-input", copy_command());
-        action.inputs.push(Input { path: PathBuf::from("in.txt"), kind: InputKind::File });
-        action.outputs.push(Output { path: PathBuf::from("out.txt"), kind: OutputKind::File });
+        action.inputs.push(Input {
+            path: PathBuf::from("in.txt"),
+            kind: InputKind::File,
+        });
+        action.outputs.push(Output {
+            path: PathBuf::from("out.txt"),
+            kind: OutputKind::File,
+        });
 
         let result = execute(dir.path(), &action).expect("execution succeeds");
         assert!(result.success(), "status {:?}", result.status);
@@ -907,13 +1015,23 @@ mod tests {
     #[test]
     fn memory_limit_is_opt_in_and_derived_from_declared_memory() {
         let dir = TempDir::new("mem-optin");
-        let mut undeclared = prepare(dir.path(), &action("plain", copy_command())).expect("prepare");
-        assert_eq!(undeclared.memory_limit_bytes, None, "no cap unless requested");
+        let mut undeclared =
+            prepare(dir.path(), &action("plain", copy_command())).expect("prepare");
+        assert_eq!(
+            undeclared.memory_limit_bytes, None,
+            "no cap unless requested"
+        );
         undeclared.enforce_memory_limit();
-        assert_eq!(undeclared.memory_limit_bytes, None, "undeclared memory stays uncapped");
+        assert_eq!(
+            undeclared.memory_limit_bytes, None,
+            "undeclared memory stays uncapped"
+        );
 
         let mut declared = action("declared", copy_command());
-        declared.resources = Some(build_action::ResourceRequest { cpu: 1, memory_mb: Some(64) });
+        declared.resources = Some(build_action::ResourceRequest {
+            cpu: 1,
+            memory_mb: Some(64),
+        });
         let mut prepared = prepare(dir.path(), &declared).expect("prepare");
         prepared.enforce_memory_limit();
         assert_eq!(prepared.memory_limit_bytes, Some(64 * 1024 * 1024));
@@ -925,15 +1043,30 @@ mod tests {
     #[test]
     fn capped_execution_resumes_the_child_and_measures_peak() {
         let dir = TempDir::new("mem-capped");
-        let mut capped = action("capped", vec!["cmd".to_owned(), "/C".to_owned(), "echo ok> out.txt".to_owned()]);
-        capped.resources = Some(build_action::ResourceRequest { cpu: 1, memory_mb: Some(256) });
+        let mut capped = action(
+            "capped",
+            vec![
+                "cmd".to_owned(),
+                "/C".to_owned(),
+                "echo ok> out.txt".to_owned(),
+            ],
+        );
+        capped.resources = Some(build_action::ResourceRequest {
+            cpu: 1,
+            memory_mb: Some(256),
+        });
         let mut prepared = prepare(dir.path(), &capped).expect("prepare");
         prepared.enforce_memory_limit();
         let result = execute_prepared(&prepared, &CancellationToken::new()).expect("execute");
         assert!(result.success(), "status {:?}", result.status);
-        assert!(dir.path().join("out.txt").exists(), "the resumed child must actually run");
+        assert!(
+            dir.path().join("out.txt").exists(),
+            "the resumed child must actually run"
+        );
         assert_eq!(result.memory_limit_bytes, Some(256 * 1024 * 1024));
-        let peak = result.peak_memory_bytes.expect("peak measured through the job");
+        let peak = result
+            .peak_memory_bytes
+            .expect("peak measured through the job");
         assert!(peak > 0 && peak < 256 * 1024 * 1024, "peak {peak}");
     }
 
@@ -941,21 +1074,37 @@ mod tests {
     fn declared_environment_reaches_the_child() {
         let dir = TempDir::new("env");
         let mut action = action("env-echo", Vec::new());
-        action.environment.push(("ANT_TEST_VAR".to_owned(), "ant-value".to_owned()));
+        action
+            .environment
+            .push(("ANT_TEST_VAR".to_owned(), "ant-value".to_owned()));
         #[cfg(windows)]
         {
-            action.argv = vec!["cmd".to_owned(), "/C".to_owned(), "echo %ANT_TEST_VAR%> out.txt".to_owned()];
+            action.argv = vec![
+                "cmd".to_owned(),
+                "/C".to_owned(),
+                "echo %ANT_TEST_VAR%> out.txt".to_owned(),
+            ];
         }
         #[cfg(not(windows))]
         {
-            action.argv = vec!["sh".to_owned(), "-c".to_owned(), "echo $ANT_TEST_VAR > out.txt".to_owned()];
+            action.argv = vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "echo $ANT_TEST_VAR > out.txt".to_owned(),
+            ];
         }
-        action.outputs.push(Output { path: PathBuf::from("out.txt"), kind: OutputKind::File });
+        action.outputs.push(Output {
+            path: PathBuf::from("out.txt"),
+            kind: OutputKind::File,
+        });
 
         let result = execute(dir.path(), &action).expect("execution succeeds");
         assert!(result.success(), "status {:?}", result.status);
         let content = fs::read_to_string(dir.path().join("out.txt")).expect("output file");
-        assert!(content.trim().contains("ant-value"), "output was {content:?}");
+        assert!(
+            content.trim().contains("ant-value"),
+            "output was {content:?}"
+        );
     }
 
     #[test]
@@ -977,7 +1126,10 @@ mod tests {
         token.cancel();
         let error = execute_cancellable(
             dir.path(),
-            &action("never-starts", vec!["cmd".to_owned(), "/C".to_owned(), "rem".to_owned()]),
+            &action(
+                "never-starts",
+                vec!["cmd".to_owned(), "/C".to_owned(), "rem".to_owned()],
+            ),
             &token,
         )
         .unwrap_err();
@@ -994,8 +1146,12 @@ mod tests {
             cancel_from_thread.cancel();
         });
 
-        let result = execute_cancellable(dir.path(), &action("killed-mid-run", long_running_command()), &token)
-            .expect("cancellation handled as a result");
+        let result = execute_cancellable(
+            dir.path(),
+            &action("killed-mid-run", long_running_command()),
+            &token,
+        )
+        .expect("cancellation handled as a result");
         assert!(result.cancelled, "expected cancellation");
         assert!(!result.timed_out);
         assert!(!result.success());
@@ -1012,8 +1168,12 @@ mod tests {
             fs::write(&spawn_marker, b"stop").expect("create cancel marker");
         });
 
-        let result = execute_cancellable(dir.path(), &action("killed-by-file", long_running_command()), &token)
-            .expect("cancellation handled as a result");
+        let result = execute_cancellable(
+            dir.path(),
+            &action("killed-by-file", long_running_command()),
+            &token,
+        )
+        .expect("cancellation handled as a result");
         assert!(result.cancelled, "expected cancellation via marker file");
     }
 
@@ -1022,10 +1182,16 @@ mod tests {
         let dir = TempDir::new("missing-input");
         let mut action = action("needs-input", Vec::new());
         action.argv = vec!["cmd".to_owned(), "/C".to_owned(), "rem".to_owned()];
-        action.inputs.push(Input { path: PathBuf::from("ghost.txt"), kind: InputKind::File });
+        action.inputs.push(Input {
+            path: PathBuf::from("ghost.txt"),
+            kind: InputKind::File,
+        });
 
         let error = execute(dir.path(), &action).unwrap_err();
-        assert!(matches!(error, ExecutionError::InputMissing(_)), "got {error:?}");
+        assert!(
+            matches!(error, ExecutionError::InputMissing(_)),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -1035,16 +1201,30 @@ mod tests {
         // The command would create a marker file if it were ever spawned.
         #[cfg(windows)]
         {
-            action.argv = vec!["cmd".to_owned(), "/C".to_owned(), "echo x> spawned.txt".to_owned()];
+            action.argv = vec![
+                "cmd".to_owned(),
+                "/C".to_owned(),
+                "echo x> spawned.txt".to_owned(),
+            ];
         }
         #[cfg(not(windows))]
         {
-            action.argv = vec!["sh".to_owned(), "-c".to_owned(), "echo x > spawned.txt".to_owned()];
+            action.argv = vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "echo x > spawned.txt".to_owned(),
+            ];
         }
-        action.inputs.push(Input { path: PathBuf::from("ghost.txt"), kind: InputKind::File });
+        action.inputs.push(Input {
+            path: PathBuf::from("ghost.txt"),
+            kind: InputKind::File,
+        });
 
         let error = prepare(dir.path(), &action).unwrap_err();
-        assert!(matches!(error, ExecutionError::InputMissing(_)), "got {error:?}");
+        assert!(
+            matches!(error, ExecutionError::InputMissing(_)),
+            "got {error:?}"
+        );
         assert!(
             !dir.path().join("spawned.txt").exists(),
             "prepare must not spawn the command"
@@ -1064,12 +1244,18 @@ mod tests {
         {
             action.argv = vec!["sh".to_owned(), "-c".to_owned(), "true".to_owned()];
         }
-        action.inputs.push(Input { path: PathBuf::from("in.txt"), kind: InputKind::File });
+        action.inputs.push(Input {
+            path: PathBuf::from("in.txt"),
+            kind: InputKind::File,
+        });
 
         // Metadata mode: a timestamp-only change is a changed input.
         let prepared = prepare_with_metadata(dir.path(), &action).expect("prepare");
         assert!(prepared.metadata_fingerprinting);
-        set_file_mtime(&dir.path().join("in.txt"), std::time::SystemTime::now() + Duration::from_secs(90));
+        set_file_mtime(
+            &dir.path().join("in.txt"),
+            std::time::SystemTime::now() + Duration::from_secs(90),
+        );
         let error = execute_prepared(&prepared, &CancellationToken::new()).unwrap_err();
         assert!(
             matches!(error, ExecutionError::InputChangedDuringExecution(ref path) if path == &PathBuf::from("in.txt")),
@@ -1110,10 +1296,16 @@ mod tests {
         {
             action.argv = vec!["sh".to_owned(), "-c".to_owned(), "echo hi".to_owned()];
         }
-        action.outputs.push(Output { path: PathBuf::from("never-created.txt"), kind: OutputKind::File });
+        action.outputs.push(Output {
+            path: PathBuf::from("never-created.txt"),
+            kind: OutputKind::File,
+        });
 
         let error = execute(dir.path(), &action).unwrap_err();
-        assert!(matches!(error, ExecutionError::OutputMissing(_)), "got {error:?}");
+        assert!(
+            matches!(error, ExecutionError::OutputMissing(_)),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -1129,10 +1321,16 @@ mod tests {
         {
             action.argv = vec!["sh".to_owned(), "-c".to_owned(), "true".to_owned()];
         }
-        action.outputs.push(Output { path: PathBuf::from("created.txt"), kind: OutputKind::Tree });
+        action.outputs.push(Output {
+            path: PathBuf::from("created.txt"),
+            kind: OutputKind::Tree,
+        });
 
         let error = execute(dir.path(), &action).unwrap_err();
-        assert!(matches!(error, ExecutionError::OutputTypeMismatch(_)), "got {error:?}");
+        assert!(
+            matches!(error, ExecutionError::OutputTypeMismatch(_)),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -1150,14 +1348,20 @@ mod tests {
         action.working_directory = PathBuf::from("..");
 
         let error = execute(dir.path(), &action).unwrap_err();
-        assert!(matches!(error, ExecutionError::InvalidAction(_)), "got {error:?}");
+        assert!(
+            matches!(error, ExecutionError::InvalidAction(_)),
+            "got {error:?}"
+        );
     }
 
     #[test]
     fn unknown_program_reports_spawn_error() {
         let dir = TempDir::new("spawn-error");
         // Clearing the child environment guarantees PATH lookup cannot find it.
-        let action = action("no-such-tool", vec!["ant-never-existing-program-4f2a".to_owned()]);
+        let action = action(
+            "no-such-tool",
+            vec!["ant-never-existing-program-4f2a".to_owned()],
+        );
         let error = execute(dir.path(), &action).unwrap_err();
         assert!(matches!(error, ExecutionError::Spawn(_)), "got {error:?}");
     }
@@ -1170,13 +1374,24 @@ mod tests {
         // The action modifies its own declared input.
         #[cfg(windows)]
         {
-            action.argv = vec!["cmd".to_owned(), "/C".to_owned(), "echo after> in.txt".to_owned()];
+            action.argv = vec![
+                "cmd".to_owned(),
+                "/C".to_owned(),
+                "echo after> in.txt".to_owned(),
+            ];
         }
         #[cfg(not(windows))]
         {
-            action.argv = vec!["sh".to_owned(), "-c".to_owned(), "echo after > in.txt".to_owned()];
+            action.argv = vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "echo after > in.txt".to_owned(),
+            ];
         }
-        action.inputs.push(Input { path: PathBuf::from("in.txt"), kind: InputKind::File });
+        action.inputs.push(Input {
+            path: PathBuf::from("in.txt"),
+            kind: InputKind::File,
+        });
 
         let error = execute(dir.path(), &action).unwrap_err();
         assert!(
@@ -1207,4 +1422,3 @@ mod tests {
         assert!(result.success());
     }
 }
-

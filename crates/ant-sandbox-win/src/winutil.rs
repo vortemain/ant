@@ -46,7 +46,10 @@ pub(crate) fn quote_argument(arg: &str) -> String {
 
 /// Build a full command line from argv (argv[0] is quoted like any other).
 pub(crate) fn argv_to_command_line(argv: &[String]) -> String {
-    argv.iter().map(|arg| quote_argument(arg)).collect::<Vec<_>>().join(" ")
+    argv.iter()
+        .map(|arg| quote_argument(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Build a null-separated UTF-16 environment block sorted case-insensitively

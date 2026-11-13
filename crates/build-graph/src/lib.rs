@@ -39,7 +39,10 @@ pub struct PlanAction {
 impl PlanFile {
     /// A fresh, versioned, empty plan file.
     pub fn new() -> Self {
-        Self { schema_version: PLAN_SCHEMA_VERSION, actions: Vec::new() }
+        Self {
+            schema_version: PLAN_SCHEMA_VERSION,
+            actions: Vec::new(),
+        }
     }
 
     /// Build a validated graph from this plan. Structural action validation,
@@ -89,7 +92,10 @@ impl fmt::Display for GraphError {
             Self::InvalidAction { id, source } => write!(f, "action '{id}' is invalid: {source:?}"),
             Self::DuplicateActionId(id) => write!(f, "duplicate action ID '{id}'"),
             Self::UnknownDependency { action, dependency } => {
-                write!(f, "action '{action}' depends on unknown action '{dependency}'")
+                write!(
+                    f,
+                    "action '{action}' depends on unknown action '{dependency}'"
+                )
             }
             Self::SelfDependency(id) => write!(f, "action '{id}' depends on itself"),
             Self::Cycle(ids) => write!(f, "dependency cycle includes: {}", ids.join(", ")),
@@ -109,16 +115,21 @@ impl BuildGraph {
         action: Action,
         dependencies: impl IntoIterator<Item = String>,
     ) -> Result<(), GraphError> {
-        action.validate().map_err(|source| GraphError::InvalidAction {
-            id: action.id.clone(),
-            source,
-        })?;
+        action
+            .validate()
+            .map_err(|source| GraphError::InvalidAction {
+                id: action.id.clone(),
+                source,
+            })?;
         if self.index.contains_key(&action.id) {
             return Err(GraphError::DuplicateActionId(action.id));
         }
         let index = self.nodes.len();
         self.index.insert(action.id.clone(), index);
-        self.nodes.push(BuildNode { action, dependencies: dependencies.into_iter().collect() });
+        self.nodes.push(BuildNode {
+            action,
+            dependencies: dependencies.into_iter().collect(),
+        });
         Ok(())
     }
 
@@ -171,7 +182,10 @@ impl BuildGraph {
             }
         }
         if order.len() != self.nodes.len() {
-            let mut cycle_ids: Vec<_> = self.nodes.iter().enumerate()
+            let mut cycle_ids: Vec<_> = self
+                .nodes
+                .iter()
+                .enumerate()
                 .filter(|(index, _)| indegree[*index] > 0)
                 .map(|(_, node)| node.action.id.clone())
                 .collect();
@@ -185,11 +199,15 @@ impl BuildGraph {
     pub fn ordered_actions(&self) -> Result<Vec<&Action>, GraphError> {
         self.execution_order()?
             .into_iter()
-            .map(|id| self.index.get(id).map(|&index| &self.nodes[index].action)
-                .ok_or_else(|| GraphError::UnknownDependency {
-                    action: "<graph>".to_owned(),
-                    dependency: id.to_owned(),
-                }))
+            .map(|id| {
+                self.index
+                    .get(id)
+                    .map(|&index| &self.nodes[index].action)
+                    .ok_or_else(|| GraphError::UnknownDependency {
+                        action: "<graph>".to_owned(),
+                        dependency: id.to_owned(),
+                    })
+            })
             .collect()
     }
 
@@ -197,11 +215,15 @@ impl BuildGraph {
     pub fn ordered_nodes(&self) -> Result<Vec<&BuildNode>, GraphError> {
         self.execution_order()?
             .into_iter()
-            .map(|id| self.index.get(id).map(|&index| &self.nodes[index])
-                .ok_or_else(|| GraphError::UnknownDependency {
-                    action: "<graph>".to_owned(),
-                    dependency: id.to_owned(),
-                }))
+            .map(|id| {
+                self.index
+                    .get(id)
+                    .map(|&index| &self.nodes[index])
+                    .ok_or_else(|| GraphError::UnknownDependency {
+                        action: "<graph>".to_owned(),
+                        dependency: id.to_owned(),
+                    })
+            })
             .collect()
     }
 }
@@ -238,8 +260,10 @@ mod tests {
 
     #[test]
     fn orders_independently_of_insertion_order() {
-        let first = graph_with(&[("a", &[]), ("b", &["a"]), ("c", &["a"]), ("d", &["b", "c"])]).unwrap();
-        let second = graph_with(&[("d", &["b", "c"]), ("c", &["a"]), ("b", &["a"]), ("a", &[])]).unwrap();
+        let first =
+            graph_with(&[("a", &[]), ("b", &["a"]), ("c", &["a"]), ("d", &["b", "c"])]).unwrap();
+        let second =
+            graph_with(&[("d", &["b", "c"]), ("c", &["a"]), ("b", &["a"]), ("a", &[])]).unwrap();
         let left = first.execution_order().unwrap();
         let right = second.execution_order().unwrap();
         assert_eq!(left, vec!["a", "b", "c", "d"]);
@@ -255,25 +279,36 @@ mod tests {
     #[test]
     fn rejects_duplicate_action_id() {
         let mut graph = BuildGraph::new();
-        graph.add_action(action("x"), Vec::<String>::new()).expect("first insert");
-        let error = graph.add_action(action("x"), Vec::<String>::new()).unwrap_err();
+        graph
+            .add_action(action("x"), Vec::<String>::new())
+            .expect("first insert");
+        let error = graph
+            .add_action(action("x"), Vec::<String>::new())
+            .unwrap_err();
         assert_eq!(error, GraphError::DuplicateActionId("x".to_owned()));
     }
 
     #[test]
     fn rejects_unknown_dependency() {
         let mut graph = BuildGraph::new();
-        graph.add_action(action("a"), vec!["ghost".to_owned()]).expect("insert");
+        graph
+            .add_action(action("a"), vec!["ghost".to_owned()])
+            .expect("insert");
         assert_eq!(
             graph.execution_order(),
-            Err(GraphError::UnknownDependency { action: "a".to_owned(), dependency: "ghost".to_owned() })
+            Err(GraphError::UnknownDependency {
+                action: "a".to_owned(),
+                dependency: "ghost".to_owned()
+            })
         );
     }
 
     #[test]
     fn rejects_self_dependency() {
         let mut graph = BuildGraph::new();
-        graph.add_action(action("a"), vec!["a".to_owned()]).expect("insert");
+        graph
+            .add_action(action("a"), vec!["a".to_owned()])
+            .expect("insert");
         assert_eq!(
             graph.execution_order(),
             Err(GraphError::SelfDependency("a".to_owned()))
@@ -283,9 +318,15 @@ mod tests {
     #[test]
     fn detects_cycle_and_names_members() {
         let mut graph = BuildGraph::new();
-        graph.add_action(action("a"), vec!["c".to_owned()]).expect("insert a");
-        graph.add_action(action("b"), vec!["a".to_owned()]).expect("insert b");
-        graph.add_action(action("c"), vec!["b".to_owned()]).expect("insert c");
+        graph
+            .add_action(action("a"), vec!["c".to_owned()])
+            .expect("insert a");
+        graph
+            .add_action(action("b"), vec!["a".to_owned()])
+            .expect("insert b");
+        graph
+            .add_action(action("c"), vec!["b".to_owned()])
+            .expect("insert c");
         match graph.execution_order() {
             Err(GraphError::Cycle(ids)) => assert_eq!(ids, vec!["a", "b", "c"]),
             other => panic!("expected cycle error, got {other:?}"),
@@ -302,7 +343,10 @@ mod tests {
     fn ordered_actions_match_execution_order() {
         let graph = graph_with(&[("a", &[]), ("b", &["a"])]).unwrap();
         let actions = graph.ordered_actions().unwrap();
-        assert_eq!(actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
@@ -344,8 +388,14 @@ mod tests {
     #[test]
     fn plan_file_to_graph_validates_and_orders() {
         let mut file = PlanFile::new();
-        file.actions.push(PlanAction { action: action("b"), dependencies: vec!["a".to_owned()] });
-        file.actions.push(PlanAction { action: action("a"), dependencies: Vec::new() });
+        file.actions.push(PlanAction {
+            action: action("b"),
+            dependencies: vec!["a".to_owned()],
+        });
+        file.actions.push(PlanAction {
+            action: action("a"),
+            dependencies: Vec::new(),
+        });
         let graph = file.to_graph().unwrap();
         assert_eq!(graph.execution_order().unwrap(), vec!["a", "b"]);
     }
@@ -353,13 +403,25 @@ mod tests {
     #[test]
     fn plan_file_to_graph_rejects_cycles_and_bad_actions() {
         let mut file = PlanFile::new();
-        file.actions.push(PlanAction { action: action("a"), dependencies: vec!["a".to_owned()] });
-        assert!(matches!(file.to_graph(), Err(GraphError::SelfDependency(_))));
+        file.actions.push(PlanAction {
+            action: action("a"),
+            dependencies: vec!["a".to_owned()],
+        });
+        assert!(matches!(
+            file.to_graph(),
+            Err(GraphError::SelfDependency(_))
+        ));
         let mut file = PlanFile::new();
         let mut broken = action("x");
         broken.schema_version = 2;
-        file.actions.push(PlanAction { action: broken, dependencies: Vec::new() });
-        assert!(matches!(file.to_graph(), Err(GraphError::InvalidAction { .. })));
+        file.actions.push(PlanAction {
+            action: broken,
+            dependencies: Vec::new(),
+        });
+        assert!(matches!(
+            file.to_graph(),
+            Err(GraphError::InvalidAction { .. })
+        ));
     }
 
     #[test]

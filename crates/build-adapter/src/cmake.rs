@@ -38,8 +38,8 @@ use build_graph::{PlanAction, PlanFile};
 use std::path::{Path, PathBuf};
 
 use crate::{
-    canonical_root, check_option_keys, executable_version, locate_executable, AdapterError,
-    AdapterOptions, BuildAdapter, Detection, OptionSpec,
+    AdapterError, AdapterOptions, BuildAdapter, Detection, OptionSpec, canonical_root,
+    check_option_keys, executable_version, locate_executable,
 };
 
 pub struct CmakeAdapter;
@@ -109,12 +109,18 @@ impl BuildAdapter for CmakeAdapter {
         cmake_files.sort();
         let inputs: Vec<Input> = cmake_files
             .into_iter()
-            .map(|path| Input { path, kind: InputKind::File })
+            .map(|path| Input {
+                path,
+                kind: InputKind::File,
+            })
             .collect();
 
         let cmake = locate_executable(&format!("cmake{}", std::env::consts::EXE_SUFFIX))?;
         let digest_target = cmake.canonicalize().map_err(|error| {
-            AdapterError::Toolchain(format!("cannot resolve cmake executable {}: {error}", cmake.display()))
+            AdapterError::Toolchain(format!(
+                "cannot resolve cmake executable {}: {error}",
+                cmake.display()
+            ))
         })?;
         let version = executable_version(&cmake, &root)?
             .lines()
@@ -130,9 +136,16 @@ impl BuildAdapter for CmakeAdapter {
                 ))
             })?
             .to_string();
-        let toolchain = ToolchainIdentity { name: "cmake".to_owned(), version, executable_digest };
+        let toolchain = ToolchainIdentity {
+            name: "cmake".to_owned(),
+            version,
+            executable_digest,
+        };
 
-        let staging_value = PathBuf::from(".ant").join("tmp").to_string_lossy().into_owned();
+        let staging_value = PathBuf::from(".ant")
+            .join("tmp")
+            .to_string_lossy()
+            .into_owned();
         let mut environment = vec![
             ("TMP".to_owned(), staging_value.clone()),
             ("TEMP".to_owned(), staging_value.clone()),
@@ -156,7 +169,12 @@ impl BuildAdapter for CmakeAdapter {
             timeout_ms: None,
             resources: None,
         };
-        let strings = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect::<Vec<_>>();
+        let strings = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>()
+        };
         let mut file = PlanFile::new();
         file.actions.push(PlanAction {
             action: action(
@@ -194,7 +212,11 @@ impl BuildAdapter for CmakeAdapter {
 /// Collect workspace-relative `CMakeLists.txt` and `*.cmake` files under
 /// `root/relative`, skipping build trees, hidden directories, and
 /// `node_modules`. Symlinks are not followed.
-fn collect_cmake_files(root: &Path, relative: &Path, found: &mut Vec<PathBuf>) -> Result<(), AdapterError> {
+fn collect_cmake_files(
+    root: &Path,
+    relative: &Path,
+    found: &mut Vec<PathBuf>,
+) -> Result<(), AdapterError> {
     let dir = root.join(relative);
     if !relative.as_os_str().is_empty() && dir.join("CMakeCache.txt").is_file() {
         return Ok(());
@@ -232,8 +254,10 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("ant-cmake-adapter-{name}-{}-{unique}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "ant-cmake-adapter-{name}-{}-{unique}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).expect("create temp dir");
             TempDir(path)
         }
@@ -295,13 +319,21 @@ mod tests {
         write(&dir.path().join("CMakeLists.txt"), "\n");
         let mut options = AdapterOptions::new();
         options.insert("config", "RelWithDebInfo").expect("insert");
-        let error = CmakeAdapter.generate(dir.path(), &options).expect_err("bad config");
-        assert!(error.to_string().contains("supported: Debug, Release"), "{error}");
+        let error = CmakeAdapter
+            .generate(dir.path(), &options)
+            .expect_err("bad config");
+        assert!(
+            error.to_string().contains("supported: Debug, Release"),
+            "{error}"
+        );
         write(&dir.path().join("build"), "not a dir");
         let error = CmakeAdapter
             .generate(dir.path(), &AdapterOptions::new())
             .expect_err("build is a file");
         assert!(error.to_string().contains("is not a directory"), "{error}");
-        assert!(!dir.path().join(".ant").exists(), "no staging directory on failure");
+        assert!(
+            !dir.path().join(".ant").exists(),
+            "no staging directory on failure"
+        );
     }
 }

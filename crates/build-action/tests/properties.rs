@@ -49,7 +49,11 @@ fn base() -> Action {
 fn random_path(rng: &mut Rng) -> (PathBuf, bool) {
     let absolute = rng.below(6) == 0;
     let mut text = if absolute {
-        if cfg!(windows) { r"C:\".to_owned() } else { "/".to_owned() }
+        if cfg!(windows) {
+            r"C:\".to_owned()
+        } else {
+            "/".to_owned()
+        }
     } else {
         String::new()
     };
@@ -73,12 +77,19 @@ fn input_paths_are_accepted_exactly_when_relative_and_contained() {
         let mut rng = Rng::new(seed);
         let (path, expected_valid) = random_path(&mut rng);
         let mut action = base();
-        action.inputs.push(Input { path: path.clone(), kind: InputKind::File });
+        action.inputs.push(Input {
+            path: path.clone(),
+            kind: InputKind::File,
+        });
         let result = action.validate();
         if expected_valid {
             assert_eq!(result, Ok(()), "seed {seed}: {path:?}");
         } else {
-            assert_eq!(result, Err(ValidationError::InvalidPath(path.clone())), "seed {seed}: {path:?}");
+            assert_eq!(
+                result,
+                Err(ValidationError::InvalidPath(path.clone())),
+                "seed {seed}: {path:?}"
+            );
         }
     }
 }
@@ -123,7 +134,11 @@ fn resource_requests_are_valid_exactly_when_positive() {
         } else {
             Ok(())
         };
-        assert_eq!(action.validate(), expected, "seed {seed}: cpu={cpu} memory={memory_mb:?}");
+        assert_eq!(
+            action.validate(),
+            expected,
+            "seed {seed}: cpu={cpu} memory={memory_mb:?}"
+        );
         // Serialization roundtrip preserves the request exactly.
         let json = serde_json::to_string(&action).expect("serialize");
         let parsed: Action = serde_json::from_str(&json).expect("parse");

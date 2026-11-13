@@ -27,7 +27,9 @@ fn job_handle(job: &win32job::Job) -> HANDLE {
     job.handle() as HANDLE
 }
 
-fn query_extended(job: &win32job::Job) -> Result<JOBOBJECT_EXTENDED_LIMIT_INFORMATION, SandboxError> {
+fn query_extended(
+    job: &win32job::Job,
+) -> Result<JOBOBJECT_EXTENDED_LIMIT_INFORMATION, SandboxError> {
     // SAFETY: plain-old-data Win32 struct; all-zero is a valid initial value.
     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: the job handle is open for the borrow; `info` is a stack buffer
@@ -117,7 +119,10 @@ pub fn resume_process_threads(process_id: u32) -> Result<usize, SandboxError> {
             // SAFETY: documented call; the handle is checked and closed.
             let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
             if thread.is_null() {
-                failure = Some(SandboxError::Windows { call: "OpenThread", code: unsafe { GetLastError() } });
+                failure = Some(SandboxError::Windows {
+                    call: "OpenThread",
+                    code: unsafe { GetLastError() },
+                });
                 break;
             }
             // SAFETY: `thread` is an open handle with suspend/resume access.
@@ -125,7 +130,10 @@ pub fn resume_process_threads(process_id: u32) -> Result<usize, SandboxError> {
             // SAFETY: closed exactly once.
             unsafe { CloseHandle(thread) };
             if previous == u32::MAX {
-                failure = Some(SandboxError::Windows { call: "ResumeThread", code: unsafe { GetLastError() } });
+                failure = Some(SandboxError::Windows {
+                    call: "ResumeThread",
+                    code: unsafe { GetLastError() },
+                });
                 break;
             }
             resumed += 1;
@@ -159,6 +167,10 @@ mod tests {
             0,
             "kill-on-close must survive adding the memory cap"
         );
-        assert_eq!(peak_job_memory(&job).expect("peak"), 0, "an empty job has used nothing");
+        assert_eq!(
+            peak_job_memory(&job).expect("peak"),
+            0,
+            "an empty job has used nothing"
+        );
     }
 }

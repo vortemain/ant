@@ -26,24 +26,40 @@ pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub enum CacheError {
-    Io { path: PathBuf, source: io::Error },
-    Digest { source: DigestError },
-    InvalidEntry { path: PathBuf, reason: String },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Digest {
+        source: DigestError,
+    },
+    InvalidEntry {
+        path: PathBuf,
+        reason: String,
+    },
     /// A restored output did not match its recorded digest. Partial outputs
     /// are removed before this is returned.
-    Integrity { path: PathBuf },
+    Integrity {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for CacheError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io { path, source } => write!(f, "cache IO error on {}: {source}", path.display()),
+            Self::Io { path, source } => {
+                write!(f, "cache IO error on {}: {source}", path.display())
+            }
             Self::Digest { source } => write!(f, "cache digest error: {source}"),
             Self::InvalidEntry { path, reason } => {
                 write!(f, "invalid cache entry {}: {reason}", path.display())
             }
             Self::Integrity { path } => {
-                write!(f, "restored output does not match its recorded digest: {}", path.display())
+                write!(
+                    f,
+                    "restored output does not match its recorded digest: {}",
+                    path.display()
+                )
             }
         }
     }
@@ -86,7 +102,11 @@ pub struct CachedEntry {
 
 impl CachedEntry {
     pub fn output_paths(&self) -> Vec<String> {
-        self.manifest.outputs.iter().map(|output| output.path.clone()).collect()
+        self.manifest
+            .outputs
+            .iter()
+            .map(|output| output.path.clone())
+            .collect()
     }
 }
 
@@ -100,10 +120,7 @@ impl Cache {
         let root = root.into();
         for directory in ["", "blobs", "entries", "tmp"] {
             let path = root.join(directory);
-            fs::create_dir_all(&path).map_err(|source| CacheError::Io {
-                path,
-                source,
-            })?;
+            fs::create_dir_all(&path).map_err(|source| CacheError::Io { path, source })?;
         }
         Ok(Self { root })
     }
@@ -146,8 +163,10 @@ impl Cache {
         }
         let mut manifest_outputs = Vec::with_capacity(outputs.len());
         for (path, kind) in outputs {
-            let relative = validate_relative(path)
-                .map_err(|reason| CacheError::InvalidEntry { path: path.clone(), reason })?;
+            let relative = validate_relative(path).map_err(|reason| CacheError::InvalidEntry {
+                path: path.clone(),
+                reason,
+            })?;
             let absolute = workspace.join(path);
             let mut manifest_output = ManifestOutput {
                 path: relative.clone(),
@@ -158,19 +177,24 @@ impl Cache {
             match kind {
                 OutputKind::File => {
                     let digest = self.ensure_blob(&absolute)?;
-                    manifest_output.files.push(ManifestFile { path: relative, digest: digest.to_string() });
+                    manifest_output.files.push(ManifestFile {
+                        path: relative,
+                        digest: digest.to_string(),
+                    });
                 }
                 OutputKind::Tree => {
-                    for entry in tree_entries(&absolute).map_err(|source| CacheError::Digest { source })? {
+                    for entry in
+                        tree_entries(&absolute).map_err(|source| CacheError::Digest { source })?
+                    {
                         if entry.is_dir {
-                            manifest_output.dirs.push(format!("{relative}/{}", entry.path));
+                            manifest_output
+                                .dirs
+                                .push(format!("{relative}/{}", entry.path));
                         } else {
-                            let digest = entry
-                                .digest
-                                .ok_or_else(|| CacheError::InvalidEntry {
-                                    path: absolute.clone(),
-                                    reason: "tree file entry without digest".to_owned(),
-                                })?;
+                            let digest = entry.digest.ok_or_else(|| CacheError::InvalidEntry {
+                                path: absolute.clone(),
+                                reason: "tree file entry without digest".to_owned(),
+                            })?;
                             let file_relative = format!("{relative}/{}", entry.path);
                             manifest_output.files.push(ManifestFile {
                                 path: file_relative,
@@ -201,7 +225,10 @@ impl Cache {
             Ok(content) => content,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(source) => {
-                return Err(CacheError::Io { path: manifest_path, source });
+                return Err(CacheError::Io {
+                    path: manifest_path,
+                    source,
+                });
             }
         };
         let manifest: Manifest = match serde_json::from_str(&content) {
@@ -332,7 +359,8 @@ impl Cache {
                     source,
                 })?;
                 restored.push(target.clone());
-                let actual = digest_file(&target).map_err(|source| CacheError::Digest { source })?;
+                let actual =
+                    digest_file(&target).map_err(|source| CacheError::Digest { source })?;
                 if actual != blob_digest {
                     return Err(CacheError::Integrity { path: target });
                 }
@@ -354,11 +382,10 @@ impl Cache {
         }
         // Copy to a temporary name first so concurrent stores never expose a
         // partially written blob under its final content-addressed name.
-        let tmp = self.root.join("tmp").join(format!(
-            "blob-{}-{}",
-            std::process::id(),
-            hex(digest)
-        ));
+        let tmp =
+            self.root
+                .join("tmp")
+                .join(format!("blob-{}-{}", std::process::id(), hex(digest)));
         fs::copy(source, &tmp).map_err(|source| CacheError::Io {
             path: tmp.clone(),
             source,
@@ -381,29 +408,37 @@ impl Cache {
             source,
         })?;
         let final_path = entry_dir.join("manifest.json");
-        let tmp = self.root.join("tmp").join(format!(
-            "manifest-{}-{}",
-            std::process::id(),
-            hex(key)
-        ));
-        let content = serde_json::to_string_pretty(manifest)
-            .map_err(|error| CacheError::InvalidEntry { path: final_path.clone(), reason: error.to_string() })?;
+        let tmp =
+            self.root
+                .join("tmp")
+                .join(format!("manifest-{}-{}", std::process::id(), hex(key)));
+        let content =
+            serde_json::to_string_pretty(manifest).map_err(|error| CacheError::InvalidEntry {
+                path: final_path.clone(),
+                reason: error.to_string(),
+            })?;
         fs::write(&tmp, content).map_err(|source| CacheError::Io {
             path: tmp.clone(),
             source,
         })?;
         match fs::rename(&tmp, &final_path) {
             Ok(()) => Ok(()),
-            Err(source) => Err(CacheError::Io { path: final_path, source }),
+            Err(source) => Err(CacheError::Io {
+                path: final_path,
+                source,
+            }),
         }
     }
 }
 
 fn parse_key(manifest: &Manifest) -> Result<ContentDigest, CacheError> {
-    manifest.action_key.parse::<ContentDigest>().map_err(|_| CacheError::InvalidEntry {
-        path: PathBuf::from("<manifest>"),
-        reason: format!("unparsable action key {}", manifest.action_key),
-    })
+    manifest
+        .action_key
+        .parse::<ContentDigest>()
+        .map_err(|_| CacheError::InvalidEntry {
+            path: PathBuf::from("<manifest>"),
+            reason: format!("unparsable action key {}", manifest.action_key),
+        })
 }
 
 /// Reject absolute paths, parent traversal, and empty paths in entry
@@ -426,11 +461,7 @@ fn validate_relative(path: &Path) -> Result<String, String> {
 }
 
 fn hex(digest: &ContentDigest) -> String {
-    digest
-        .0
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    digest.0.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -493,10 +524,14 @@ mod tests {
         ];
         let cache = Cache::open(cache_dir.path()).expect("open cache");
         let action_key = key(digest_file(&workspace.path().join("out.txt")).unwrap());
-        cache.store(&action_key, workspace.path(), &outputs).expect("store");
+        cache
+            .store(&action_key, workspace.path(), &outputs)
+            .expect("store");
 
         let entry = cache.lookup(&action_key).expect("lookup").expect("hit");
-        cache.restore(&entry, restored_ws.path(), &outputs).expect("restore");
+        cache
+            .restore(&entry, restored_ws.path(), &outputs)
+            .expect("restore");
         assert_eq!(
             fs::read(restored_ws.path().join("out.txt")).expect("restored file"),
             b"artifact"
@@ -525,14 +560,23 @@ mod tests {
         let cache = Cache::open(cache_dir.path()).expect("open cache");
         let action_key = key(digest_file(&workspace.path().join("out.txt")).unwrap());
         let outputs = vec![(PathBuf::from("out.txt"), OutputKind::File)];
-        cache.store(&action_key, workspace.path(), &outputs).expect("first store");
+        cache
+            .store(&action_key, workspace.path(), &outputs)
+            .expect("first store");
         // Change the file; the stored entry must remain immutable.
         workspace.write("out.txt", b"two");
-        cache.store(&action_key, workspace.path(), &outputs).expect("second store");
+        cache
+            .store(&action_key, workspace.path(), &outputs)
+            .expect("second store");
         let restored = TempDir::new("noop-restore");
         let entry = cache.lookup(&action_key).expect("lookup").expect("hit");
-        cache.restore(&entry, restored.path(), &outputs).expect("restore");
-        assert_eq!(fs::read(restored.path().join("out.txt")).expect("restored"), b"one");
+        cache
+            .restore(&entry, restored.path(), &outputs)
+            .expect("restore");
+        assert_eq!(
+            fs::read(restored.path().join("out.txt")).expect("restored"),
+            b"one"
+        );
     }
 
     #[test]
@@ -543,7 +587,9 @@ mod tests {
         let cache = Cache::open(cache_dir.path()).expect("open cache");
         let action_key = key(digest_file(&workspace.path().join("out.txt")).unwrap());
         let outputs = vec![(PathBuf::from("out.txt"), OutputKind::File)];
-        cache.store(&action_key, workspace.path(), &outputs).expect("store");
+        cache
+            .store(&action_key, workspace.path(), &outputs)
+            .expect("store");
 
         // Corrupt the single stored blob in place.
         let blob = cache.root().join("blobs");
@@ -557,8 +603,13 @@ mod tests {
 
         let entry = cache.lookup(&action_key).expect("lookup").expect("hit");
         let restored = TempDir::new("corrupt-restore");
-        let error = cache.restore(&entry, restored.path(), &outputs).unwrap_err();
-        assert!(matches!(error, CacheError::Integrity { .. }), "got {error:?}");
+        let error = cache
+            .restore(&entry, restored.path(), &outputs)
+            .unwrap_err();
+        assert!(
+            matches!(error, CacheError::Integrity { .. }),
+            "got {error:?}"
+        );
         // The bad output must not be left behind for the build to consume.
         assert!(
             !restored.path().join("out.txt").exists(),
@@ -574,7 +625,9 @@ mod tests {
         let cache = Cache::open(cache_dir.path()).expect("open cache");
         let action_key = key(digest_file(&workspace.path().join("out.txt")).unwrap());
         let outputs = vec![(PathBuf::from("out.txt"), OutputKind::File)];
-        cache.store(&action_key, workspace.path(), &outputs).expect("store");
+        cache
+            .store(&action_key, workspace.path(), &outputs)
+            .expect("store");
         let blob = cache.root().join("blobs");
         let blob_path = fs::read_dir(&blob)
             .expect("read blobs")
@@ -620,12 +673,20 @@ mod tests {
         let outputs_b = vec![(PathBuf::from("b.txt"), OutputKind::File)];
         let key_a = key(digest_file(&workspace.path().join("a.txt")).unwrap());
         let key_b = key(digest_file(&workspace.path().join("b.txt")).unwrap());
-        cache.store(&key_a, workspace.path(), &outputs_a).expect("store a");
-        cache.store(&key_b, workspace.path(), &outputs_b).expect("store b");
+        cache
+            .store(&key_a, workspace.path(), &outputs_a)
+            .expect("store a");
+        cache
+            .store(&key_b, workspace.path(), &outputs_b)
+            .expect("store b");
         let blobs: Vec<_> = fs::read_dir(cache.root().join("blobs"))
             .expect("read blobs")
             .collect();
-        assert_eq!(blobs.len(), 1, "identical content must deduplicate to one blob");
+        assert_eq!(
+            blobs.len(),
+            1,
+            "identical content must deduplicate to one blob"
+        );
     }
 
     #[test]

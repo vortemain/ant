@@ -2,13 +2,13 @@ use build_action::{Action, CachePolicy};
 use build_events::EventKind;
 use build_graph::BuildGraph;
 use local_executor::CancellationToken;
-use scheduler::{print_action_key, print_digests, run_plan, EventStream};
+use scheduler::{EventStream, print_action_key, print_digests, run_plan};
 use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Mutex;
 
 mod cache_runner;
 mod isolation;
@@ -50,7 +50,11 @@ fn run() -> Result<u8, String> {
         return isolation::runner_main(args);
     }
     if command != "run" {
-        return Err(format!("unknown command '{}'.\n{}", command.to_string_lossy(), usage()));
+        return Err(format!(
+            "unknown command '{}'.\n{}",
+            command.to_string_lossy(),
+            usage()
+        ));
     }
 
     let mut workspace = None;
@@ -97,39 +101,60 @@ fn run() -> Result<u8, String> {
             }
             sandbox = true;
         } else if arg == "--workspace" {
-            workspace = Some(PathBuf::from(args.next().ok_or("--workspace requires a path")?));
+            workspace = Some(PathBuf::from(
+                args.next().ok_or("--workspace requires a path")?,
+            ));
         } else if arg == "--cwd" {
-            cwd = PathBuf::from(args.next().ok_or("--cwd requires a workspace-relative path")?);
+            cwd = PathBuf::from(
+                args.next()
+                    .ok_or("--cwd requires a workspace-relative path")?,
+            );
             cwd_was_set = true;
         } else if arg == "--plan" {
             if plan_path.is_some() {
                 return Err("--plan may only be specified once".to_owned());
             }
-            plan_path = Some(PathBuf::from(args.next().ok_or("--plan requires a file path")?));
+            plan_path = Some(PathBuf::from(
+                args.next().ok_or("--plan requires a file path")?,
+            ));
         } else if arg == "--cancel-file" {
             if cancel_file.is_some() {
                 return Err("--cancel-file may only be specified once".to_owned());
             }
-            cancel_file = Some(PathBuf::from(args.next().ok_or("--cancel-file requires a file path")?));
+            cancel_file = Some(PathBuf::from(
+                args.next().ok_or("--cancel-file requires a file path")?,
+            ));
         } else if arg == "--timeout-ms" {
             if timeout_ms.is_some() {
                 return Err("--timeout-ms may only be specified once".to_owned());
             }
-            let value = args.next().ok_or("--timeout-ms requires a positive integer")?;
-            timeout_ms = Some(value.to_string_lossy().parse::<u64>()
-                .map_err(|_| "--timeout-ms requires a positive integer")?);
+            let value = args
+                .next()
+                .ok_or("--timeout-ms requires a positive integer")?;
+            timeout_ms = Some(
+                value
+                    .to_string_lossy()
+                    .parse::<u64>()
+                    .map_err(|_| "--timeout-ms requires a positive integer")?,
+            );
         } else if arg == "--jobs" {
             if jobs.is_some() {
                 return Err("--jobs may only be specified once".to_owned());
             }
             let value = args.next().ok_or("--jobs requires a positive integer")?;
-            jobs = Some(value.to_string_lossy().parse::<usize>()
-                .map_err(|_| "--jobs requires a positive integer")?);
+            jobs = Some(
+                value
+                    .to_string_lossy()
+                    .parse::<usize>()
+                    .map_err(|_| "--jobs requires a positive integer")?,
+            );
         } else if arg == "--memory-mb" {
             if memory_mb.is_some() {
                 return Err("--memory-mb may only be specified once".to_owned());
             }
-            let value = args.next().ok_or("--memory-mb requires a positive integer")?;
+            let value = args
+                .next()
+                .ok_or("--memory-mb requires a positive integer")?;
             let parsed = value
                 .to_string_lossy()
                 .parse::<u64>()
@@ -142,14 +167,22 @@ fn run() -> Result<u8, String> {
             if events_path.is_some() {
                 return Err("--events may only be specified once".to_owned());
             }
-            events_path = Some(PathBuf::from(args.next().ok_or("--events requires a file path")?));
+            events_path = Some(PathBuf::from(
+                args.next().ok_or("--events requires a file path")?,
+            ));
         } else if arg == "--cache-dir" {
             if cache_dir.is_some() {
                 return Err("--cache-dir may only be specified once".to_owned());
             }
-            cache_dir = Some(PathBuf::from(args.next().ok_or("--cache-dir requires a directory path")?));
+            cache_dir = Some(PathBuf::from(
+                args.next().ok_or("--cache-dir requires a directory path")?,
+            ));
         } else {
-            return Err(format!("unexpected argument '{}'.\n{}", arg.to_string_lossy(), usage()));
+            return Err(format!(
+                "unexpected argument '{}'.\n{}",
+                arg.to_string_lossy(),
+                usage()
+            ));
         }
     }
     if passthrough && plan_path.is_some() {
@@ -159,7 +192,10 @@ fn run() -> Result<u8, String> {
         return Err("--cwd applies only to the single-command form".to_owned());
     }
     if plan_path.is_some() && timeout_ms.is_some() {
-        return Err("--timeout-ms applies only to the single-command form; set timeout_ms in the plan".to_owned());
+        return Err(
+            "--timeout-ms applies only to the single-command form; set timeout_ms in the plan"
+                .to_owned(),
+        );
     }
     if plan_path.is_none() && jobs.is_some() {
         return Err("--jobs applies only to plan execution".to_owned());
@@ -187,16 +223,26 @@ fn run() -> Result<u8, String> {
         return Err("--cache-dir applies only to 'ant run --plan'".to_owned());
     }
     let jobs = jobs.unwrap_or(1);
-    let workspace = workspace.unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?)
-        .canonicalize().map_err(|error| format!("cannot access workspace: {error}"))?;
-    let cancellation = cancel_file.map_or_else(CancellationToken::new, CancellationToken::from_file);
+    let workspace = workspace
+        .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?)
+        .canonicalize()
+        .map_err(|error| format!("cannot access workspace: {error}"))?;
+    let cancellation =
+        cancel_file.map_or_else(CancellationToken::new, CancellationToken::from_file);
     install_ctrl_c_handler(&cancellation);
     let events = Mutex::new(EventStream::create(events_path, new_run_id())?);
     if let Some(plan_path) = plan_path {
         // Verified before any action starts; fails closed when not ready.
-        let isolated = if network_isolated { Some(isolation::load_account()?) } else { None };
+        let isolated = if network_isolated {
+            Some(isolation::load_account()?)
+        } else {
+            None
+        };
         let options = scheduler::RunOptions {
-            capacity: scheduler::Capacity { cpu: jobs as u64, memory_mb },
+            capacity: scheduler::Capacity {
+                cpu: jobs as u64,
+                memory_mb,
+            },
             keep_going,
             exec: cache_runner::ExecConfig {
                 // Network isolation always includes write confinement.
@@ -205,7 +251,14 @@ fn run() -> Result<u8, String> {
                 isolated,
             },
         };
-        return execute_plan(&workspace, &plan_path, &cancellation, options, cache_dir.as_deref(), &events);
+        return execute_plan(
+            &workspace,
+            &plan_path,
+            &cancellation,
+            options,
+            cache_dir.as_deref(),
+            &events,
+        );
     }
     if !passthrough || process_args.is_empty() {
         return Err(usage().to_owned());
@@ -223,10 +276,18 @@ fn run() -> Result<u8, String> {
         timeout_ms,
         resources: None,
     };
-    events.lock().expect("events lock").emit(EventKind::RunStarted {
-        mode: build_events::RunMode::SingleCommand,
-    });
-    events.lock().expect("events lock").emit(EventKind::ActionStarted { action_id: action.id.clone() });
+    events
+        .lock()
+        .expect("events lock")
+        .emit(EventKind::RunStarted {
+            mode: build_events::RunMode::SingleCommand,
+        });
+    events
+        .lock()
+        .expect("events lock")
+        .emit(EventKind::ActionStarted {
+            action_id: action.id.clone(),
+        });
     let result = match if sandbox {
         local_executor::execute_sandboxed_cancellable(&workspace, &action, &cancellation)
     } else {
@@ -235,42 +296,77 @@ fn run() -> Result<u8, String> {
         Ok(result) => result,
         Err(local_executor::ExecutionError::Cancelled) => {
             println!("action={} status=cancelled", action.id);
-            emit_single_finish(&events, &action.id, build_events::RunOutcome::Cancelled, scheduler::ActionFinishFacts::minimal(build_events::ActionStatus::Cancelled));
+            emit_single_finish(
+                &events,
+                &action.id,
+                build_events::RunOutcome::Cancelled,
+                scheduler::ActionFinishFacts::minimal(build_events::ActionStatus::Cancelled),
+            );
             return Ok(130);
         }
         Err(error) => {
-            emit_single_finish(&events, &action.id, build_events::RunOutcome::Failed, scheduler::ActionFinishFacts {
-                status: build_events::ActionStatus::Failed,
-                error: Some(error.to_string()),
-                ..scheduler::ActionFinishFacts::minimal(build_events::ActionStatus::Failed)
-            });
+            emit_single_finish(
+                &events,
+                &action.id,
+                build_events::RunOutcome::Failed,
+                scheduler::ActionFinishFacts {
+                    status: build_events::ActionStatus::Failed,
+                    error: Some(error.to_string()),
+                    ..scheduler::ActionFinishFacts::minimal(build_events::ActionStatus::Failed)
+                },
+            );
             return Err(error.to_string());
         }
     };
     if result.cancelled {
         println!("action={} status=cancelled", result.action_id);
-        emit_single_finish(&events, &result.action_id, build_events::RunOutcome::Cancelled, scheduler::ActionFinishFacts::minimal(build_events::ActionStatus::Cancelled));
+        emit_single_finish(
+            &events,
+            &result.action_id,
+            build_events::RunOutcome::Cancelled,
+            scheduler::ActionFinishFacts::minimal(build_events::ActionStatus::Cancelled),
+        );
         return Ok(130);
     }
     if result.timed_out {
         println!("action={} status=timed_out", result.action_id);
-        emit_single_finish(&events, &result.action_id, build_events::RunOutcome::TimedOut, scheduler::ActionFinishFacts {
-            status: build_events::ActionStatus::TimedOut,
-            exit_code: result.status.code(),
-            ..scheduler::ActionFinishFacts::minimal(build_events::ActionStatus::TimedOut)
-        });
+        emit_single_finish(
+            &events,
+            &result.action_id,
+            build_events::RunOutcome::TimedOut,
+            scheduler::ActionFinishFacts {
+                status: build_events::ActionStatus::TimedOut,
+                exit_code: result.status.code(),
+                ..scheduler::ActionFinishFacts::minimal(build_events::ActionStatus::TimedOut)
+            },
+        );
         return Ok(124);
     }
-    println!("action={} exit_code={}", result.action_id, result.status.code().map_or_else(|| "signal".to_owned(), |n| n.to_string()));
+    println!(
+        "action={} exit_code={}",
+        result.action_id,
+        result
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |n| n.to_string())
+    );
     print_digests("input", &result.input_digests);
     print_digests("output", &result.output_digests);
     let key = print_action_key(&action, &result.input_digests, &workspace, sandbox)?;
     emit_single_finish(
         &events,
         &result.action_id,
-        if result.success() { build_events::RunOutcome::Succeeded } else { build_events::RunOutcome::Failed },
+        if result.success() {
+            build_events::RunOutcome::Succeeded
+        } else {
+            build_events::RunOutcome::Failed
+        },
         scheduler::ActionFinishFacts {
-            status: if result.success() { build_events::ActionStatus::Succeeded } else { build_events::ActionStatus::Failed },
+            status: if result.success() {
+                build_events::ActionStatus::Succeeded
+            } else {
+                build_events::ActionStatus::Failed
+            },
             exit_code: result.status.code(),
             input_digests: &result.input_digests,
             output_digests: &result.output_digests,
@@ -289,11 +385,14 @@ fn emit_single_finish(
     facts: scheduler::ActionFinishFacts,
 ) {
     scheduler::emit_action_finished(events, action_id, facts);
-    events.lock().expect("events lock").emit(build_events::EventKind::RunFinished {
-        outcome,
-        executed: 1,
-        skipped: 0,
-    });
+    events
+        .lock()
+        .expect("events lock")
+        .emit(build_events::EventKind::RunFinished {
+            outcome,
+            executed: 1,
+            skipped: 0,
+        });
 }
 
 /// Derive a per-invocation run identifier from the wall clock and process ID
@@ -308,7 +407,8 @@ fn new_run_id() -> u64 {
     hasher.finish()
 }
 
-fn install_ctrl_c_handler(cancellation: &CancellationToken) {    let token = cancellation.clone();
+fn install_ctrl_c_handler(cancellation: &CancellationToken) {
+    let token = cancellation.clone();
     let installed = ctrlc::set_handler(move || {
         token.cancel();
     });
@@ -351,19 +451,29 @@ fn plan_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u8
             if plan_path.is_some() {
                 return Err("--plan may only be specified once".to_owned());
             }
-            plan_path = Some(PathBuf::from(args.next().ok_or("--plan requires a file path")?));
+            plan_path = Some(PathBuf::from(
+                args.next().ok_or("--plan requires a file path")?,
+            ));
         } else if option == "--cache-dir" {
             if cache_dir.is_some() {
                 return Err("--cache-dir may only be specified once".to_owned());
             }
-            cache_dir = Some(PathBuf::from(args.next().ok_or("--cache-dir requires a directory path")?));
+            cache_dir = Some(PathBuf::from(
+                args.next().ok_or("--cache-dir requires a directory path")?,
+            ));
         } else if option == "--workspace" {
             if workspace.is_some() {
                 return Err("--workspace may only be specified once".to_owned());
             }
-            workspace = Some(PathBuf::from(args.next().ok_or("--workspace requires a path")?));
+            workspace = Some(PathBuf::from(
+                args.next().ok_or("--workspace requires a path")?,
+            ));
         } else {
-            return Err(format!("unexpected argument '{}' to plan {}", option.to_string_lossy(), subcommand));
+            return Err(format!(
+                "unexpected argument '{}' to plan {}",
+                option.to_string_lossy(),
+                subcommand
+            ));
         }
     }
     let Some(path) = plan_path else {
@@ -382,18 +492,37 @@ fn plan_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u8
         return explain_plan(&graph, &path, cache_dir.as_deref(), workspace.as_deref());
     }
     let nodes = graph.ordered_nodes().map_err(|error| error.to_string())?;
-    println!("plan={} status=valid actions={}", path.display(), nodes.len());
+    println!(
+        "plan={} status=valid actions={}",
+        path.display(),
+        nodes.len()
+    );
     for node in nodes {
         if subcommand == "validate" {
             println!("action={} status=planned", node.action.id);
             continue;
         }
         let argv = serde_json::to_string(&node.action.argv).map_err(|error| error.to_string())?;
-        let dependencies = if node.dependencies.is_empty() { "-".to_owned() } else { node.dependencies.join(",") };
-        let timeout = node.action.timeout_ms.map_or_else(|| "none".to_owned(), |ms| format!("{ms}ms"));
-        let cache_policy = serde_json::to_string(&node.action.cache_policy).map_err(|error| error.to_string())?;
-        println!("action={} dependencies={} cwd={} argv={} cache_policy={} timeout={}",
-            node.action.id, dependencies, node.action.working_directory.display(), argv, cache_policy, timeout);
+        let dependencies = if node.dependencies.is_empty() {
+            "-".to_owned()
+        } else {
+            node.dependencies.join(",")
+        };
+        let timeout = node
+            .action
+            .timeout_ms
+            .map_or_else(|| "none".to_owned(), |ms| format!("{ms}ms"));
+        let cache_policy =
+            serde_json::to_string(&node.action.cache_policy).map_err(|error| error.to_string())?;
+        println!(
+            "action={} dependencies={} cwd={} argv={} cache_policy={} timeout={}",
+            node.action.id,
+            dependencies,
+            node.action.working_directory.display(),
+            argv,
+            cache_policy,
+            timeout
+        );
         for input in &node.action.inputs {
             println!("  input={} kind={:?}", input.path.display(), input.kind);
         }
@@ -410,7 +539,12 @@ fn plan_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u8
 /// given — whether an entry under that key already exists.
 ///
 /// No cache lookup feeds execution here; reuse is not wired into `ant run`.
-fn explain_plan(graph: &BuildGraph, plan_path: &Path, cache_dir: Option<&Path>, workspace_arg: Option<&Path>) -> Result<u8, String> {
+fn explain_plan(
+    graph: &BuildGraph,
+    plan_path: &Path,
+    cache_dir: Option<&Path>,
+    workspace_arg: Option<&Path>,
+) -> Result<u8, String> {
     let nodes = graph.ordered_nodes().map_err(|error| error.to_string())?;
     let cache = cache_dir
         .map(build_cache::Cache::open)
@@ -463,14 +597,22 @@ fn explain_plan(graph: &BuildGraph, plan_path: &Path, cache_dir: Option<&Path>, 
         if let Some(cache) = &cache {
             println!(
                 "  cache_entry={}",
-                if cache.entry_exists(&candidate.digest) { "present" } else { "absent" }
+                if cache.entry_exists(&candidate.digest) {
+                    "present"
+                } else {
+                    "absent"
+                }
             );
         }
     }
     println!(
         "plan={} explain=complete result={}",
         plan_path.display(),
-        if preparable { "prepared" } else { "prepare_failed" }
+        if preparable {
+            "prepared"
+        } else {
+            "prepare_failed"
+        }
     );
     Ok(if preparable { 0 } else { 1 })
 }
@@ -496,12 +638,16 @@ fn adapt_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u
             if project.is_some() {
                 return Err("--project may only be specified once".to_owned());
             }
-            project = Some(PathBuf::from(args.next().ok_or("--project requires a path")?));
+            project = Some(PathBuf::from(
+                args.next().ok_or("--project requires a path")?,
+            ));
         } else if option == "--out" {
             if out.is_some() {
                 return Err("--out may only be specified once".to_owned());
             }
-            out = Some(PathBuf::from(args.next().ok_or("--out requires a file path")?));
+            out = Some(PathBuf::from(
+                args.next().ok_or("--out requires a file path")?,
+            ));
         } else if option == "--option" {
             let assignment = args.next().ok_or("--option requires KEY=VALUE")?;
             adapter_options
@@ -513,18 +659,25 @@ fn adapt_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u
             }
             detect_only = true;
         } else {
-            return Err(format!("unexpected argument '{}' to adapt", option.to_string_lossy()));
+            return Err(format!(
+                "unexpected argument '{}' to adapt",
+                option.to_string_lossy()
+            ));
         }
     }
-    const ADAPT_USAGE: &str =
-        "usage: ant adapt [--adapter NAME] [--project PATH] [--option KEY=VALUE ...] --out PLAN.json | ant adapt --detect [--project PATH]";
+    const ADAPT_USAGE: &str = "usage: ant adapt [--adapter NAME] [--project PATH] [--option KEY=VALUE ...] --out PLAN.json | ant adapt --detect [--project PATH]";
     let project_path = project.unwrap_or_else(|| PathBuf::from("."));
     if !project_path.is_dir() {
-        return Err(format!("project directory {} does not exist", project_path.display()));
+        return Err(format!(
+            "project directory {} does not exist",
+            project_path.display()
+        ));
     }
     if detect_only {
         if adapter_name.is_some() || out.is_some() || !adapter_options.is_empty() {
-            return Err("--detect cannot be combined with --adapter, --option, or --out".to_owned());
+            return Err(
+                "--detect cannot be combined with --adapter, --option, or --out".to_owned(),
+            );
         }
         return Ok(detect_command(&project_path));
     }
@@ -539,7 +692,9 @@ fn adapt_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u
                     .map(|candidate| candidate.name())
                     .collect::<Vec<_>>()
                     .join(", ");
-                return Err(format!("unknown adapter '{name}'; available adapters: {names}"));
+                return Err(format!(
+                    "unknown adapter '{name}'; available adapters: {names}"
+                ));
             };
             let detection = adapter
                 .detect(&project_path)
@@ -555,7 +710,10 @@ fn adapt_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<u
         }
         None => {
             let adapter = build_adapter::select_adapter(&project_path).map_err(|error| {
-                format!("cannot select an adapter for project {}: {error}", project_path.display())
+                format!(
+                    "cannot select an adapter for project {}: {error}",
+                    project_path.display()
+                )
             })?;
             (adapter, "auto")
         }
@@ -606,7 +764,10 @@ fn detect_command(project_path: &Path) -> u8 {
             ),
         }
     }
-    println!("detect project={} supported_adapters={supported}", project_path.display());
+    println!(
+        "detect project={} supported_adapters={supported}",
+        project_path.display()
+    );
     u8::from(supported == 0)
 }
 
@@ -620,7 +781,10 @@ fn load_graph(plan_path: &Path) -> Result<BuildGraph, String> {
     let plan: build_graph::PlanFile = serde_json::from_str(content)
         .map_err(|error| format!("invalid plan {}: {error}", plan_path.display()))?;
     if plan.schema_version != build_graph::PLAN_SCHEMA_VERSION {
-        return Err(format!("unsupported plan schema version {}", plan.schema_version));
+        return Err(format!(
+            "unsupported plan schema version {}",
+            plan.schema_version
+        ));
     }
     if plan.actions.is_empty() {
         return Err("plan must contain at least one action".to_owned());

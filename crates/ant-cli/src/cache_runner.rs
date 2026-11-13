@@ -13,7 +13,9 @@ use build_action::{Action, OutputKind};
 use build_cache::Cache;
 use build_digest::{ActionKeyCandidate, ContentDigest, ExecutionFingerprint};
 use local_executor::IsolatedAccount;
-use local_executor::{self, ActionContentDigest, CancellationToken, ExecutionError, ExecutionResult, PreparedAction};
+use local_executor::{
+    self, ActionContentDigest, CancellationToken, ExecutionError, ExecutionResult, PreparedAction,
+};
 use std::path::Path;
 
 /// One action's outcome on the run path, cache-aware.
@@ -98,7 +100,11 @@ pub fn run_action(
     cancellation: &CancellationToken,
     exec: ExecConfig,
 ) -> Result<ActionRun, ExecutionError> {
-    let ExecConfig { sandbox, enforce_memory, isolated } = exec;
+    let ExecConfig {
+        sandbox,
+        enforce_memory,
+        isolated,
+    } = exec;
     let mut prepared = local_executor::prepare_with_metadata(workspace, action)?;
     if enforce_memory {
         prepared.enforce_memory_limit();
@@ -261,7 +267,11 @@ mod tests {
         Action {
             schema_version: 1,
             id: "gen".to_owned(),
-            argv: vec!["cmd".to_owned(), "/C".to_owned(), "echo hi > out.txt".to_owned()],
+            argv: vec![
+                "cmd".to_owned(),
+                "/C".to_owned(),
+                "echo hi > out.txt".to_owned(),
+            ],
             working_directory: std::path::PathBuf::from("."),
             inputs: vec![Input {
                 path: std::path::PathBuf::from("in.txt"),
@@ -293,7 +303,9 @@ mod tests {
         let outputs = vec![(std::path::PathBuf::from("out.txt"), OutputKind::File)];
         // The key is synthetic: no executor can produce an eligible key yet.
         let key = build_digest::digest_file(&workspace.path().join("in.txt")).expect("digest");
-        cache.store(&key, workspace.path(), &outputs).expect("store");
+        cache
+            .store(&key, workspace.path(), &outputs)
+            .expect("store");
 
         // Remove the output to prove it came back from the cache.
         fs::remove_file(workspace.path().join("out.txt")).expect("remove output");
@@ -334,7 +346,9 @@ mod tests {
         let cache = Cache::open(cache_dir.path()).expect("open cache");
         let outputs = vec![(std::path::PathBuf::from("out.txt"), OutputKind::File)];
         let key = build_digest::digest_file(&workspace.path().join("in.txt")).expect("digest");
-        cache.store(&key, workspace.path(), &outputs).expect("store");
+        cache
+            .store(&key, workspace.path(), &outputs)
+            .expect("store");
 
         // Corrupt the stored blob in place.
         let blob_dir = cache.root().join("blobs");
@@ -370,6 +384,9 @@ mod tests {
         file.write("occupied", b"x");
         let error = CacheParticipant::new(Some(&file.path().join("occupied")))
             .expect_err("a file cannot be a cache root");
-        assert!(error.contains("could not open cache directory"), "was {error}");
+        assert!(
+            error.contains("could not open cache directory"),
+            "was {error}"
+        );
     }
 }

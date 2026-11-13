@@ -175,9 +175,14 @@ fn logon_sid_bytes(token: HANDLE) -> Result<Vec<u8>, SandboxError> {
     let aligned = (after_count + (align - 1)) & !(align - 1);
     for index in 0..count {
         // SAFETY: entries live inside `buffer`, which stays alive here.
-        let entry: SID_AND_ATTRIBUTES =
-            unsafe { std::ptr::read_unaligned((aligned + index * std::mem::size_of::<SID_AND_ATTRIBUTES>()) as *const SID_AND_ATTRIBUTES) };
-        if entry.Attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID {            // SAFETY: `entry.Sid` points into `buffer`, valid here.
+        let entry: SID_AND_ATTRIBUTES = unsafe {
+            std::ptr::read_unaligned(
+                (aligned + index * std::mem::size_of::<SID_AND_ATTRIBUTES>())
+                    as *const SID_AND_ATTRIBUTES,
+            )
+        };
+        if entry.Attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID {
+            // SAFETY: `entry.Sid` points into `buffer`, valid here.
             let length = unsafe { GetLengthSid(entry.Sid) };
             if length == 0 {
                 break;
@@ -199,7 +204,14 @@ fn logon_sid_bytes(token: HANDLE) -> Result<Vec<u8>, SandboxError> {
 fn everyone_sid_bytes() -> Result<Vec<u8>, SandboxError> {
     let mut size: u32 = 0;
     // SAFETY: first call with null buffer is the documented size probe.
-    unsafe { CreateWellKnownSid(WIN_WORLD_SID, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) };
+    unsafe {
+        CreateWellKnownSid(
+            WIN_WORLD_SID,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
     if size == 0 {
         return Err(SandboxError::Windows {
             call: "CreateWellKnownSid (probe)",
@@ -251,7 +263,12 @@ fn set_default_dacl(token: HANDLE, sids: &[*const c_void]) -> Result<(), Sandbox
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
     // SAFETY: `entries` outlives the call; on success `new_dacl` is owned.
     let result = unsafe {
-        SetEntriesInAclW(entries.len() as u32, entries.as_ptr(), std::ptr::null_mut(), &mut new_dacl)
+        SetEntriesInAclW(
+            entries.len() as u32,
+            entries.as_ptr(),
+            std::ptr::null_mut(),
+            &mut new_dacl,
+        )
     };
     if result != ERROR_SUCCESS {
         return Err(SandboxError::Windows {
@@ -259,7 +276,9 @@ fn set_default_dacl(token: HANDLE, sids: &[*const c_void]) -> Result<(), Sandbox
             code: result as u32,
         });
     }
-    let info = TokenDefaultDaclInfo { default_dacl: new_dacl };
+    let info = TokenDefaultDaclInfo {
+        default_dacl: new_dacl,
+    };
     // SAFETY: `info`/`new_dacl` are valid for the call.
     let ok = unsafe {
         windows_sys::Win32::Security::SetTokenInformation(
@@ -284,7 +303,10 @@ fn set_default_dacl(token: HANDLE, sids: &[*const c_void]) -> Result<(), Sandbox
 /// Enable a single privilege on the token (used for bypass-traverse-checking
 /// so the confined process can walk directories it can read).
 fn enable_privilege(token: HANDLE, name: &str) -> Result<(), SandboxError> {
-    let mut luid = LUID { LowPart: 0, HighPart: 0 };
+    let mut luid = LUID {
+        LowPart: 0,
+        HighPart: 0,
+    };
     let wide = crate::winutil::to_wide(name);
     // SAFETY: `wide` outlives the call.
     let ok = unsafe { LookupPrivilegeValueW(std::ptr::null(), wide.as_ptr(), &mut luid) };
@@ -299,7 +321,16 @@ fn enable_privilege(token: HANDLE, name: &str) -> Result<(), SandboxError> {
     privileges.Privileges[0].Luid = luid;
     privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
     // SAFETY: `privileges` outlives the call.
-    let ok = unsafe { AdjustTokenPrivileges(token, 0, &privileges, 0, std::ptr::null_mut(), std::ptr::null_mut()) };
+    let ok = unsafe {
+        AdjustTokenPrivileges(
+            token,
+            0,
+            &privileges,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
     if ok == 0 {
         return Err(SandboxError::Windows {
             call: "AdjustTokenPrivileges",
@@ -336,9 +367,18 @@ pub(crate) fn create_workspace_write_restricted_token(
 
     // Order matters for the reference design: capability, logon, everyone.
     let entries: [SID_AND_ATTRIBUTES; 3] = [
-        SID_AND_ATTRIBUTES { Sid: capability.as_ptr() as *mut _, Attributes: 0 },
-        SID_AND_ATTRIBUTES { Sid: psid_logon as *mut _, Attributes: 0 },
-        SID_AND_ATTRIBUTES { Sid: psid_everyone as *mut _, Attributes: 0 },
+        SID_AND_ATTRIBUTES {
+            Sid: capability.as_ptr() as *mut _,
+            Attributes: 0,
+        },
+        SID_AND_ATTRIBUTES {
+            Sid: psid_logon as *mut _,
+            Attributes: 0,
+        },
+        SID_AND_ATTRIBUTES {
+            Sid: psid_everyone as *mut _,
+            Attributes: 0,
+        },
     ];
     let flags = DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED;
     let mut restricted: HANDLE = std::ptr::null_mut();
@@ -363,7 +403,10 @@ pub(crate) fn create_workspace_write_restricted_token(
             code: unsafe { GetLastError() },
         });
     }
-    set_default_dacl(restricted, &[psid_logon, psid_everyone, capability.as_ptr()])?;
+    set_default_dacl(
+        restricted,
+        &[psid_logon, psid_everyone, capability.as_ptr()],
+    )?;
     enable_privilege(restricted, "SeChangeNotifyPrivilege")?;
     Ok(TokenHandle(restricted))
 }

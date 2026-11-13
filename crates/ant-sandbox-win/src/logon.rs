@@ -63,8 +63,14 @@ pub fn unprotect_secure_string_hex(hex: &str) -> Result<Secret, SandboxError> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("validated hex"))
         .collect();
-    let input = CRYPT_INTEGER_BLOB { cbData: blob.len() as u32, pbData: blob.as_mut_ptr() };
-    let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: blob.len() as u32,
+        pbData: blob.as_mut_ptr(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
     // SAFETY: `input` points at a live buffer of the stated size; on success
     // `output.pbData` is a LocalAlloc'd buffer we free below.
     let ok = unsafe {
@@ -79,7 +85,10 @@ pub fn unprotect_secure_string_hex(hex: &str) -> Result<Secret, SandboxError> {
         )
     };
     if ok == 0 {
-        return Err(SandboxError::Windows { call: "CryptUnprotectData", code: unsafe { GetLastError() } });
+        return Err(SandboxError::Windows {
+            call: "CryptUnprotectData",
+            code: unsafe { GetLastError() },
+        });
     }
     let units = output.cbData as usize / 2;
     let mut secret = Vec::with_capacity(units + 1);
@@ -139,7 +148,10 @@ pub(crate) fn spawn_as_user(
         )
     };
     if ok == 0 {
-        return Err(SandboxError::Windows { call: "CreateProcessWithLogonW", code: unsafe { GetLastError() } });
+        return Err(SandboxError::Windows {
+            call: "CreateProcessWithLogonW",
+            code: unsafe { GetLastError() },
+        });
     }
     finish_spawn(process_info, cwd, memory_limit_bytes, true)
 }

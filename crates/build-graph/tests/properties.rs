@@ -63,7 +63,9 @@ fn action(id: &str) -> Action {
 /// on purpose (the graph must tolerate them).
 fn random_dag(rng: &mut Rng) -> Vec<(String, Vec<String>)> {
     let count = 1 + rng.below(24) as usize;
-    let mut ids: Vec<String> = (0..count).map(|i| format!("n{:03}-{}", rng.below(1000), i)).collect();
+    let mut ids: Vec<String> = (0..count)
+        .map(|i| format!("n{:03}-{}", rng.below(1000), i))
+        .collect();
     rng.shuffle(&mut ids);
     let mut nodes = Vec::with_capacity(count);
     for i in 0..count {
@@ -101,10 +103,21 @@ fn order_is_a_topological_permutation() {
         let mut rng = Rng::new(seed);
         let nodes = random_dag(&mut rng);
         let order = order_of(&build(&nodes).expect("valid DAG builds"));
-        assert_eq!(order.len(), nodes.len(), "seed {seed}: every action appears");
-        let position: HashMap<&str, usize> =
-            order.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
-        assert_eq!(position.len(), nodes.len(), "seed {seed}: no action appears twice");
+        assert_eq!(
+            order.len(),
+            nodes.len(),
+            "seed {seed}: every action appears"
+        );
+        let position: HashMap<&str, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        assert_eq!(
+            position.len(),
+            nodes.len(),
+            "seed {seed}: no action appears twice"
+        );
         for (id, dependencies) in &nodes {
             for dependency in dependencies {
                 assert!(
@@ -124,7 +137,11 @@ fn order_is_independent_of_insertion_order() {
         let expected = order_of(&build(&nodes).expect("builds"));
         let mut shuffled = nodes.clone();
         rng.shuffle(&mut shuffled);
-        assert_eq!(order_of(&build(&shuffled).expect("builds")), expected, "seed {seed}");
+        assert_eq!(
+            order_of(&build(&shuffled).expect("builds")),
+            expected,
+            "seed {seed}"
+        );
     }
 }
 
@@ -141,7 +158,8 @@ fn order_starts_ready_actions_smallest_id_first() {
             let smallest_ready = nodes
                 .iter()
                 .filter(|(candidate, deps)| {
-                    !done.contains(candidate.as_str()) && deps.iter().all(|d| done.contains(d.as_str()))
+                    !done.contains(candidate.as_str())
+                        && deps.iter().all(|d| done.contains(d.as_str()))
                 })
                 .map(|(candidate, _)| candidate.as_str())
                 .min()
@@ -168,11 +186,20 @@ fn injected_cycles_are_rejected_and_reported() {
         };
         let dependent = nodes[index].0.clone();
         let dependency = nodes[index].1[0].clone();
-        let target = nodes.iter().position(|(id, _)| *id == dependency).expect("known");
+        let target = nodes
+            .iter()
+            .position(|(id, _)| *id == dependency)
+            .expect("known");
         nodes[target].1.push(dependent.clone());
-        match build(&nodes).expect("adding actions does not check cycles").execution_order() {
+        match build(&nodes)
+            .expect("adding actions does not check cycles")
+            .execution_order()
+        {
             Err(GraphError::Cycle(ids)) => {
-                assert!(ids.contains(&dependent) && ids.contains(&dependency), "seed {seed}: {ids:?}");
+                assert!(
+                    ids.contains(&dependent) && ids.contains(&dependency),
+                    "seed {seed}: {ids:?}"
+                );
                 let mut sorted = ids.clone();
                 sorted.sort();
                 assert_eq!(ids, sorted, "seed {seed}: cycle report is sorted");
@@ -215,7 +242,11 @@ fn duplicate_ids_are_rejected_at_insertion() {
         let mut nodes = random_dag(&mut rng);
         let duplicate = nodes[rng.below(nodes.len() as u64) as usize].0.clone();
         nodes.push((duplicate.clone(), Vec::new()));
-        assert_eq!(build(&nodes).err(), Some(GraphError::DuplicateActionId(duplicate)), "seed {seed}");
+        assert_eq!(
+            build(&nodes).err(),
+            Some(GraphError::DuplicateActionId(duplicate)),
+            "seed {seed}"
+        );
     }
 }
 
@@ -226,12 +257,19 @@ fn plan_file_json_roundtrip_preserves_order() {
         let nodes = random_dag(&mut rng);
         let mut plan = PlanFile::new();
         for (id, dependencies) in &nodes {
-            plan.actions.push(PlanAction { action: action(id), dependencies: dependencies.clone() });
+            plan.actions.push(PlanAction {
+                action: action(id),
+                dependencies: dependencies.clone(),
+            });
         }
         let json = serde_json::to_string(&plan).expect("serialize");
         let parsed: PlanFile = serde_json::from_str(&json).expect("parse");
         assert_eq!(parsed, plan, "seed {seed}");
         let from_plan = parsed.to_graph().expect("valid plan converts");
-        assert_eq!(order_of(&from_plan), order_of(&build(&nodes).expect("builds")), "seed {seed}");
+        assert_eq!(
+            order_of(&from_plan),
+            order_of(&build(&nodes).expect("builds")),
+            "seed {seed}"
+        );
     }
 }

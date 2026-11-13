@@ -4,8 +4,8 @@
 //! Canonical encoding, action-key hashing, remote mappings, and execution are
 //! not owned by this crate yet; see `docs/architecture.md` before extending it.
 
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Whether the action may be considered for cache reuse.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -95,7 +95,10 @@ fn default_cpu() -> u32 {
 
 impl Default for ResourceRequest {
     fn default() -> Self {
-        Self { cpu: 1, memory_mb: None }
+        Self {
+            cpu: 1,
+            memory_mb: None,
+        }
     }
 }
 
@@ -138,12 +141,18 @@ impl Action {
     /// resolution, canonical encoding, and cache completeness are later layers.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.schema_version != 1 {
-            return Err(ValidationError::UnsupportedSchemaVersion(self.schema_version));
+            return Err(ValidationError::UnsupportedSchemaVersion(
+                self.schema_version,
+            ));
         }
         if self.id.trim().is_empty() {
             return Err(ValidationError::EmptyId);
         }
-        if self.argv.first().is_none_or(|program| program.trim().is_empty()) {
+        if self
+            .argv
+            .first()
+            .is_none_or(|program| program.trim().is_empty())
+        {
             return Err(ValidationError::EmptyCommand);
         }
         if self.argv.iter().any(|arg| arg.contains('\0')) {
@@ -209,7 +218,9 @@ fn validate_relative_path(path: &Path) -> Result<(), ValidationError> {
     use std::path::Component;
     if path.as_os_str().is_empty()
         || path.is_absolute()
-        || path.components().any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
     {
         return Err(ValidationError::InvalidPath(path.to_path_buf()));
     }
@@ -226,8 +237,14 @@ mod tests {
             id: "compile".to_owned(),
             argv: vec!["cc".to_owned(), "-c".to_owned(), "main.c".to_owned()],
             working_directory: PathBuf::from("src"),
-            inputs: vec![Input { path: PathBuf::from("src/main.c"), kind: InputKind::File }],
-            outputs: vec![Output { path: PathBuf::from("build/main.o"), kind: OutputKind::File }],
+            inputs: vec![Input {
+                path: PathBuf::from("src/main.c"),
+                kind: InputKind::File,
+            }],
+            outputs: vec![Output {
+                path: PathBuf::from("build/main.o"),
+                kind: OutputKind::File,
+            }],
             environment: vec![("OPT".to_owned(), "2".to_owned())],
             cache_policy: CachePolicy::Never,
             toolchain: None,
@@ -237,7 +254,11 @@ mod tests {
     }
 
     fn assert_error(action: &Action, expected: ValidationError) {
-        assert_eq!(action.validate(), Err(expected), "unexpected validation outcome");
+        assert_eq!(
+            action.validate(),
+            Err(expected),
+            "unexpected validation outcome"
+        );
     }
 
     #[test]
@@ -290,19 +311,40 @@ mod tests {
     #[test]
     fn validates_resource_requests_and_defaults() {
         let mut action = sample();
-        assert_eq!(action.resource_request(), ResourceRequest { cpu: 1, memory_mb: None });
-        action.resources = Some(ResourceRequest { cpu: 4, memory_mb: Some(512) });
+        assert_eq!(
+            action.resource_request(),
+            ResourceRequest {
+                cpu: 1,
+                memory_mb: None
+            }
+        );
+        action.resources = Some(ResourceRequest {
+            cpu: 4,
+            memory_mb: Some(512),
+        });
         assert_eq!(action.validate(), Ok(()));
-        action.resources = Some(ResourceRequest { cpu: 0, memory_mb: None });
+        action.resources = Some(ResourceRequest {
+            cpu: 0,
+            memory_mb: None,
+        });
         assert_error(&action, ValidationError::InvalidResources);
-        action.resources = Some(ResourceRequest { cpu: 1, memory_mb: Some(0) });
+        action.resources = Some(ResourceRequest {
+            cpu: 1,
+            memory_mb: Some(0),
+        });
         assert_error(&action, ValidationError::InvalidResources);
 
         // `cpu` defaults to 1 when only memory is declared; unknown fields are
         // rejected; an action without `resources` serializes without the key
         // (existing plans and adapter output stay byte-identical).
         let parsed: ResourceRequest = serde_json::from_str(r#"{"memory_mb":64}"#).expect("parse");
-        assert_eq!(parsed, ResourceRequest { cpu: 1, memory_mb: Some(64) });
+        assert_eq!(
+            parsed,
+            ResourceRequest {
+                cpu: 1,
+                memory_mb: Some(64)
+            }
+        );
         assert!(serde_json::from_str::<ResourceRequest>(r#"{"gpu":1}"#).is_err());
         let json = serde_json::to_string(&sample()).expect("serialize");
         assert!(!json.contains("resources"), "{json}");
@@ -312,14 +354,20 @@ mod tests {
     fn rejects_absolute_working_directory() {
         let mut action = sample();
         action.working_directory = PathBuf::from("C:\\Windows");
-        assert_error(&action, ValidationError::InvalidPath(PathBuf::from("C:\\Windows")));
+        assert_error(
+            &action,
+            ValidationError::InvalidPath(PathBuf::from("C:\\Windows")),
+        );
     }
 
     #[test]
     fn rejects_parent_directory_traversal() {
         let mut action = sample();
         action.inputs[0].path = PathBuf::from("../secrets.txt");
-        assert_error(&action, ValidationError::InvalidPath(PathBuf::from("../secrets.txt")));
+        assert_error(
+            &action,
+            ValidationError::InvalidPath(PathBuf::from("../secrets.txt")),
+        );
     }
 
     #[test]
@@ -332,15 +380,27 @@ mod tests {
     #[test]
     fn rejects_duplicate_inputs() {
         let mut action = sample();
-        action.inputs.push(Input { path: PathBuf::from("src/main.c"), kind: InputKind::File });
-        assert_error(&action, ValidationError::DuplicateInput(PathBuf::from("src/main.c")));
+        action.inputs.push(Input {
+            path: PathBuf::from("src/main.c"),
+            kind: InputKind::File,
+        });
+        assert_error(
+            &action,
+            ValidationError::DuplicateInput(PathBuf::from("src/main.c")),
+        );
     }
 
     #[test]
     fn rejects_duplicate_outputs() {
         let mut action = sample();
-        action.outputs.push(Output { path: PathBuf::from("build/main.o"), kind: OutputKind::Tree });
-        assert_error(&action, ValidationError::DuplicateOutput(PathBuf::from("build/main.o")));
+        action.outputs.push(Output {
+            path: PathBuf::from("build/main.o"),
+            kind: OutputKind::Tree,
+        });
+        assert_error(
+            &action,
+            ValidationError::DuplicateOutput(PathBuf::from("build/main.o")),
+        );
     }
 
     #[test]
@@ -354,14 +414,20 @@ mod tests {
     fn rejects_environment_key_with_equals() {
         let mut action = sample();
         action.environment = vec![("A=B".to_owned(), "1".to_owned())];
-        assert_error(&action, ValidationError::InvalidEnvironmentKey("A=B".to_owned()));
+        assert_error(
+            &action,
+            ValidationError::InvalidEnvironmentKey("A=B".to_owned()),
+        );
     }
 
     #[test]
     fn rejects_environment_value_with_nul_byte() {
         let mut action = sample();
         action.environment = vec![("A".to_owned(), "\0".to_owned())];
-        assert_error(&action, ValidationError::InvalidEnvironmentValue("A".to_owned()));
+        assert_error(
+            &action,
+            ValidationError::InvalidEnvironmentValue("A".to_owned()),
+        );
     }
 
     #[test]
@@ -371,7 +437,10 @@ mod tests {
             ("A".to_owned(), "1".to_owned()),
             ("A".to_owned(), "2".to_owned()),
         ];
-        assert_error(&action, ValidationError::DuplicateEnvironmentKey("A".to_owned()));
+        assert_error(
+            &action,
+            ValidationError::DuplicateEnvironmentKey("A".to_owned()),
+        );
     }
 
     #[test]

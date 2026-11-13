@@ -41,15 +41,29 @@ fn base64(bytes: &[u8]) -> String {
             | u32::from(*chunk.get(2).unwrap_or(&0));
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
 
 fn run_script(script: &str, dry_run: bool) -> Result<(bool, String), String> {
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+        ])
         .arg(encode_command(script, dry_run))
         .output()
         .map_err(|error| format!("cannot run powershell: {error}"))?;
@@ -66,7 +80,9 @@ pub fn sandbox_command(mut args: impl Iterator<Item = std::ffi::OsString>) -> Re
     if !cfg!(windows) {
         return Err("network isolation is implemented for Windows only".to_owned());
     }
-    let sub = args.next().ok_or("usage: ant sandbox <setup [--dry-run]|status|teardown>")?;
+    let sub = args
+        .next()
+        .ok_or("usage: ant sandbox <setup [--dry-run]|status|teardown>")?;
     let rest: Vec<_> = args.collect();
     let dry_run = rest.iter().any(|arg| arg == "--dry-run");
     if rest.iter().any(|arg| arg != "--dry-run") || (dry_run && sub != "setup") {
@@ -108,7 +124,9 @@ pub fn parse_status(text: &str) -> Option<Status> {
         }
     }
     match (ready, user, user_sid) {
-        (true, Some(user), Some(user_sid)) if !user.is_empty() && user_sid.starts_with("S-1-5-") => {
+        (true, Some(user), Some(user_sid))
+            if !user.is_empty() && user_sid.starts_with("S-1-5-") =>
+        {
             Some(Status { user, user_sid })
         }
         _ => None,
@@ -117,7 +135,10 @@ pub fn parse_status(text: &str) -> Option<Status> {
 
 fn credential_path() -> Result<PathBuf, String> {
     let base = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-    Ok(Path::new(&base).join("Ant").join("sandbox").join("offline.cred"))
+    Ok(Path::new(&base)
+        .join("Ant")
+        .join("sandbox")
+        .join("offline.cred"))
 }
 
 /// Verify the setup and load the sandbox account for this run. Fails closed:
@@ -136,7 +157,8 @@ pub fn load_account() -> Result<&'static local_executor::IsolatedAccount, String
         .map_err(|error| format!("cannot read sandbox credential: {error}"))?;
     let password = ant_sandbox_win::unprotect_secure_string_hex(&hex)
         .map_err(|error| format!("cannot decrypt sandbox credential: {error}"))?;
-    let runner = std::env::current_exe().map_err(|error| format!("cannot locate ant executable: {error}"))?;
+    let runner = std::env::current_exe()
+        .map_err(|error| format!("cannot locate ant executable: {error}"))?;
     // Lives for the rest of the process; plan runs borrow it from every worker.
     Ok(Box::leak(Box::new(local_executor::IsolatedAccount {
         user: status.user,
@@ -158,11 +180,16 @@ pub fn runner_main(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result
     let mut argv = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--workspace" {
-            workspace = Some(PathBuf::from(args.next().ok_or("--workspace requires a path")?));
+            workspace = Some(PathBuf::from(
+                args.next().ok_or("--workspace requires a path")?,
+            ));
         } else if arg == "--" {
             argv.extend(args.by_ref().map(|a| a.to_string_lossy().into_owned()));
         } else {
-            return Err(format!("unexpected runner argument '{}'", arg.to_string_lossy()));
+            return Err(format!(
+                "unexpected runner argument '{}'",
+                arg.to_string_lossy()
+            ));
         }
     }
     let workspace = workspace.ok_or("runner requires --workspace")?;
@@ -206,10 +233,19 @@ mod tests {
         let good = "user=AntSandboxOffline\nuser_sid=S-1-5-21-1-2-3-1001\nready=true\n";
         assert_eq!(
             parse_status(good),
-            Some(Status { user: "AntSandboxOffline".to_owned(), user_sid: "S-1-5-21-1-2-3-1001".to_owned() })
+            Some(Status {
+                user: "AntSandboxOffline".to_owned(),
+                user_sid: "S-1-5-21-1-2-3-1001".to_owned()
+            })
         );
-        assert_eq!(parse_status("user=a\nuser_sid=S-1-5-21-1\nfailed=rule-missing:x\nready=true"), None);
-        assert_eq!(parse_status("user=a\nuser_sid=S-1-5-21-1\nready=false"), None);
+        assert_eq!(
+            parse_status("user=a\nuser_sid=S-1-5-21-1\nfailed=rule-missing:x\nready=true"),
+            None
+        );
+        assert_eq!(
+            parse_status("user=a\nuser_sid=S-1-5-21-1\nready=false"),
+            None
+        );
         assert_eq!(parse_status("ready=true"), None, "identity is required");
         assert_eq!(parse_status("user=a\nuser_sid=bogus\nready=true"), None);
     }

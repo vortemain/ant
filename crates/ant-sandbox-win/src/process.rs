@@ -20,10 +20,10 @@ use windows_sys::Win32::System::Console::STD_INPUT_HANDLE;
 use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
 use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 use windows_sys::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
-use windows_sys::Win32::System::Threading::ResumeThread;
 use windows_sys::Win32::System::Threading::CreateProcessAsUserW;
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
+use windows_sys::Win32::System::Threading::ResumeThread;
 use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
 use windows_sys::Win32::System::Threading::STARTUPINFOW;
 use windows_sys::Win32::System::Threading::TerminateProcess;
@@ -95,7 +95,9 @@ impl Child {
     /// Peak committed memory of the job (child plus descendants), when the
     /// child is job-tracked.
     pub fn peak_memory_bytes(&self) -> Option<u64> {
-        self.job.as_ref().and_then(|job| crate::job::peak_job_memory(job).ok())
+        self.job
+            .as_ref()
+            .and_then(|job| crate::job::peak_job_memory(job).ok())
     }
 
     #[allow(dead_code)]
@@ -177,7 +179,11 @@ pub(crate) fn spawn(
             // With a memory cap the process starts suspended so the cap is
             // in force before its first instruction runs.
             CREATE_UNICODE_ENVIRONMENT
-                | if memory_limit_bytes.is_some() { CREATE_SUSPENDED } else { 0 },
+                | if memory_limit_bytes.is_some() {
+                    CREATE_SUSPENDED
+                } else {
+                    0
+                },
             environment_block.as_ptr() as *const c_void,
             cwd_wide.as_ptr(),
             &startup,
@@ -191,9 +197,13 @@ pub(crate) fn spawn(
         });
     }
 
-    finish_spawn(process_info, cwd, memory_limit_bytes, memory_limit_bytes.is_some())
+    finish_spawn(
+        process_info,
+        cwd,
+        memory_limit_bytes,
+        memory_limit_bytes.is_some(),
+    )
 }
-
 
 /// Shared tail for every spawn path: join a kill-on-close job, apply an
 /// optional memory cap, and resume the process if it was created suspended.
@@ -218,7 +228,9 @@ pub(crate) fn finish_spawn(
     // takes the raw handle as an `isize`, which is the standard Win32 HANDLE
     // representation under that crate's API.
     if let Ok(open_job) = win32job::Job::create_with_limit_info(&info)
-        && open_job.assign_process(process_info.hProcess as isize).is_ok()
+        && open_job
+            .assign_process(process_info.hProcess as isize)
+            .is_ok()
     {
         descendants_tracked = true;
         job = Some(open_job);
@@ -253,7 +265,10 @@ pub(crate) fn finish_spawn(
     if unsafe { ResumeThread(child.process.hThread) } == u32::MAX {
         let code = unsafe { GetLastError() };
         unsafe { TerminateProcess(child.process.hProcess, 1) };
-        return Err(SandboxError::Windows { call: "ResumeThread", code });
+        return Err(SandboxError::Windows {
+            call: "ResumeThread",
+            code,
+        });
     }
     Ok(child)
 }
@@ -271,11 +286,17 @@ pub(crate) fn attach_std_handles(startup: &mut STARTUPINFOW) -> Result<(), Sandb
         // SAFETY: `kind` is a valid std-handle id.
         let handle = unsafe { GetStdHandle(*kind) };
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(SandboxError::Windows { call: "GetStdHandle", code: unsafe { GetLastError() } });
+            return Err(SandboxError::Windows {
+                call: "GetStdHandle",
+                code: unsafe { GetLastError() },
+            });
         }
         // SAFETY: `handle` is owned by this process.
         if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
-            return Err(SandboxError::Windows { call: "SetHandleInformation", code: unsafe { GetLastError() } });
+            return Err(SandboxError::Windows {
+                call: "SetHandleInformation",
+                code: unsafe { GetLastError() },
+            });
         }
         // SAFETY: `target` points at a live field of `startup`.
         unsafe { **target = handle };

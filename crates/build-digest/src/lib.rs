@@ -56,10 +56,20 @@ impl fmt::Display for DigestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { path, source } => write!(f, "cannot read {}: {source}", path.display()),
-            Self::Symlink(path) => write!(f, "symlinks are not supported in declared trees: {}", path.display()),
+            Self::Symlink(path) => write!(
+                f,
+                "symlinks are not supported in declared trees: {}",
+                path.display()
+            ),
             Self::NonUtf8Path(path) => write!(f, "path is not valid UTF-8: {}", path.display()),
-            Self::InvalidTreePath(path) => write!(f, "invalid path inside declared tree: {}", path.display()),
-            Self::UnexpectedType(path) => write!(f, "file or directory has the wrong type: {}", path.display()),
+            Self::InvalidTreePath(path) => {
+                write!(f, "invalid path inside declared tree: {}", path.display())
+            }
+            Self::UnexpectedType(path) => write!(
+                f,
+                "file or directory has the wrong type: {}",
+                path.display()
+            ),
         }
     }
 }
@@ -279,28 +289,55 @@ fn collect_tree(
     with_metadata: bool,
 ) -> Result<(), DigestError> {
     let mut children = fs::read_dir(current)
-        .map_err(|source| DigestError::Io { path: current.to_path_buf(), source })?
+        .map_err(|source| DigestError::Io {
+            path: current.to_path_buf(),
+            source,
+        })?
         .map(|item| item.map(|entry| entry.path()))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| DigestError::Io { path: current.to_path_buf(), source })?;
+        .map_err(|source| DigestError::Io {
+            path: current.to_path_buf(),
+            source,
+        })?;
     children.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
     for child in children {
-        let metadata = fs::symlink_metadata(&child)
-            .map_err(|source| DigestError::Io { path: child.clone(), source })?;
+        let metadata = fs::symlink_metadata(&child).map_err(|source| DigestError::Io {
+            path: child.clone(),
+            source,
+        })?;
         if metadata.file_type().is_symlink() {
             return Err(DigestError::Symlink(child));
         }
-        let relative = child.strip_prefix(root)
+        let relative = child
+            .strip_prefix(root)
             .map_err(|_| DigestError::InvalidTreePath(child.clone()))?;
         let normalized = normalize_relative(relative)?;
         if metadata.is_dir() {
-            entries.push(TreeEntry { path: normalized, is_dir: true, digest: None, metadata: None });
+            entries.push(TreeEntry {
+                path: normalized,
+                is_dir: true,
+                digest: None,
+                metadata: None,
+            });
             collect_tree(root, &child, entries, with_metadata)?;
         } else if metadata.is_file() {
-            let digest = if with_metadata { digest_file_with_metadata(&child)? } else { digest_file(&child)? };
-            let entry_metadata = if with_metadata { Some(file_metadata(&metadata)) } else { None };
-            entries.push(TreeEntry { path: normalized, is_dir: false, digest: Some(digest), metadata: entry_metadata });
+            let digest = if with_metadata {
+                digest_file_with_metadata(&child)?
+            } else {
+                digest_file(&child)?
+            };
+            let entry_metadata = if with_metadata {
+                Some(file_metadata(&metadata))
+            } else {
+                None
+            };
+            entries.push(TreeEntry {
+                path: normalized,
+                is_dir: false,
+                digest: Some(digest),
+                metadata: entry_metadata,
+            });
         } else {
             return Err(DigestError::UnexpectedType(child));
         }
@@ -314,15 +351,16 @@ fn normalize_relative(path: &Path) -> Result<String, DigestError> {
         match component {
             // `.` components carry no meaning in a relative path; action
             // validation accepts them (e.g. a `.` working directory).
-            Component::Normal(name) => names.push(name.to_str().ok_or_else(|| DigestError::NonUtf8Path(path.to_path_buf()))?),
+            Component::Normal(name) => names.push(
+                name.to_str()
+                    .ok_or_else(|| DigestError::NonUtf8Path(path.to_path_buf()))?,
+            ),
             Component::CurDir => {}
             _ => return Err(DigestError::NonUtf8Path(path.to_path_buf())),
         }
     }
     Ok(names.join("/"))
 }
-
-
 
 /// The local process properties inherited by an action and included in its key.
 #[derive(Clone, Debug)]
@@ -467,7 +505,9 @@ impl fmt::Display for CacheabilityReason {
             Self::UnexpectedInputDigest(path) => {
                 format!("unexpected-input-digest={}", path.display())
             }
-            Self::DuplicateInputDigest(path) => format!("duplicate-input-digest={}", path.display()),
+            Self::DuplicateInputDigest(path) => {
+                format!("duplicate-input-digest={}", path.display())
+            }
             Self::PlatformVersionUnspecified => "platform-version-unspecified".to_owned(),
             Self::NetworkIsolationUnavailable => "network-isolation-unavailable".to_owned(),
             Self::LocalExecutorUnsandboxed => "local-executor-unsandboxed".to_owned(),
@@ -532,7 +572,9 @@ pub fn action_key_candidate(
     provided.sort_by(|left, right| left.0.cmp(&right.0));
     for pair in provided.windows(2) {
         if pair[0].0 == pair[1].0 {
-            reasons.push(CacheabilityReason::DuplicateInputDigest(PathBuf::from(&pair[0].0)));
+            reasons.push(CacheabilityReason::DuplicateInputDigest(PathBuf::from(
+                &pair[0].0,
+            )));
         }
     }
     let provided_paths: Vec<_> = provided.iter().map(|entry| entry.0.as_str()).collect();
@@ -543,7 +585,9 @@ pub fn action_key_candidate(
     }
     for (path, _) in &provided {
         if !declared.contains(path) {
-            reasons.push(CacheabilityReason::UnexpectedInputDigest(PathBuf::from(path)));
+            reasons.push(CacheabilityReason::UnexpectedInputDigest(PathBuf::from(
+                path,
+            )));
         }
     }
 
@@ -581,8 +625,17 @@ pub fn action_key_candidate(
     }
     hash_text(&mut hasher, &executor.os);
     hash_text(&mut hasher, &executor.architecture);
-    hash_text(&mut hasher, executor.platform_version.as_deref().unwrap_or("<unknown-platform-version>"));
-    hash_bytes(&mut hasher, &os_string_bytes(executor.workspace.as_os_str()));
+    hash_text(
+        &mut hasher,
+        executor
+            .platform_version
+            .as_deref()
+            .unwrap_or("<unknown-platform-version>"),
+    );
+    hash_bytes(
+        &mut hasher,
+        &os_string_bytes(executor.workspace.as_os_str()),
+    );
     let mut inherited: Vec<_> = executor.inherited_environment.iter().collect();
     inherited.sort_by(|left, right| left.0.cmp(&right.0));
     hasher.update((inherited.len() as u64).to_be_bytes());
@@ -713,9 +766,15 @@ mod tests {
         let path = dir.write("data.bin", b"payload");
         let first = digest_file_with_metadata(&path).expect("digest");
         let second = digest_file_with_metadata(&path).expect("digest");
-        assert_eq!(first, second, "same content and mtime must give the same digest");
+        assert_eq!(
+            first, second,
+            "same content and mtime must give the same digest"
+        );
         // A pure mtime change must alter the metadata digest.
-        set_file_mtime(&path, std::time::SystemTime::now() + std::time::Duration::from_secs(60));
+        set_file_mtime(
+            &path,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(60),
+        );
         assert_ne!(
             digest_file_with_metadata(&path).expect("digest"),
             first,
@@ -740,8 +799,14 @@ mod tests {
         let first = digest_tree_with_metadata(&tree).expect("meta");
         let second = digest_tree_with_metadata(&tree).expect("meta again");
         assert_eq!(first, second, "unchanged tree must be stable");
-        assert_ne!(first, plain, "metadata digest must differ from content digest");
-        set_file_mtime(&tree.join("a.txt"), std::time::SystemTime::now() + std::time::Duration::from_secs(120));
+        assert_ne!(
+            first, plain,
+            "metadata digest must differ from content digest"
+        );
+        set_file_mtime(
+            &tree.join("a.txt"),
+            std::time::SystemTime::now() + std::time::Duration::from_secs(120),
+        );
         assert_ne!(
             digest_tree_with_metadata(&tree).expect("meta after touch"),
             first,
@@ -770,7 +835,10 @@ mod tests {
         let dir = TempDir::new("fingerprint-version");
         let plain = ExecutionFingerprint::local(dir.path());
         assert!(
-            plain.platform_version.as_deref().is_some_and(|version| !version.is_empty()),
+            plain
+                .platform_version
+                .as_deref()
+                .is_some_and(|version| !version.is_empty()),
             "platform version must be a captured fact, got {plain:?}"
         );
         assert!(!plain.capabilities.metadata_fingerprinting);
@@ -792,7 +860,10 @@ mod tests {
     fn digesting_a_directory_as_file_fails() {
         let dir = TempDir::new("type-mismatch");
         let error = digest_file(dir.path()).unwrap_err();
-        assert!(matches!(error, DigestError::UnexpectedType(_)), "got {error:?}");
+        assert!(
+            matches!(error, DigestError::UnexpectedType(_)),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -844,7 +915,10 @@ mod tests {
         let dir = TempDir::new("file-as-tree");
         let path = dir.write("not-a-dir", b"x");
         let error = digest_tree(&path).unwrap_err();
-        assert!(matches!(error, DigestError::UnexpectedType(_)), "got {error:?}");
+        assert!(
+            matches!(error, DigestError::UnexpectedType(_)),
+            "got {error:?}"
+        );
     }
 
     #[cfg(any(windows, unix))]
@@ -853,7 +927,8 @@ mod tests {
         let dir = TempDir::new("symlink");
         dir.write("real.txt", b"x");
         #[cfg(unix)]
-        let create = std::os::unix::fs::symlink(dir.path().join("real.txt"), dir.path().join("link.txt"));
+        let create =
+            std::os::unix::fs::symlink(dir.path().join("real.txt"), dir.path().join("link.txt"));
         #[cfg(windows)]
         let create = std::os::windows::fs::symlink_file(
             dir.path().join("real.txt"),
@@ -878,8 +953,14 @@ mod tests {
             id: "key".to_owned(),
             argv: vec!["tool".to_owned(), "run".to_owned()],
             working_directory: PathBuf::from("."),
-            inputs: vec![Input { path: PathBuf::from("in.txt"), kind: InputKind::File }],
-            outputs: vec![Output { path: PathBuf::from("out.txt"), kind: OutputKind::File }],
+            inputs: vec![Input {
+                path: PathBuf::from("in.txt"),
+                kind: InputKind::File,
+            }],
+            outputs: vec![Output {
+                path: PathBuf::from("out.txt"),
+                kind: OutputKind::File,
+            }],
             environment: vec![("FLAG".to_owned(), "on".to_owned())],
             cache_policy: CachePolicy::Never,
             toolchain: None,
@@ -915,7 +996,10 @@ mod tests {
         let changed = dir.write("in.txt", b"different");
         let different = action_key_candidate(
             &action,
-            &[(PathBuf::from("in.txt"), digest_file(&changed).expect("digest"))],
+            &[(
+                PathBuf::from("in.txt"),
+                digest_file(&changed).expect("digest"),
+            )],
             &executor,
         )
         .expect("candidate");
@@ -930,7 +1014,10 @@ mod tests {
         let executor = local_fingerprint(dir.path());
         let action = sample_action();
         let mut weighted = action.clone();
-        weighted.resources = Some(build_action::ResourceRequest { cpu: 8, memory_mb: Some(4096) });
+        weighted.resources = Some(build_action::ResourceRequest {
+            cpu: 8,
+            memory_mb: Some(4096),
+        });
         let plain = action_key_candidate(&action, &[], &executor).expect("candidate");
         let heavy = action_key_candidate(&weighted, &[], &executor).expect("candidate");
         assert_eq!(plain.digest, heavy.digest);
@@ -952,8 +1039,8 @@ mod tests {
     fn default_policy_reports_conservative_blockers() {
         let dir = TempDir::new("key-blockers");
         let action = sample_action();
-        let candidate = action_key_candidate(&action, &[], &local_fingerprint(dir.path()))
-            .expect("candidate");
+        let candidate =
+            action_key_candidate(&action, &[], &local_fingerprint(dir.path())).expect("candidate");
         assert!(!candidate.cache_eligible);
         for expected in [
             CacheabilityReason::PolicyNever,
@@ -963,7 +1050,11 @@ mod tests {
             CacheabilityReason::LocalExecutorUnsandboxed,
             CacheabilityReason::FilesystemMetadataNotFingerprintable,
         ] {
-            assert!(candidate.reasons.contains(&expected), "missing {expected:?} in {:?}", candidate.reasons);
+            assert!(
+                candidate.reasons.contains(&expected),
+                "missing {expected:?} in {:?}",
+                candidate.reasons
+            );
         }
         assert!(candidate.reasons.iter().any(|reason| matches!(
             reason,
@@ -1011,9 +1102,14 @@ mod tests {
                 metadata_fingerprinting: true,
             },
         };
-        let candidate = action_key_candidate(&action, &[(PathBuf::from("in.txt"), digest)], &executor)
-            .expect("candidate");
-        assert!(candidate.cache_eligible, "unexpected blockers: {:?}", candidate.reasons);
+        let candidate =
+            action_key_candidate(&action, &[(PathBuf::from("in.txt"), digest)], &executor)
+                .expect("candidate");
+        assert!(
+            candidate.cache_eligible,
+            "unexpected blockers: {:?}",
+            candidate.reasons
+        );
         assert!(candidate.reasons.is_empty());
     }
 }

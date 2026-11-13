@@ -52,8 +52,12 @@ fn unix_time_ms() -> u64 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
-    RunStarted { mode: RunMode },
-    ActionStarted { action_id: String },
+    RunStarted {
+        mode: RunMode,
+    },
+    ActionStarted {
+        action_id: String,
+    },
     ActionFinished {
         action_id: String,
         status: ActionStatus,
@@ -69,7 +73,9 @@ pub enum EventKind {
         #[serde(default)]
         error: Option<String>,
     },
-    ActionSkipped { action_id: String },
+    ActionSkipped {
+        action_id: String,
+    },
     RunFinished {
         outcome: RunOutcome,
         executed: usize,
@@ -130,7 +136,9 @@ pub struct JsonLinesFile {
 impl JsonLinesFile {
     pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = std::fs::File::create(path)?;
-        Ok(Self { writer: io::BufWriter::new(file) })
+        Ok(Self {
+            writer: io::BufWriter::new(file),
+        })
     }
 }
 
@@ -147,7 +155,12 @@ mod tests {
     use super::*;
 
     fn started_event() -> Event {
-        Event::new(7, EventKind::RunStarted { mode: RunMode::Plan { jobs: 4 } })
+        Event::new(
+            7,
+            EventKind::RunStarted {
+                mode: RunMode::Plan { jobs: 4 },
+            },
+        )
     }
 
     #[test]
@@ -228,10 +241,19 @@ mod tests {
     fn round_trips_through_jsonl_lines() {
         let events = vec![
             started_event(),
-            Event::new(7, EventKind::ActionStarted { action_id: "a".to_owned() }),
             Event::new(
                 7,
-                EventKind::RunFinished { outcome: RunOutcome::Succeeded, executed: 1, skipped: 0 },
+                EventKind::ActionStarted {
+                    action_id: "a".to_owned(),
+                },
+            ),
+            Event::new(
+                7,
+                EventKind::RunFinished {
+                    outcome: RunOutcome::Succeeded,
+                    executed: 1,
+                    skipped: 0,
+                },
             ),
         ];
         let jsonl = events
@@ -251,15 +273,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "ant-events-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("events.jsonl");
         {
             let mut sink = JsonLinesFile::create(&path).expect("create file");
             sink.emit(started_event()).expect("emit");
-            sink.emit(Event::new(7, EventKind::ActionStarted { action_id: "a".to_owned() }))
-                .expect("emit");
+            sink.emit(Event::new(
+                7,
+                EventKind::ActionStarted {
+                    action_id: "a".to_owned(),
+                },
+            ))
+            .expect("emit");
         }
         let content = std::fs::read_to_string(&path).expect("read back");
         let lines: Vec<_> = content.lines().collect();

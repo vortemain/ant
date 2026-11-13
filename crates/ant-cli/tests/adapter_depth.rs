@@ -22,8 +22,8 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("ant-depth-{name}-{}-{unique}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ant-depth-{name}-{}-{unique}", std::process::id()));
         fs::create_dir_all(&path).expect("create temp dir");
         TempDir(path)
     }
@@ -91,7 +91,15 @@ fn cargo_release_profile_adapts_runs_and_produces_the_release_artifact() {
     bin_crate(&dir, "rel-app");
     let plan = dir.file_arg("plan.json");
     let (code, stdout, stderr) = run_ant(&[
-        "adapt", "--adapter", "cargo", "--option", "profile=release", "--project", &dir.arg(), "--out", &plan,
+        "adapt",
+        "--adapter",
+        "cargo",
+        "--option",
+        "profile=release",
+        "--project",
+        &dir.arg(),
+        "--out",
+        &plan,
     ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     let text = fs::read_to_string(&plan).expect("plan");
@@ -99,11 +107,22 @@ fn cargo_release_profile_adapts_runs_and_produces_the_release_artifact() {
 
     let (code, stdout, stderr) = run_ant(&["run", "--workspace", &dir.arg(), "--plan", &plan]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-    assert!(stdout.contains("action=rel-app status=succeeded"), "{stdout:?}");
-    let artifact = dir.path().join("target").join("release").join(exe("rel-app"));
+    assert!(
+        stdout.contains("action=rel-app status=succeeded"),
+        "{stdout:?}"
+    );
+    let artifact = dir
+        .path()
+        .join("target")
+        .join("release")
+        .join(exe("rel-app"));
     assert!(artifact.is_file(), "release artifact must exist");
     assert!(
-        !dir.path().join("target").join("debug").join(exe("rel-app")).exists(),
+        !dir.path()
+            .join("target")
+            .join("debug")
+            .join(exe("rel-app"))
+            .exists(),
         "a release plan must not build the debug artifact"
     );
 }
@@ -116,23 +135,56 @@ fn adapt_option_errors_fail_closed_without_writing() {
     let plan = dir.file_arg("plan.json");
     let project = dir.arg();
     let cases: &[(&[&str], &str)] = &[
-        (&["--option", "profile=bench"], "cargo profile 'bench' is not supported"),
-        (&["--option", "outputs=entry-points"], "does not accept option 'outputs' (accepted: profile)"),
+        (
+            &["--option", "profile=bench"],
+            "cargo profile 'bench' is not supported",
+        ),
+        (
+            &["--option", "outputs=entry-points"],
+            "does not accept option 'outputs' (accepted: profile)",
+        ),
         (&["--option", "profile"], "is not KEY=VALUE"),
-        (&["--option", "profile=dev", "--option", "profile=release"], "given more than once"),
+        (
+            &["--option", "profile=dev", "--option", "profile=release"],
+            "given more than once",
+        ),
     ];
     for (extra, expected) in cases {
-        let mut args = vec!["adapt", "--adapter", "cargo", "--project", &project, "--out", &plan];
+        let mut args = vec![
+            "adapt",
+            "--adapter",
+            "cargo",
+            "--project",
+            &project,
+            "--out",
+            &plan,
+        ];
         args.extend_from_slice(extra);
         let (code, _, stderr) = run_ant(&args);
         assert_eq!(code, 1, "{extra:?} must fail");
-        assert!(stderr.contains(expected), "{extra:?}: stderr was {stderr:?}");
+        assert!(
+            stderr.contains(expected),
+            "{extra:?}: stderr was {stderr:?}"
+        );
         assert!(!Path::new(&plan).exists(), "{extra:?}: no plan written");
-        assert!(!dir.path().join(".ant").exists(), "{extra:?}: no staging directory");
+        assert!(
+            !dir.path().join(".ant").exists(),
+            "{extra:?}: no staging directory"
+        );
     }
-    let (code, _, stderr) = run_ant(&["adapt", "--detect", "--project", &project, "--option", "profile=release"]);
+    let (code, _, stderr) = run_ant(&[
+        "adapt",
+        "--detect",
+        "--project",
+        &project,
+        "--option",
+        "profile=release",
+    ]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--detect cannot be combined"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("--detect cannot be combined"),
+        "stderr was {stderr:?}"
+    );
 }
 
 /// A `build.target-dir` inside the project is mapped (outputs) and pinned
@@ -142,28 +194,62 @@ fn adapt_option_errors_fail_closed_without_writing() {
 fn cargo_custom_target_dir_is_honored_inside_and_rejected_outside() {
     let dir = TempDir::new("cargo-target-dir");
     bin_crate(&dir, "td-app");
-    dir.write(".cargo/config.toml", "[build]\ntarget-dir = \"out/cargo\"\n");
+    dir.write(
+        ".cargo/config.toml",
+        "[build]\ntarget-dir = \"out/cargo\"\n",
+    );
     let plan = dir.file_arg("plan.json");
-    let (code, stdout, stderr) =
-        run_ant(&["adapt", "--adapter", "cargo", "--project", &dir.arg(), "--out", &plan]);
+    let (code, stdout, stderr) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "cargo",
+        "--project",
+        &dir.arg(),
+        "--out",
+        &plan,
+    ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     let text = fs::read_to_string(&plan).expect("plan");
     assert!(text.contains("CARGO_TARGET_DIR"), "{text}");
 
     let (code, stdout, stderr) = run_ant(&["run", "--workspace", &dir.arg(), "--plan", &plan]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-    let artifact = dir.path().join("out").join("cargo").join("debug").join(exe("td-app"));
-    assert!(artifact.is_file(), "artifact must land in the custom target dir");
-    assert!(!dir.path().join("target").exists(), "the default target dir must not be used");
+    let artifact = dir
+        .path()
+        .join("out")
+        .join("cargo")
+        .join("debug")
+        .join(exe("td-app"));
+    assert!(
+        artifact.is_file(),
+        "artifact must land in the custom target dir"
+    );
+    assert!(
+        !dir.path().join("target").exists(),
+        "the default target dir must not be used"
+    );
 
     let outside = TempDir::new("cargo-target-outside");
     bin_crate(&outside, "out-app");
-    outside.write(".cargo/config.toml", "[build]\ntarget-dir = \"../shared-target\"\n");
+    outside.write(
+        ".cargo/config.toml",
+        "[build]\ntarget-dir = \"../shared-target\"\n",
+    );
     let plan = outside.file_arg("plan.json");
-    let (code, _, stderr) =
-        run_ant(&["adapt", "--adapter", "cargo", "--project", &outside.arg(), "--out", &plan]);
+    let (code, _, stderr) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "cargo",
+        "--project",
+        &outside.arg(),
+        "--out",
+        &plan,
+    ]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("is outside the project root"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("is outside the project root"),
+        "stderr was {stderr:?}"
+    );
     assert!(!Path::new(&plan).exists(), "no plan written");
 }
 
@@ -179,7 +265,10 @@ fn cargo_vendored_registry_dependency_builds_sandboxed() {
         "Cargo.toml",
         "[package]\nname = \"vend-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntinydep = \"1\"\n",
     );
-    dir.write("src/main.rs", "fn main() { println!(\"v={}\", tinydep::value()); }\n");
+    dir.write(
+        "src/main.rs",
+        "fn main() { println!(\"v={}\", tinydep::value()); }\n",
+    );
     dir.write(
         "vendor/tinydep/Cargo.toml",
         "[package]\nname = \"tinydep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
@@ -194,29 +283,69 @@ fn cargo_vendored_registry_dependency_builds_sandboxed() {
         "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
     );
     let plan = dir.file_arg("plan.json");
-    let (code, stdout, stderr) =
-        run_ant(&["adapt", "--adapter", "cargo", "--project", &dir.arg(), "--out", &plan]);
+    let (code, stdout, stderr) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "cargo",
+        "--project",
+        &dir.arg(),
+        "--out",
+        &plan,
+    ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     // Cargo resolved it as a crates.io package (source replacement), and
     // the lock file records the registry source.
     let lock = fs::read_to_string(dir.path().join("Cargo.lock")).expect("lock");
-    assert!(lock.contains("registry+https://github.com/rust-lang/crates.io-index"), "{lock}");
+    assert!(
+        lock.contains("registry+https://github.com/rust-lang/crates.io-index"),
+        "{lock}"
+    );
 
-    let (code, stdout, stderr) =
-        run_ant(&["run", "--workspace", &dir.arg(), "--sandbox", "--plan", &plan]);
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &dir.arg(),
+        "--sandbox",
+        "--plan",
+        &plan,
+    ]);
     if cfg!(windows) {
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-        assert!(stdout.contains("action=vend-app status=succeeded"), "{stdout:?}");
-        let vendored_input = format!("input={} digest=", Path::new("vendor").join("tinydep").display());
-        assert!(stdout.contains(&vendored_input), "vendored source must be digested: {stdout:?}");
-        let config_input = format!("input={} digest=", Path::new(".cargo").join("config.toml").display());
-        assert!(stdout.contains(&config_input), "project cargo config must be digested: {stdout:?}");
-        let artifact = dir.path().join("target").join("debug").join(exe("vend-app"));
-        let output = Command::new(&artifact).output().expect("run built artifact");
+        assert!(
+            stdout.contains("action=vend-app status=succeeded"),
+            "{stdout:?}"
+        );
+        let vendored_input = format!(
+            "input={} digest=",
+            Path::new("vendor").join("tinydep").display()
+        );
+        assert!(
+            stdout.contains(&vendored_input),
+            "vendored source must be digested: {stdout:?}"
+        );
+        let config_input = format!(
+            "input={} digest=",
+            Path::new(".cargo").join("config.toml").display()
+        );
+        assert!(
+            stdout.contains(&config_input),
+            "project cargo config must be digested: {stdout:?}"
+        );
+        let artifact = dir
+            .path()
+            .join("target")
+            .join("debug")
+            .join(exe("vend-app"));
+        let output = Command::new(&artifact)
+            .output()
+            .expect("run built artifact");
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "v=7");
     } else {
         assert_ne!(code, 0, "sandbox must fail closed on non-Windows");
-        assert!(stderr.contains("sandbox unavailable"), "stderr was {stderr:?}");
+        assert!(
+            stderr.contains("sandbox unavailable"),
+            "stderr was {stderr:?}"
+        );
     }
 }
 
@@ -256,10 +385,19 @@ fn npm_workspaces_adapt_and_run_in_dependency_order() {
     );
     let plan = dir.file_arg("plan.json");
     let (code, stdout, stderr) = run_ant(&[
-        "adapt", "--project", &dir.arg(), "--option", "outputs=entry-points", "--out", &plan,
+        "adapt",
+        "--project",
+        &dir.arg(),
+        "--option",
+        "outputs=entry-points",
+        "--out",
+        &plan,
     ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-    assert!(stdout.contains("adapter=npm") && stdout.contains("actions=2"), "{stdout:?}");
+    assert!(
+        stdout.contains("adapter=npm") && stdout.contains("actions=2"),
+        "{stdout:?}"
+    );
 
     let parsed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&plan).expect("plan")).expect("json");
@@ -267,14 +405,30 @@ fn npm_workspaces_adapt_and_run_in_dependency_order() {
     assert_eq!(app["action"]["id"], "@demo/app");
     assert_eq!(app["dependencies"], serde_json::json!(["@demo/core"]));
 
-    let (code, stdout, stderr) =
-        run_ant(&["run", "--workspace", &dir.arg(), "--sandbox", "--plan", &plan]);
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &dir.arg(),
+        "--sandbox",
+        "--plan",
+        &plan,
+    ]);
     if cfg!(windows) {
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-        let core_done = stdout.find("action=@demo/core status=succeeded").expect("core ran");
-        let app_start = stdout.find("action=@demo/app status=started").expect("app ran");
-        assert!(core_done < app_start, "core must finish before app starts: {stdout:?}");
-        let app_out = Path::new("packages").join("app").join("dist").join("app.js");
+        let core_done = stdout
+            .find("action=@demo/core status=succeeded")
+            .expect("core ran");
+        let app_start = stdout
+            .find("action=@demo/app status=started")
+            .expect("app ran");
+        assert!(
+            core_done < app_start,
+            "core must finish before app starts: {stdout:?}"
+        );
+        let app_out = Path::new("packages")
+            .join("app")
+            .join("dist")
+            .join("app.js");
         assert!(
             stdout.contains(&format!("output={} digest=", app_out.display())),
             "entry-point output verified by the executor: {stdout:?}"
@@ -288,7 +442,13 @@ fn npm_workspaces_adapt_and_run_in_dependency_order() {
     // Deterministic re-adaptation.
     let plan2 = dir.file_arg("plan2.json");
     let (code, _, _) = run_ant(&[
-        "adapt", "--project", &dir.arg(), "--option", "outputs=entry-points", "--out", &plan2,
+        "adapt",
+        "--project",
+        &dir.arg(),
+        "--option",
+        "outputs=entry-points",
+        "--out",
+        &plan2,
     ]);
     assert_eq!(code, 0);
     assert_eq!(
@@ -311,13 +471,27 @@ fn npm_entry_point_outputs_are_verified_not_trusted() {
     dir.write("build.js", "require('fs').writeFileSync('other.js', '');\n");
     let plan = dir.file_arg("plan.json");
     let (code, _, stderr) = run_ant(&[
-        "adapt", "--adapter", "npm", "--project", &dir.arg(), "--option", "outputs=entry-points", "--out", &plan,
+        "adapt",
+        "--adapter",
+        "npm",
+        "--project",
+        &dir.arg(),
+        "--option",
+        "outputs=entry-points",
+        "--out",
+        &plan,
     ]);
     assert_eq!(code, 0, "stderr was {stderr:?}");
     let (code, stdout, stderr) = run_ant(&["run", "--workspace", &dir.arg(), "--plan", &plan]);
-    assert_ne!(code, 0, "a missing declared output must fail: stdout was {stdout:?}");
+    assert_ne!(
+        code, 0,
+        "a missing declared output must fail: stdout was {stdout:?}"
+    );
     let combined = format!("{stdout}{stderr}");
-    assert!(combined.contains("declared output was not created"), "{combined:?}");
+    assert!(
+        combined.contains("declared output was not created"),
+        "{combined:?}"
+    );
 }
 
 /// The directory holding a usable `cmake` executable: PATH first, then the
@@ -344,14 +518,15 @@ fn cmake_dir() -> Option<PathBuf> {
         .output()
         .ok()?;
     let install = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let dir = Path::new(&install)
-        .join("Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin");
+    let dir = Path::new(&install).join("Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin");
     dir.join(&name).is_file().then_some(dir)
 }
 
 fn run_ant_with_path(extra: &Path, args: &[&str]) -> (i32, String, String) {
     let mut paths = vec![extra.to_path_buf()];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
     let output = Command::new(env!("CARGO_BIN_EXE_ant"))
         .env("RUST_BACKTRACE", "0")
         .env("PATH", std::env::join_paths(paths).expect("join PATH"))
@@ -383,32 +558,65 @@ fn cmake_project_adapts_runs_and_builds_a_real_executable() {
             "cmake_minimum_required(VERSION 3.20)\nproject(hello C)\nadd_subdirectory(app)\n",
         );
         dir.write("app/CMakeLists.txt", "add_executable(hello main.c)\n");
-        dir.write("app/main.c", "#include <stdio.h>\nint main(void) { puts(\"hello cmake\"); return 0; }\n");
+        dir.write(
+            "app/main.c",
+            "#include <stdio.h>\nint main(void) { puts(\"hello cmake\"); return 0; }\n",
+        );
         let plan = dir.file_arg("plan.json");
         let option = format!("config={config}");
         let (code, stdout, stderr) = run_ant_with_path(
             &cmake,
-            &["adapt", "--project", &dir.arg(), "--option", &option, "--out", &plan],
+            &[
+                "adapt",
+                "--project",
+                &dir.arg(),
+                "--option",
+                &option,
+                "--out",
+                &plan,
+            ],
         );
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-        assert!(stdout.contains("adapter=cmake") && stdout.contains("actions=2"), "{stdout:?}");
+        assert!(
+            stdout.contains("adapter=cmake") && stdout.contains("actions=2"),
+            "{stdout:?}"
+        );
 
-        let (code, stdout, stderr) = run_ant_with_path(&cmake, &["plan", "validate", "--plan", &plan]);
+        let (code, stdout, stderr) =
+            run_ant_with_path(&cmake, &["plan", "validate", "--plan", &plan]);
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
 
         let (code, stdout, stderr) =
             run_ant_with_path(&cmake, &["run", "--workspace", &dir.arg(), "--plan", &plan]);
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-        assert!(stdout.contains("action=configure status=succeeded"), "{stdout:?}");
-        assert!(stdout.contains("action=build status=succeeded"), "{stdout:?}");
-        let cache = format!("output={} digest=", Path::new("build").join("CMakeCache.txt").display());
-        assert!(stdout.contains(&cache), "CMakeCache.txt verified: {stdout:?}");
+        assert!(
+            stdout.contains("action=configure status=succeeded"),
+            "{stdout:?}"
+        );
+        assert!(
+            stdout.contains("action=build status=succeeded"),
+            "{stdout:?}"
+        );
+        let cache = format!(
+            "output={} digest=",
+            Path::new("build").join("CMakeCache.txt").display()
+        );
+        assert!(
+            stdout.contains(&cache),
+            "CMakeCache.txt verified: {stdout:?}"
+        );
         let build = dir.path().join("build").join("app");
-        let artifact = [build.join(config).join(exe("hello")), build.join(exe("hello"))]
-            .into_iter()
-            .find(|path| path.is_file())
-            .unwrap_or_else(|| panic!("no hello executable under {}", build.display()));
+        let artifact = [
+            build.join(config).join(exe("hello")),
+            build.join(exe("hello")),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no hello executable under {}", build.display()));
         let output = Command::new(&artifact).output().expect("run artifact");
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello cmake");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "hello cmake"
+        );
     }
 }

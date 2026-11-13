@@ -64,7 +64,11 @@ impl Termination {
 
     /// Keep the more severe outcome; the first of equal severity wins.
     fn worst(self, other: Self) -> Self {
-        if other.rank() > self.rank() { other } else { self }
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
     }
 }
 
@@ -91,17 +95,21 @@ impl EventStream {
     pub fn create(path: Option<PathBuf>, run_id: u64) -> Result<Self, String> {
         let sink = match path {
             None => None,
-            Some(path) => Some(Box::new(
-                build_events::JsonLinesFile::create(&path)
-                    .map_err(|error| format!("cannot create events file {}: {error}", path.display()))?,
-            ) as Box<dyn build_events::EventSink>),
+            Some(path) => Some(Box::new(build_events::JsonLinesFile::create(&path).map_err(
+                |error| format!("cannot create events file {}: {error}", path.display()),
+            )?) as Box<dyn build_events::EventSink>),
         };
         Ok(Self { run_id, sink })
     }
 
     pub fn emit(&mut self, kind: EventKind) {
-        let Some(sink) = self.sink.as_mut() else { return };
-        if sink.emit(build_events::Event::new(self.run_id, kind)).is_err() {
+        let Some(sink) = self.sink.as_mut() else {
+            return;
+        };
+        if sink
+            .emit(build_events::Event::new(self.run_id, kind))
+            .is_err()
+        {
             eprintln!("ant: warning: could not write events; further event writes suppressed");
             self.sink = None;
         }
@@ -183,7 +191,10 @@ fn clamp_weight(action: &Action, capacity: Capacity) -> (Weight, bool) {
     let memory_mb = capacity
         .memory_mb
         .map_or(requested_memory, |budget| requested_memory.min(budget));
-    (Weight { cpu, memory_mb }, cpu != requested_cpu || memory_mb != requested_memory)
+    (
+        Weight { cpu, memory_mb },
+        cpu != requested_cpu || memory_mb != requested_memory,
+    )
 }
 
 /// State shared by parallel worker threads.
@@ -271,7 +282,9 @@ pub fn run_plan(
                     request.cpu,
                     request.memory_mb.unwrap_or(0),
                     capacity.cpu,
-                    capacity.memory_mb.map_or_else(|| "unbounded".to_owned(), |m| m.to_string()),
+                    capacity
+                        .memory_mb
+                        .map_or_else(|| "unbounded".to_owned(), |m| m.to_string()),
                     weight.cpu,
                     weight.memory_mb,
                 );
@@ -281,12 +294,21 @@ pub fn run_plan(
     events
         .lock()
         .expect("events lock")
-        .emit(EventKind::RunStarted { mode: RunMode::Plan { jobs } });
+        .emit(EventKind::RunStarted {
+            mode: RunMode::Plan { jobs },
+        });
     // Opening the requested cache directory fails hard: the user asked for
     // cache participation and a silently ignored flag would hide the mistake.
     let participant = CacheParticipant::new(cache_dir)?;
     let result = if jobs == 1 {
-        run_sequential(workspace, cancellation, &tasks, options, &participant, events)
+        run_sequential(
+            workspace,
+            cancellation,
+            &tasks,
+            options,
+            &participant,
+            events,
+        )
     } else {
         run_parallel(workspace, cancellation, tasks, options, participant, events)
     };
@@ -296,11 +318,14 @@ pub fn run_plan(
         Termination::TimedOut => RunOutcome::TimedOut,
         Termination::Cancelled => RunOutcome::Cancelled,
     };
-    events.lock().expect("events lock").emit(EventKind::RunFinished {
-        outcome,
-        executed: result.executed,
-        skipped: result.skipped.len(),
-    });
+    events
+        .lock()
+        .expect("events lock")
+        .emit(EventKind::RunFinished {
+            outcome,
+            executed: result.executed,
+            skipped: result.skipped.len(),
+        });
     match result.termination {
         Termination::Success => Ok(0),
         Termination::FailedProcess => Ok(1),
@@ -318,7 +343,9 @@ fn run_sequential(
     participant: &CacheParticipant,
     events: &Mutex<EventStream>,
 ) -> PlanResult {
-    let RunOptions { keep_going, exec, .. } = options;
+    let RunOptions {
+        keep_going, exec, ..
+    } = options;
     let mut executed_ids = BTreeSet::new();
     let mut termination = Termination::Success;
     // Actions that did not succeed (failed or never ran); with keep-going,
@@ -326,7 +353,11 @@ fn run_sequential(
     let mut blocked: HashSet<String> = HashSet::new();
     for task in tasks {
         let id = task.action.id.clone();
-        if task.dependencies.iter().any(|dependency| blocked.contains(dependency)) {
+        if task
+            .dependencies
+            .iter()
+            .any(|dependency| blocked.contains(dependency))
+        {
             blocked.insert(id);
             continue;
         }
@@ -335,10 +366,19 @@ fn run_sequential(
             break;
         }
         println!("action={id} status=started");
-        events.lock().expect("events lock").emit(EventKind::ActionStarted { action_id: id.clone() });
+        events
+            .lock()
+            .expect("events lock")
+            .emit(EventKind::ActionStarted {
+                action_id: id.clone(),
+            });
         executed_ids.insert(id.clone());
         match cache_runner::run_action(participant, workspace, &task.action, cancellation, exec) {
-            Ok(ActionRun::Reused { candidate, input_digests, output_digests }) => {
+            Ok(ActionRun::Reused {
+                candidate,
+                input_digests,
+                output_digests,
+            }) => {
                 println!("action={id} status=reused");
                 print_digests("input", &input_digests);
                 print_digests("output", &output_digests);
@@ -347,33 +387,49 @@ fn run_sequential(
                     "action={id} key_candidate={} cache_eligible=true blockers=[]",
                     candidate.digest
                 );
-                emit_action_finished(events, &id, ActionFinishFacts {
-                    status: ActionStatus::Reused,
-                    exit_code: None,
-                    input_digests: &input_digests,
-                    output_digests: &output_digests,
-                    key_candidate: Some(candidate.digest.to_string()),
-                    cache_eligible: Some(true),
-                    error: None,
-                });
+                emit_action_finished(
+                    events,
+                    &id,
+                    ActionFinishFacts {
+                        status: ActionStatus::Reused,
+                        exit_code: None,
+                        input_digests: &input_digests,
+                        output_digests: &output_digests,
+                        key_candidate: Some(candidate.digest.to_string()),
+                        cache_eligible: Some(true),
+                        error: None,
+                    },
+                );
             }
-            Ok(ActionRun::Executed { result, candidate, store_warning }) => {
+            Ok(ActionRun::Executed {
+                result,
+                candidate,
+                store_warning,
+            }) => {
                 if let Some(warning) = store_warning {
                     println!("ant: warning: action={id} {warning}");
                 }
                 if result.cancelled {
                     println!("action={} status=cancelled", result.action_id);
-                    emit_action_finished(events, &result.action_id, ActionFinishFacts::minimal(ActionStatus::Cancelled));
+                    emit_action_finished(
+                        events,
+                        &result.action_id,
+                        ActionFinishFacts::minimal(ActionStatus::Cancelled),
+                    );
                     termination = termination.worst(Termination::Cancelled);
                     break;
                 }
                 if result.timed_out {
                     println!("action={} status=timed_out", result.action_id);
-                    emit_action_finished(events, &result.action_id, ActionFinishFacts {
-                        status: ActionStatus::TimedOut,
-                        exit_code: result.status.code(),
-                        ..ActionFinishFacts::minimal(ActionStatus::TimedOut)
-                    });
+                    emit_action_finished(
+                        events,
+                        &result.action_id,
+                        ActionFinishFacts {
+                            status: ActionStatus::TimedOut,
+                            exit_code: result.status.code(),
+                            ..ActionFinishFacts::minimal(ActionStatus::TimedOut)
+                        },
+                    );
                     termination = termination.worst(Termination::TimedOut);
                     if keep_going {
                         blocked.insert(id);
@@ -385,7 +441,11 @@ fn run_sequential(
                 println!(
                     "action={} status={} exit_code={}",
                     result.action_id,
-                    if result.success() { "succeeded" } else { "failed" },
+                    if result.success() {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    },
                     exit_code.map_or_else(|| "signal".to_owned(), |n| n.to_string())
                 );
                 print_digests("input", &result.input_digests);
@@ -395,15 +455,23 @@ fn run_sequential(
                     "action={} key_candidate={} cache_eligible={} blockers={:?}",
                     result.action_id, candidate.digest, candidate.cache_eligible, candidate.reasons
                 );
-                emit_action_finished(events, &result.action_id, ActionFinishFacts {
-                    status: if result.success() { ActionStatus::Succeeded } else { ActionStatus::Failed },
-                    exit_code,
-                    input_digests: &result.input_digests,
-                    output_digests: &result.output_digests,
-                    key_candidate: Some(candidate.digest.to_string()),
-                    cache_eligible: Some(candidate.cache_eligible),
-                    error: None,
-                });
+                emit_action_finished(
+                    events,
+                    &result.action_id,
+                    ActionFinishFacts {
+                        status: if result.success() {
+                            ActionStatus::Succeeded
+                        } else {
+                            ActionStatus::Failed
+                        },
+                        exit_code,
+                        input_digests: &result.input_digests,
+                        output_digests: &result.output_digests,
+                        key_candidate: Some(candidate.digest.to_string()),
+                        cache_eligible: Some(candidate.cache_eligible),
+                        error: None,
+                    },
+                );
                 if !result.success() {
                     termination = termination.worst(Termination::FailedProcess);
                     if keep_going {
@@ -415,18 +483,26 @@ fn run_sequential(
             }
             Err(ExecutionError::Cancelled) => {
                 println!("action={id} status=cancelled");
-                emit_action_finished(events, &id, ActionFinishFacts::minimal(ActionStatus::Cancelled));
+                emit_action_finished(
+                    events,
+                    &id,
+                    ActionFinishFacts::minimal(ActionStatus::Cancelled),
+                );
                 termination = termination.worst(Termination::Cancelled);
                 break;
             }
             Err(error) => {
                 let message = error.to_string();
                 println!("action={id} status=failed error={message}");
-                emit_action_finished(events, &id, ActionFinishFacts {
-                    status: ActionStatus::Failed,
-                    error: Some(message.clone()),
-                    ..ActionFinishFacts::minimal(ActionStatus::Failed)
-                });
+                emit_action_finished(
+                    events,
+                    &id,
+                    ActionFinishFacts {
+                        status: ActionStatus::Failed,
+                        error: Some(message.clone()),
+                        ..ActionFinishFacts::minimal(ActionStatus::Failed)
+                    },
+                );
                 termination = termination.worst(Termination::HardError(message));
                 if keep_going {
                     blocked.insert(id);
@@ -437,7 +513,11 @@ fn run_sequential(
         }
     }
     let skipped = report_skipped(tasks, &executed_ids, events);
-    PlanResult { termination, executed: executed_ids.len(), skipped }
+    PlanResult {
+        termination,
+        executed: executed_ids.len(),
+        skipped,
+    }
 }
 
 fn run_parallel(
@@ -475,7 +555,9 @@ fn run_parallel(
         .map(|task| clamp_weight(&task.action, capacity).0)
         .collect();
     // One worker per CPU slot is the most that can ever be admitted at once.
-    let jobs = usize::try_from(capacity.cpu).unwrap_or(usize::MAX).min(total.max(1));
+    let jobs = usize::try_from(capacity.cpu)
+        .unwrap_or(usize::MAX)
+        .min(total.max(1));
 
     let shared = Arc::new(Shared {
         tasks,
@@ -577,7 +659,9 @@ fn print_skipped_lines(skipped: &[String]) {
 fn emit_skipped(events: &Mutex<EventStream>, skipped: &[String]) {
     let mut stream = events.lock().expect("events lock");
     for id in skipped {
-        stream.emit(EventKind::ActionSkipped { action_id: id.clone() });
+        stream.emit(EventKind::ActionSkipped {
+            action_id: id.clone(),
+        });
     }
 }
 
@@ -613,7 +697,11 @@ fn worker_loop(
         };
         run_task(shared, workspace, cancellation, events, index);
         // Release capacity on every outcome; dependents were already queued.
-        shared.queue.lock().expect("queue lock").release(shared.weights[index]);
+        shared
+            .queue
+            .lock()
+            .expect("queue lock")
+            .release(shared.weights[index]);
     }
 }
 
@@ -626,7 +714,12 @@ fn run_task(
 ) {
     let id = shared.tasks[index].action.id.clone();
     shared.log(format!("action={id} status=started"));
-    events.lock().expect("events lock").emit(EventKind::ActionStarted { action_id: id.clone() });
+    events
+        .lock()
+        .expect("events lock")
+        .emit(EventKind::ActionStarted {
+            action_id: id.clone(),
+        });
     let run = match cache_runner::run_action(
         &shared.participant,
         workspace,
@@ -637,16 +730,19 @@ fn run_task(
         Ok(run) => run,
         Err(ExecutionError::Cancelled) => {
             shared.log(format!("action={id} status=cancelled"));
-            events.lock().expect("events lock").emit(EventKind::ActionFinished {
-                action_id: id.clone(),
-                status: ActionStatus::Cancelled,
-                exit_code: None,
-                input_digests: Vec::new(),
-                output_digests: Vec::new(),
-                key_candidate: None,
-                cache_eligible: None,
-                error: None,
-            });
+            events
+                .lock()
+                .expect("events lock")
+                .emit(EventKind::ActionFinished {
+                    action_id: id.clone(),
+                    status: ActionStatus::Cancelled,
+                    exit_code: None,
+                    input_digests: Vec::new(),
+                    output_digests: Vec::new(),
+                    key_candidate: None,
+                    cache_eligible: None,
+                    error: None,
+                });
             shared.cancelled.store(true, Ordering::Relaxed);
             shared.stop_starting.store(true, Ordering::Relaxed);
             return;
@@ -654,16 +750,19 @@ fn run_task(
         Err(error) => {
             let message = error.to_string();
             shared.log(format!("action={id} status=failed error={message}"));
-            events.lock().expect("events lock").emit(EventKind::ActionFinished {
-                action_id: id.clone(),
-                status: ActionStatus::Failed,
-                exit_code: None,
-                input_digests: Vec::new(),
-                output_digests: Vec::new(),
-                key_candidate: None,
-                cache_eligible: None,
-                error: Some(message.clone()),
-            });
+            events
+                .lock()
+                .expect("events lock")
+                .emit(EventKind::ActionFinished {
+                    action_id: id.clone(),
+                    status: ActionStatus::Failed,
+                    exit_code: None,
+                    input_digests: Vec::new(),
+                    output_digests: Vec::new(),
+                    key_candidate: None,
+                    cache_eligible: None,
+                    error: Some(message.clone()),
+                });
             let mut guard = shared.first_error.lock().expect("error lock");
             if guard.is_none() {
                 *guard = Some(message);
@@ -675,14 +774,16 @@ fn run_task(
             return;
         }
     };
-    shared
-        .executed[index]
-        .store(true, Ordering::Relaxed);
+    shared.executed[index].store(true, Ordering::Relaxed);
     shared.executed_count.fetch_add(1, Ordering::Relaxed);
     // A reused action satisfied the task without spawning a process; it
     // reaches the same completion tail so dependents unlock either way.
     match run {
-        ActionRun::Reused { candidate, input_digests, output_digests } => {
+        ActionRun::Reused {
+            candidate,
+            input_digests,
+            output_digests,
+        } => {
             shared.log(format!("action={id} status=reused"));
             // Digest and key lines belong to this action's status line;
             // serialize them so concurrent workers do not interleave.
@@ -695,47 +796,60 @@ fn run_task(
                 candidate.digest
             );
             drop(_guard);
-            events.lock().expect("events lock").emit(EventKind::ActionFinished {
-                action_id: id.clone(),
-                status: ActionStatus::Reused,
-                exit_code: None,
-                input_digests: named_digests(&input_digests),
-                output_digests: named_digests(&output_digests),
-                key_candidate: Some(candidate.digest.to_string()),
-                cache_eligible: Some(true),
-                error: None,
-            });
+            events
+                .lock()
+                .expect("events lock")
+                .emit(EventKind::ActionFinished {
+                    action_id: id.clone(),
+                    status: ActionStatus::Reused,
+                    exit_code: None,
+                    input_digests: named_digests(&input_digests),
+                    output_digests: named_digests(&output_digests),
+                    key_candidate: Some(candidate.digest.to_string()),
+                    cache_eligible: Some(true),
+                    error: None,
+                });
         }
-        ActionRun::Executed { result, candidate, store_warning } => {
+        ActionRun::Executed {
+            result,
+            candidate,
+            store_warning,
+        } => {
             let exit_code = result.status.code();
             if result.cancelled {
                 shared.log(format!("action={id} status=cancelled"));
-                events.lock().expect("events lock").emit(EventKind::ActionFinished {
-                    action_id: id.clone(),
-                    status: ActionStatus::Cancelled,
-                    exit_code,
-                    input_digests: Vec::new(),
-                    output_digests: Vec::new(),
-                    key_candidate: None,
-                    cache_eligible: None,
-                    error: None,
-                });
+                events
+                    .lock()
+                    .expect("events lock")
+                    .emit(EventKind::ActionFinished {
+                        action_id: id.clone(),
+                        status: ActionStatus::Cancelled,
+                        exit_code,
+                        input_digests: Vec::new(),
+                        output_digests: Vec::new(),
+                        key_candidate: None,
+                        cache_eligible: None,
+                        error: None,
+                    });
                 shared.cancelled.store(true, Ordering::Relaxed);
                 shared.stop_starting.store(true, Ordering::Relaxed);
                 return;
             }
             if result.timed_out {
                 shared.log(format!("action={id} status=timed_out"));
-                events.lock().expect("events lock").emit(EventKind::ActionFinished {
-                    action_id: id.clone(),
-                    status: ActionStatus::TimedOut,
-                    exit_code,
-                    input_digests: Vec::new(),
-                    output_digests: Vec::new(),
-                    key_candidate: None,
-                    cache_eligible: None,
-                    error: None,
-                });
+                events
+                    .lock()
+                    .expect("events lock")
+                    .emit(EventKind::ActionFinished {
+                        action_id: id.clone(),
+                        status: ActionStatus::TimedOut,
+                        exit_code,
+                        input_digests: Vec::new(),
+                        output_digests: Vec::new(),
+                        key_candidate: None,
+                        cache_eligible: None,
+                        error: None,
+                    });
                 shared.timed_out.store(true, Ordering::Relaxed);
                 shared.on_failure();
                 return;
@@ -749,16 +863,19 @@ fn run_task(
                     let _guard = shared.output.lock().expect("output lock");
                     print_memory(&result);
                 }
-                events.lock().expect("events lock").emit(EventKind::ActionFinished {
-                    action_id: id.clone(),
-                    status: ActionStatus::Failed,
-                    exit_code,
-                    input_digests: Vec::new(),
-                    output_digests: Vec::new(),
-                    key_candidate: None,
-                    cache_eligible: None,
-                    error: None,
-                });
+                events
+                    .lock()
+                    .expect("events lock")
+                    .emit(EventKind::ActionFinished {
+                        action_id: id.clone(),
+                        status: ActionStatus::Failed,
+                        exit_code,
+                        input_digests: Vec::new(),
+                        output_digests: Vec::new(),
+                        key_candidate: None,
+                        cache_eligible: None,
+                        error: None,
+                    });
                 shared.failed.store(true, Ordering::Relaxed);
                 shared.on_failure();
                 return;
@@ -783,16 +900,19 @@ fn run_task(
                     candidate.digest, candidate.cache_eligible, candidate.reasons
                 );
             }
-            events.lock().expect("events lock").emit(EventKind::ActionFinished {
-                action_id: id.clone(),
-                status: ActionStatus::Succeeded,
-                exit_code,
-                input_digests: named_digests(&result.input_digests),
-                output_digests: named_digests(&result.output_digests),
-                key_candidate: Some(candidate.digest.to_string()),
-                cache_eligible: Some(candidate.cache_eligible),
-                error: None,
-            });
+            events
+                .lock()
+                .expect("events lock")
+                .emit(EventKind::ActionFinished {
+                    action_id: id.clone(),
+                    status: ActionStatus::Succeeded,
+                    exit_code,
+                    input_digests: named_digests(&result.input_digests),
+                    output_digests: named_digests(&result.output_digests),
+                    key_candidate: Some(candidate.digest.to_string()),
+                    cache_eligible: Some(candidate.cache_eligible),
+                    error: None,
+                });
         }
     }
     // Unlock dependents; they become available to any worker.
@@ -853,16 +973,19 @@ pub fn emit_action_finished(
     action_id: &str,
     facts: ActionFinishFacts,
 ) {
-    events.lock().expect("events lock").emit(EventKind::ActionFinished {
-        action_id: action_id.to_owned(),
-        status: facts.status,
-        exit_code: facts.exit_code,
-        input_digests: named_digests(facts.input_digests),
-        output_digests: named_digests(facts.output_digests),
-        key_candidate: facts.key_candidate,
-        cache_eligible: facts.cache_eligible,
-        error: facts.error,
-    });
+    events
+        .lock()
+        .expect("events lock")
+        .emit(EventKind::ActionFinished {
+            action_id: action_id.to_owned(),
+            status: facts.status,
+            exit_code: facts.exit_code,
+            input_digests: named_digests(facts.input_digests),
+            output_digests: named_digests(facts.output_digests),
+            key_candidate: facts.key_candidate,
+            cache_eligible: facts.cache_eligible,
+            error: facts.error,
+        });
 }
 
 fn named_digests(digests: &[ActionContentDigest]) -> Vec<NamedDigest> {
@@ -926,7 +1049,10 @@ pub fn print_action_key(
         "action={} key_candidate={} cache_eligible={} blockers={:?}",
         action.id, candidate.digest, candidate.cache_eligible, candidate.reasons
     );
-    Ok(Some((candidate.digest.to_string(), candidate.cache_eligible)))
+    Ok(Some((
+        candidate.digest.to_string(),
+        candidate.cache_eligible,
+    )))
 }
 
 #[cfg(test)]
@@ -934,7 +1060,12 @@ mod tests {
     use super::*;
 
     fn admission(ready: &[usize], cpu: u64, memory_mb: Option<u64>) -> Admission {
-        Admission { ready: ready.iter().copied().collect(), running: 0, free_cpu: cpu, free_memory_mb: memory_mb }
+        Admission {
+            ready: ready.iter().copied().collect(),
+            running: 0,
+            free_cpu: cpu,
+            free_memory_mb: memory_mb,
+        }
     }
 
     fn weight(cpu: u64, memory_mb: u64) -> Weight {
@@ -948,7 +1079,9 @@ mod tests {
             .worst(Termination::TimedOut)
             .worst(Termination::FailedProcess);
         assert!(matches!(worst, Termination::TimedOut));
-        let worst = worst.worst(Termination::HardError("x".to_owned())).worst(Termination::Cancelled);
+        let worst = worst
+            .worst(Termination::HardError("x".to_owned()))
+            .worst(Termination::Cancelled);
         assert!(matches!(worst, Termination::HardError(ref message) if message == "x"));
     }
 
@@ -1006,11 +1139,20 @@ mod tests {
             cache_policy: build_action::CachePolicy::Never,
             toolchain: None,
             timeout_ms: None,
-            resources: Some(build_action::ResourceRequest { cpu: 16, memory_mb: Some(9000) }),
+            resources: Some(build_action::ResourceRequest {
+                cpu: 16,
+                memory_mb: Some(9000),
+            }),
         };
-        let capacity = Capacity { cpu: 4, memory_mb: Some(2048) };
+        let capacity = Capacity {
+            cpu: 4,
+            memory_mb: Some(2048),
+        };
         assert_eq!(clamp_weight(&action, capacity), (weight(4, 2048), true));
-        let unbounded = Capacity { cpu: 4, memory_mb: None };
+        let unbounded = Capacity {
+            cpu: 4,
+            memory_mb: None,
+        };
         assert_eq!(clamp_weight(&action, unbounded), (weight(4, 9000), true));
         action.resources = None;
         assert_eq!(clamp_weight(&action, capacity), (weight(1, 0), false));

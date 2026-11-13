@@ -17,8 +17,8 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("ant-cli-{name}-{}-{unique}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ant-cli-{name}-{}-{unique}", std::process::id()));
         fs::create_dir_all(&path).expect("create temp dir");
         TempDir(path)
     }
@@ -78,7 +78,10 @@ fn plan_action(id: &str, command: &str, dependencies: &[&str]) -> serde_json::Va
 
 fn write_plan(dir: &TempDir, actions: &[serde_json::Value]) -> String {
     let plan = json!({ "schema_version": 1, "actions": actions });
-    let path = dir.write("plan.json", &serde_json::to_string_pretty(&plan).expect("plan json"));
+    let path = dir.write(
+        "plan.json",
+        &serde_json::to_string_pretty(&plan).expect("plan json"),
+    );
     path.to_string_lossy().into_owned()
 }
 
@@ -126,11 +129,14 @@ fn version_and_help_commands_succeed() {
 #[test]
 fn plan_executes_actions_in_dependency_order() {
     let dir = TempDir::new("plan-order");
-    let plan = write_plan(&dir, &[
-        plan_action("first", "echo first> a.txt", &[]),
-        plan_action("second", "echo second> b.txt", &["first"]),
-        plan_action("third", "echo third> c.txt", &["second"]),
-    ]);
+    let plan = write_plan(
+        &dir,
+        &[
+            plan_action("first", "echo first> a.txt", &[]),
+            plan_action("second", "echo second> b.txt", &["first"]),
+            plan_action("third", "echo third> c.txt", &["second"]),
+        ],
+    );
     let workspace = dir.path().to_string_lossy().into_owned();
     let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
@@ -140,7 +146,10 @@ fn plan_executes_actions_in_dependency_order() {
     let second_index = stdout.find("action=second status=started").expect("second");
     let third_index = stdout.find("action=third status=started").expect("third");
     assert!(first_index < second_index && second_index < third_index);
-    assert!(stdout.contains("key_candidate="), "action keys must be reported: {stdout:?}");
+    assert!(
+        stdout.contains("key_candidate="),
+        "action keys must be reported: {stdout:?}"
+    );
 }
 
 #[test]
@@ -149,16 +158,22 @@ fn plan_rejects_unknown_dependency() {
     let plan = write_plan(&dir, &[plan_action("a", "echo hi", &["ghost"])]);
     let (code, _, stderr) = run_ant(&["plan", "validate", "--plan", &plan]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("unknown action 'ghost'"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("unknown action 'ghost'"),
+        "stderr was {stderr:?}"
+    );
 }
 
 #[test]
 fn plan_rejects_cycle() {
     let dir = TempDir::new("plan-cycle");
-    let plan = write_plan(&dir, &[
-        plan_action("a", "echo a", &["b"]),
-        plan_action("b", "echo b", &["a"]),
-    ]);
+    let plan = write_plan(
+        &dir,
+        &[
+            plan_action("a", "echo a", &["b"]),
+            plan_action("b", "echo b", &["a"]),
+        ],
+    );
     let (code, _, stderr) = run_ant(&["plan", "validate", "--plan", &plan]);
     assert_eq!(code, 1);
     assert!(stderr.contains("cycle"), "stderr was {stderr:?}");
@@ -174,21 +189,30 @@ fn plan_describe_shows_contract_without_executing() {
     assert!(stdout.contains("action=only dependencies=-"));
     assert!(stdout.contains("cache_policy="));
     // `describe` must not run the command: the echoed file must not exist.
-    assert!(!dir.path().join("a.txt").exists(), "describe must not execute actions");
+    assert!(
+        !dir.path().join("a.txt").exists(),
+        "describe must not execute actions"
+    );
 }
 
 #[test]
 fn failed_action_stops_the_plan() {
     let dir = TempDir::new("plan-fail");
-    let plan = write_plan(&dir, &[
-        plan_action("fails", "exit 3", &[]),
-        plan_action("never-runs", "echo never> never.txt", &["fails"]),
-    ]);
+    let plan = write_plan(
+        &dir,
+        &[
+            plan_action("fails", "exit 3", &[]),
+            plan_action("never-runs", "echo never> never.txt", &["fails"]),
+        ],
+    );
     let workspace = dir.path().to_string_lossy().into_owned();
     let (code, stdout, _) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan]);
     assert_eq!(code, 1);
     assert!(stdout.contains("action=fails status=failed exit_code=3"));
-    assert!(!stdout.contains("action=never-runs status=started"), "fail-fast violated: {stdout:?}");
+    assert!(
+        !stdout.contains("action=never-runs status=started"),
+        "fail-fast violated: {stdout:?}"
+    );
 }
 
 #[test]
@@ -213,7 +237,14 @@ fn cancel_file_stops_plan_with_exit_130() {
     let workspace = dir.path().to_string_lossy().into_owned();
 
     let child = ant()
-        .args(["run", "--workspace", &workspace, "--plan", &plan, "--cancel-file"])
+        .args([
+            "run",
+            "--workspace",
+            &workspace,
+            "--plan",
+            &plan,
+            "--cancel-file",
+        ])
         .arg(&cancel_file)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -223,7 +254,12 @@ fn cancel_file_stops_plan_with_exit_130() {
     std::thread::sleep(Duration::from_millis(700));
     fs::write(&cancel_file, b"stop").expect("create cancel marker");
     let output = child.wait_with_output().expect("wait for ant");
-    assert_eq!(output.status.code(), Some(130), "stdout was {:?}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stdout was {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("status=cancelled"), "stdout was {stdout:?}");
 }
@@ -234,27 +270,57 @@ fn single_command_form_runs_and_reports_digests() {
     fs::write(dir.path().join("in.txt"), b"content").expect("input");
     let workspace = dir.path().to_string_lossy().into_owned();
     let (code, stdout, stderr) = if cfg!(windows) {
-        run_ant(&["run", "--workspace", &workspace, "--cwd", ".", "--",
-                  "cmd", "/C", "copy /Y in.txt out.txt >nul"])
+        run_ant(&[
+            "run",
+            "--workspace",
+            &workspace,
+            "--cwd",
+            ".",
+            "--",
+            "cmd",
+            "/C",
+            "copy /Y in.txt out.txt >nul",
+        ])
     } else {
-        run_ant(&["run", "--workspace", &workspace, "--cwd", ".", "--",
-                  "sh", "-c", "cp in.txt out.txt"])
+        run_ant(&[
+            "run",
+            "--workspace",
+            &workspace,
+            "--cwd",
+            ".",
+            "--",
+            "sh",
+            "-c",
+            "cp in.txt out.txt",
+        ])
     };
     assert_eq!(code, 0, "stderr was {stderr:?}");
     assert!(stdout.contains("action=cli-local-run exit_code=0"));
     // The single-command form declares no inputs or outputs, so only the
     // action key candidate is reported.
     assert!(stdout.contains("key_candidate=sha256:"));
-    assert!(stdout.contains("cache_eligible=false"), "default must be non-cacheable");
+    assert!(
+        stdout.contains("cache_eligible=false"),
+        "default must be non-cacheable"
+    );
 }
 
 #[test]
 fn plan_with_duplicate_action_id_is_rejected() {
     let dir = TempDir::new("plan-dup");
-    let plan = write_plan(&dir, &[plan_action("dup", "echo a", &[]), plan_action("dup", "echo b", &[])]);
+    let plan = write_plan(
+        &dir,
+        &[
+            plan_action("dup", "echo a", &[]),
+            plan_action("dup", "echo b", &[]),
+        ],
+    );
     let (code, _, stderr) = run_ant(&["plan", "validate", "--plan", &plan]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("duplicate action ID"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("duplicate action ID"),
+        "stderr was {stderr:?}"
+    );
 }
 
 #[test]
@@ -274,9 +340,20 @@ fn parallel_jobs_respect_dependencies() {
     };
     let plan = write_plan(&dir, &[first, second]);
     let workspace = dir.path().to_string_lossy().into_owned();
-    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--jobs", "4"]);
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--jobs",
+        "4",
+    ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-    assert!(dir.path().join("b.out").exists(), "dependent must run after its dependency: {stdout:?}");
+    assert!(
+        dir.path().join("b.out").exists(),
+        "dependent must run after its dependency: {stdout:?}"
+    );
 }
 
 #[test]
@@ -287,36 +364,75 @@ fn parallel_jobs_run_independent_actions_concurrently() {
     // Sequential execution would run the waiter first and it would fail; the
     // marker can only exist in time if both actions ran concurrently.
     let setter = if cfg!(windows) {
-        plan_action("set-marker", "echo x> b.started & ping -n 3 127.0.0.1 >nul", &[])
+        plan_action(
+            "set-marker",
+            "echo x> b.started & ping -n 3 127.0.0.1 >nul",
+            &[],
+        )
     } else {
         plan_action("set-marker", "touch b.started && sleep 2", &[])
     };
     let waiter = if cfg!(windows) {
-        plan_action("wait-for-marker", "ping -n 3 127.0.0.1 >nul & if not exist b.started exit 1", &[])
+        plan_action(
+            "wait-for-marker",
+            "ping -n 3 127.0.0.1 >nul & if not exist b.started exit 1",
+            &[],
+        )
     } else {
         plan_action("wait-for-marker", "sleep 2 && test -f b.started", &[])
     };
     let plan = write_plan(&dir, &[setter, waiter]);
     let workspace = dir.path().to_string_lossy().into_owned();
-    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--jobs", "2"]);
-    assert_eq!(code, 0, "actions did not overlap; stderr was {stderr:?}; stdout was {stdout:?}");
-    assert!(dir.path().join("b.started").exists(), "stdout was {stdout:?}");
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--jobs",
+        "2",
+    ]);
+    assert_eq!(
+        code, 0,
+        "actions did not overlap; stderr was {stderr:?}; stdout was {stdout:?}"
+    );
+    assert!(
+        dir.path().join("b.started").exists(),
+        "stdout was {stdout:?}"
+    );
 }
 
 #[test]
 fn parallel_failure_stops_new_starts_and_reports_skipped() {
     let dir = TempDir::new("par-fail");
-    let plan = write_plan(&dir, &[
-        plan_action("fails", "exit 3", &[]),
-        plan_action("dependent", "echo never> d.txt", &["fails"]),
-        plan_action("independent", "ping -n 3 127.0.0.1 >nul", &[]),
-    ]);
+    let plan = write_plan(
+        &dir,
+        &[
+            plan_action("fails", "exit 3", &[]),
+            plan_action("dependent", "echo never> d.txt", &["fails"]),
+            plan_action("independent", "ping -n 3 127.0.0.1 >nul", &[]),
+        ],
+    );
     let workspace = dir.path().to_string_lossy().into_owned();
-    let (code, stdout, _) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--jobs", "4"]);
+    let (code, stdout, _) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--jobs",
+        "4",
+    ]);
     assert_eq!(code, 1);
     assert!(stdout.contains("action=fails status=failed exit_code=3"));
-    assert!(stdout.contains("action=dependent status=skipped"), "stdout was {stdout:?}");
-    assert!(!stdout.contains("action=dependent status=started"), "fail-fast violated: {stdout:?}");
+    assert!(
+        stdout.contains("action=dependent status=skipped"),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("action=dependent status=started"),
+        "fail-fast violated: {stdout:?}"
+    );
 }
 
 #[test]
@@ -328,7 +444,15 @@ fn parallel_timeout_reports_exit_124() {
     slow_b["action"]["timeout_ms"] = json!(500);
     let plan = write_plan(&dir, &[slow_a, slow_b]);
     let workspace = dir.path().to_string_lossy().into_owned();
-    let (code, stdout, _) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--jobs", "2"]);
+    let (code, stdout, _) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--jobs",
+        "2",
+    ]);
     assert_eq!(code, 124, "stdout was {stdout:?}");
     assert!(stdout.contains("status=timed_out"));
 }
@@ -336,15 +460,27 @@ fn parallel_timeout_reports_exit_124() {
 #[test]
 fn parallel_cancel_file_reports_exit_130() {
     let dir = TempDir::new("par-cancel");
-    let plan = write_plan(&dir, &[
-        plan_action("slow-a", "ping -n 6 127.0.0.1 >nul", &[]),
-        plan_action("slow-b", "ping -n 6 127.0.0.1 >nul", &[]),
-    ]);
+    let plan = write_plan(
+        &dir,
+        &[
+            plan_action("slow-a", "ping -n 6 127.0.0.1 >nul", &[]),
+            plan_action("slow-b", "ping -n 6 127.0.0.1 >nul", &[]),
+        ],
+    );
     let cancel_file = dir.path().join("stop.marker");
     let workspace = dir.path().to_string_lossy().into_owned();
 
     let child = ant()
-        .args(["run", "--workspace", &workspace, "--plan", &plan, "--jobs", "2", "--cancel-file"])
+        .args([
+            "run",
+            "--workspace",
+            &workspace,
+            "--plan",
+            &plan,
+            "--jobs",
+            "2",
+            "--cancel-file",
+        ])
         .arg(&cancel_file)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -353,7 +489,12 @@ fn parallel_cancel_file_reports_exit_130() {
     std::thread::sleep(Duration::from_millis(700));
     fs::write(&cancel_file, b"stop").expect("create cancel marker");
     let output = child.wait_with_output().expect("wait for ant");
-    assert_eq!(output.status.code(), Some(130), "stdout was {:?}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stdout was {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("status=cancelled"), "stdout was {stdout:?}");
 }
@@ -363,13 +504,27 @@ fn jobs_zero_and_single_command_rejections() {
     let dir = TempDir::new("jobs-arg");
     let plan = write_plan(&dir, &[plan_action("a", "echo hi", &[])]);
     let workspace = dir.path().to_string_lossy().into_owned();
-    let (code, _, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--jobs", "0"]);
+    let (code, _, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--jobs",
+        "0",
+    ]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--jobs requires a positive integer"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("--jobs requires a positive integer"),
+        "stderr was {stderr:?}"
+    );
 
     let (code, _, stderr) = run_ant(&["run", "--jobs", "2", "--", "cmd", "/C", "rem"]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--jobs applies only to plan execution"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("--jobs applies only to plan execution"),
+        "stderr was {stderr:?}"
+    );
 }
 
 fn read_events(path: &Path) -> Vec<build_events::Event> {
@@ -384,37 +539,70 @@ fn read_events(path: &Path) -> Vec<build_events::Event> {
 #[test]
 fn events_file_records_plan_lifecycle() {
     let dir = TempDir::new("events-plan");
-    let plan = write_plan(&dir, &[
-        plan_action("first", "echo first> a.txt", &[]),
-        plan_action("second", "echo second> b.txt", &["first"]),
-    ]);
+    let plan = write_plan(
+        &dir,
+        &[
+            plan_action("first", "echo first> a.txt", &[]),
+            plan_action("second", "echo second> b.txt", &["first"]),
+        ],
+    );
     let workspace = dir.path().to_string_lossy().into_owned();
     let events_path = dir.path().join("events.jsonl");
     let (code, _, stderr) = run_ant(&[
-        "run", "--workspace", &workspace, "--plan", &plan, "--jobs", "2", "--events",
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--jobs",
+        "2",
+        "--events",
     ]);
     // --events requires its path argument; rerun correctly.
     assert_eq!(code, 1);
     assert!(stderr.contains("--events requires a file path"));
 
     let (code, stdout, stderr) = run_ant(&[
-        "run", "--workspace", &workspace, "--plan", &plan, "--jobs", "2",
-        "--events", events_path.to_string_lossy().as_ref(),
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--jobs",
+        "2",
+        "--events",
+        events_path.to_string_lossy().as_ref(),
     ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     let events = read_events(&events_path);
     let kinds: Vec<String> = events
         .iter()
-        .map(|event| serde_json::to_value(event).unwrap()["kind"].as_str().unwrap().to_owned())
+        .map(|event| {
+            serde_json::to_value(event).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
         .collect::<Vec<_>>();
     // Order: run started, both actions started, finished, run finished.
     assert_eq!(kinds.first().map(|kind| kind.as_str()), Some("run_started"));
     assert_eq!(kinds.last().map(|kind| kind.as_str()), Some("run_finished"));
-    assert_eq!(kinds.iter().filter(|kind| kind.as_str() == "action_started").count(), 2);
-    assert_eq!(kinds.iter().filter(|kind| kind.as_str() == "action_finished").count(), 2);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| kind.as_str() == "action_started")
+            .count(),
+        2
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| kind.as_str() == "action_finished")
+            .count(),
+        2
+    );
     // All events share one run_id.
-    let run_ids: std::collections::HashSet<u64> =
-        events.iter().map(|event| event.run_id).collect();
+    let run_ids: std::collections::HashSet<u64> = events.iter().map(|event| event.run_id).collect();
     assert_eq!(run_ids.len(), 1, "run_id must correlate the run");
     // Run facts: plan mode with jobs, successful outcome, no skips.
     let first = &events[0];
@@ -432,9 +620,20 @@ fn events_file_records_plan_lifecycle() {
         .find(|event| matches!(event.kind, build_events::EventKind::ActionFinished { .. }))
         .expect("action finished event");
     match &finished.kind {
-        build_events::EventKind::ActionFinished { status, key_candidate, cache_eligible, error, .. } => {
+        build_events::EventKind::ActionFinished {
+            status,
+            key_candidate,
+            cache_eligible,
+            error,
+            ..
+        } => {
             assert_eq!(status, &build_events::ActionStatus::Succeeded);
-            assert!(key_candidate.as_deref().unwrap_or("").starts_with("sha256:"));
+            assert!(
+                key_candidate
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("sha256:")
+            );
             assert_eq!(cache_eligible, &Some(false));
             assert_eq!(error, &None);
         }
@@ -445,21 +644,32 @@ fn events_file_records_plan_lifecycle() {
 #[test]
 fn events_file_records_failures_and_skips() {
     let dir = TempDir::new("events-fail");
-    let plan = write_plan(&dir, &[
-        plan_action("fails", "exit 3", &[]),
-        plan_action("dependent", "echo never> d.txt", &["fails"]),
-    ]);
+    let plan = write_plan(
+        &dir,
+        &[
+            plan_action("fails", "exit 3", &[]),
+            plan_action("dependent", "echo never> d.txt", &["fails"]),
+        ],
+    );
     let workspace = dir.path().to_string_lossy().into_owned();
     let events_path = dir.path().join("events.jsonl");
     let (code, _, _) = run_ant(&[
-        "run", "--workspace", &workspace, "--plan", &plan,
-        "--events", events_path.to_string_lossy().as_ref(),
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--events",
+        events_path.to_string_lossy().as_ref(),
     ]);
     assert_eq!(code, 1);
     let events = read_events(&events_path);
     assert!(events.iter().any(|event| matches!(
         event.kind,
-        build_events::EventKind::ActionFinished { status: build_events::ActionStatus::Failed, .. }
+        build_events::EventKind::ActionFinished {
+            status: build_events::ActionStatus::Failed,
+            ..
+        }
     )));
     assert!(events.iter().any(|event| matches!(
         event.kind,
@@ -480,19 +690,44 @@ fn plan_explain_reports_key_blockers_and_cache_entry() {
     let workspace = dir.path().to_string_lossy().into_owned();
     let cache_dir = dir.path().join("cache").to_string_lossy().into_owned();
     let (code, stdout, stderr) = run_ant(&[
-        "plan", "explain", "--plan", &plan, "--workspace", &workspace, "--cache-dir", &cache_dir,
+        "plan",
+        "explain",
+        "--plan",
+        &plan,
+        "--workspace",
+        &workspace,
+        "--cache-dir",
+        &cache_dir,
     ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     assert!(stdout.contains("mode=explain"), "stdout was {stdout:?}");
     assert!(stdout.contains("status=prepared"), "stdout was {stdout:?}");
-    assert!(stdout.contains("key_candidate=sha256:"), "stdout was {stdout:?}");
-    assert!(stdout.contains("cache_eligible=false"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("key_candidate=sha256:"),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains("cache_eligible=false"),
+        "stdout was {stdout:?}"
+    );
     // The direct local executor declares no isolation capabilities, so these
     // capability-driven blockers must appear in the diagnostics.
-    assert!(stdout.contains("blocker=policy-never"), "stdout was {stdout:?}");
-    assert!(stdout.contains("blocker=missing-toolchain-identity"), "stdout was {stdout:?}");
-    assert!(stdout.contains("blocker=local-executor-unsandboxed"), "stdout was {stdout:?}");
-    assert!(stdout.contains("blocker=network-isolation-unavailable"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("blocker=policy-never"),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains("blocker=missing-toolchain-identity"),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains("blocker=local-executor-unsandboxed"),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains("blocker=network-isolation-unavailable"),
+        "stdout was {stdout:?}"
+    );
     // The executor now captures the platform version and digests input
     // metadata, so these two blockers must be gone:
     assert!(
@@ -504,12 +739,23 @@ fn plan_explain_reports_key_blockers_and_cache_entry() {
         "input digests include metadata; stdout was {stdout:?}"
     );
     // No reuse is wired into the run path, so a fresh cache has no entry.
-    assert!(stdout.contains("cache_entry=absent"), "stdout was {stdout:?}");
-    assert!(stdout.contains("explain=complete result=prepared"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("cache_entry=absent"),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains("explain=complete result=prepared"),
+        "stdout was {stdout:?}"
+    );
 
     // The same plan without --cache-dir omits the cache line entirely.
     let (code, stdout, _) = run_ant(&[
-        "plan", "explain", "--plan", &plan, "--workspace", &workspace,
+        "plan",
+        "explain",
+        "--plan",
+        &plan,
+        "--workspace",
+        &workspace,
     ]);
     assert_eq!(code, 0);
     assert!(!stdout.contains("cache_entry="), "stdout was {stdout:?}");
@@ -524,11 +770,22 @@ fn plan_explain_reports_prepare_failure_and_fails() {
     let plan = write_plan(&dir, &[action]);
     let workspace = dir.path().to_string_lossy().into_owned();
     let (code, stdout, stderr) = run_ant(&[
-        "plan", "explain", "--plan", &plan, "--workspace", &workspace,
+        "plan",
+        "explain",
+        "--plan",
+        &plan,
+        "--workspace",
+        &workspace,
     ]);
     assert_eq!(code, 1, "stderr was {stderr:?}; stdout was {stdout:?}");
-    assert!(stdout.contains("status=prepare_failed"), "stdout was {stdout:?}");
-    assert!(stdout.contains("explain=complete result=prepare_failed"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("status=prepare_failed"),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains("explain=complete result=prepare_failed"),
+        "stdout was {stdout:?}"
+    );
 }
 
 /// A mtime-only input change must change the reported action key: the run
@@ -568,7 +825,9 @@ fn run_action_keys_respond_to_metadata_only_input_changes() {
 
 /// Extract the `key_candidate=sha256:...` value from run output.
 fn extract_key_candidate(stdout: &str) -> Option<String> {
-    let line = stdout.lines().find(|line| line.contains("key_candidate="))?;
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("key_candidate="))?;
     let start = line.find("key_candidate=")? + "key_candidate=".len();
     let rest = &line[start..];
     Some(rest.split_whitespace().next().expect("value").to_owned())
@@ -580,10 +839,16 @@ fn plan_explain_rejects_flags_from_other_subcommands() {
     let plan = write_plan(&dir, &[plan_action("only", "echo hi", &[])]);
     let (code, _, stderr) = run_ant(&["plan", "validate", "--plan", &plan, "--cache-dir", "cache"]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--cache-dir applies only to 'ant plan explain'"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("--cache-dir applies only to 'ant plan explain'"),
+        "stderr was {stderr:?}"
+    );
     let (code, _, stderr) = run_ant(&["plan", "describe", "--plan", &plan, "--workspace", "."]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--workspace applies only to 'ant plan explain'"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("--workspace applies only to 'ant plan explain'"),
+        "stderr was {stderr:?}"
+    );
     let (code, _, stderr) = run_ant(&["run", "--cache-dir", "cache", "--", "cmd", "/C", "rem"]);
     assert_eq!(code, 1);
     // The single-command action is always cache_policy "never", so cache
@@ -599,9 +864,25 @@ fn events_file_records_single_command_run() {
     let dir = TempDir::new("events-single");
     let events_path = dir.path().join("events.jsonl");
     let (code, stdout, stderr) = if cfg!(windows) {
-        run_ant(&["run", "--events", events_path.to_string_lossy().as_ref(), "--", "cmd", "/C", "echo hi"])
+        run_ant(&[
+            "run",
+            "--events",
+            events_path.to_string_lossy().as_ref(),
+            "--",
+            "cmd",
+            "/C",
+            "echo hi",
+        ])
     } else {
-        run_ant(&["run", "--events", events_path.to_string_lossy().as_ref(), "--", "sh", "-c", "echo hi"])
+        run_ant(&[
+            "run",
+            "--events",
+            events_path.to_string_lossy().as_ref(),
+            "--",
+            "sh",
+            "-c",
+            "echo hi",
+        ])
     };
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     let events = read_events(&events_path);
@@ -633,7 +914,10 @@ fn sandbox_run_writes_inside_workspace_succeeds() {
     ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     let marker = dir.path().join("marker.txt");
-    assert!(marker.exists(), "sandboxed run should write inside the workspace");
+    assert!(
+        marker.exists(),
+        "sandboxed run should write inside the workspace"
+    );
     assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "confined");
 }
 
@@ -667,7 +951,10 @@ fn sandbox_run_write_outside_workspace_fails_closed() {
         "/C",
         &command,
     ]);
-    assert_ne!(code, 0, "sandboxed run should fail when writing outside; got code {code}\nstdout={stdout}\nstderr={stderr}");
+    assert_ne!(
+        code, 0,
+        "sandboxed run should fail when writing outside; got code {code}\nstdout={stdout}\nstderr={stderr}"
+    );
     assert!(
         !Path::new(&outside).exists(),
         "no escape file should be created outside the sandboxed workspace"
@@ -722,7 +1009,12 @@ fn cache_participation_keeps_the_gate_closed() {
     dir.write("in.txt", "input");
     let plan = write_plan(
         &dir,
-        &[cacheable_plan_action("gen", "echo cached > out.txt", "in.txt", "out.txt")],
+        &[cacheable_plan_action(
+            "gen",
+            "echo cached > out.txt",
+            "in.txt",
+            "out.txt",
+        )],
     );
     let cache = dir.path().join("cache");
     let cache_str = cache.to_string_lossy().into_owned();
@@ -761,7 +1053,10 @@ fn cache_participation_keeps_the_gate_closed() {
     let entries = std::fs::read_dir(cache.join("entries"))
         .expect("entries dir")
         .count();
-    assert_eq!(entries, 0, "no cache entries may be written while blockers remain");
+    assert_eq!(
+        entries, 0,
+        "no cache entries may be written while blockers remain"
+    );
 }
 
 #[test]
@@ -788,13 +1083,24 @@ fn adapt_rejects_unknown_adapter_and_unrecognized_projects() {
     let empty = dir.path().join("empty");
     std::fs::create_dir_all(&empty).expect("mkdir");
     let empty_str = empty.to_string_lossy().into_owned();
-    let (code, _, stderr) = run_ant(&["adapt", "--adapter", "cargo", "--project", &empty_str, "--out", &out_str]);
+    let (code, _, stderr) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "cargo",
+        "--project",
+        &empty_str,
+        "--out",
+        &out_str,
+    ]);
     assert_eq!(code, 1);
     assert!(
         stderr.contains("does not recognize project") && stderr.contains("no Cargo.toml"),
         "stderr was {stderr:?}"
     );
-    assert!(!out.exists(), "no plan may be written for an unrecognized project");
+    assert!(
+        !out.exists(),
+        "no plan may be written for an unrecognized project"
+    );
 }
 
 /// The adapter's plan must be a real vertical slice: generate, execute, and
@@ -808,14 +1114,24 @@ fn adapt_generates_and_runs_a_cargo_project() {
     )
     .expect("write Cargo.toml");
     std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
-    std::fs::write(dir.path().join("src/main.rs"), "fn main() { println!(\"hello\"); }\n")
-        .expect("write main.rs");
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .expect("write main.rs");
     let project = dir.path().to_string_lossy().into_owned();
     let plan = dir.path().join("plan.json");
     let plan_str = plan.to_string_lossy().into_owned();
 
-    let (code, stdout, stderr) =
-        run_ant(&["adapt", "--adapter", "cargo", "--project", &project, "--out", &plan_str]);
+    let (code, stdout, stderr) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "cargo",
+        "--project",
+        &project,
+        "--out",
+        &plan_str,
+    ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     assert!(stdout.contains("adapter=cargo"), "stdout was {stdout:?}");
     assert!(stdout.contains("actions=1"), "stdout was {stdout:?}");
@@ -829,7 +1145,10 @@ fn adapt_generates_and_runs_a_cargo_project() {
     // Executing it builds the real crate and the declared artifact exists.
     let (code, stdout, stderr) = run_ant(&["run", "--workspace", &project, "--plan", &plan_str]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-    assert!(stdout.contains("action=hello-app status=succeeded"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("action=hello-app status=succeeded"),
+        "stdout was {stdout:?}"
+    );
     // The toolchain identity is real, so no missing-toolchain blocker.
     assert!(
         !stdout.contains("MissingToolchainIdentity"),
@@ -839,12 +1158,23 @@ fn adapt_generates_and_runs_a_cargo_project() {
         .path()
         .join("target/debug")
         .join(format!("hello-app{}", std::env::consts::EXE_SUFFIX));
-    assert!(artifact.is_file(), "declared artifact must exist after the run");
+    assert!(
+        artifact.is_file(),
+        "declared artifact must exist after the run"
+    );
 
     // And re-adapting is deterministic: same plan content.
     let plan2 = dir.path().join("plan2.json");
     let plan2_str = plan2.to_string_lossy().into_owned();
-    let (code, _, _) = run_ant(&["adapt", "--adapter", "cargo", "--project", &project, "--out", &plan2_str]);
+    let (code, _, _) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "cargo",
+        "--project",
+        &project,
+        "--out",
+        &plan2_str,
+    ]);
     assert_eq!(code, 0);
     let first = std::fs::read_to_string(&plan).expect("read plan");
     let second = std::fs::read_to_string(&plan2).expect("read plan2");
@@ -869,8 +1199,11 @@ fn adapt_plan_runs_sandboxed_for_a_path_dep_workspace() {
         "[package]\nname = \"core-lib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"core_lib\"\n",
     )
     .expect("write core manifest");
-    std::fs::write(dir.path().join("core/src/lib.rs"), "pub fn core() -> u32 { 1 }\n")
-        .expect("write lib.rs");
+    std::fs::write(
+        dir.path().join("core/src/lib.rs"),
+        "pub fn core() -> u32 { 1 }\n",
+    )
+    .expect("write lib.rs");
     std::fs::create_dir_all(dir.path().join("app/src")).expect("mkdir app/src");
     std::fs::write(
         dir.path().join("app/Cargo.toml"),
@@ -886,8 +1219,15 @@ fn adapt_plan_runs_sandboxed_for_a_path_dep_workspace() {
     let plan = dir.path().join("plan.json");
     let plan_str = plan.to_string_lossy().into_owned();
 
-    let (code, _, stderr) =
-        run_ant(&["adapt", "--adapter", "cargo", "--project", &project, "--out", &plan_str]);
+    let (code, _, stderr) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "cargo",
+        "--project",
+        &project,
+        "--out",
+        &plan_str,
+    ]);
     assert_eq!(code, 0, "stderr was {stderr:?}");
 
     // Generation prepared the staging directory generated actions point at.
@@ -896,8 +1236,14 @@ fn adapt_plan_runs_sandboxed_for_a_path_dep_workspace() {
         "adapt must prepare the .ant/tmp staging directory"
     );
 
-    let (code, stdout, stderr) =
-        run_ant(&["run", "--workspace", &project, "--sandbox", "--plan", &plan_str]);
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &project,
+        "--sandbox",
+        "--plan",
+        &plan_str,
+    ]);
     if cfg!(windows) {
         assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
         // Both members built in DAG order under confinement.
@@ -951,8 +1297,15 @@ fn adapt_generates_and_runs_an_npm_project() {
     let plan = dir.path().join("plan.json");
     let plan_str = plan.to_string_lossy().into_owned();
 
-    let (code, stdout, stderr) =
-        run_ant(&["adapt", "--adapter", "npm", "--project", &project, "--out", &plan_str]);
+    let (code, stdout, stderr) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "npm",
+        "--project",
+        &project,
+        "--out",
+        &plan_str,
+    ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     assert!(stdout.contains("adapter=npm"), "stdout was {stdout:?}");
     assert!(stdout.contains("actions=1"), "stdout was {stdout:?}");
@@ -979,7 +1332,10 @@ fn adapt_generates_and_runs_an_npm_project() {
     // intentionally declares no outputs — npm has no standard layout — so the
     // artifact is not verified by the plan; the test verifies it directly.)
     let artifact = dir.path().join("dist/out.txt");
-    assert!(artifact.is_file(), "build artifact must exist after the run");
+    assert!(
+        artifact.is_file(),
+        "build artifact must exist after the run"
+    );
     assert_eq!(
         std::fs::read_to_string(&artifact).expect("read artifact"),
         "hello from npm"
@@ -988,7 +1344,15 @@ fn adapt_generates_and_runs_an_npm_project() {
     // Re-adapting is deterministic: same plan content.
     let plan2 = dir.path().join("plan2.json");
     let plan2_str = plan2.to_string_lossy().into_owned();
-    let (code, _, _) = run_ant(&["adapt", "--adapter", "npm", "--project", &project, "--out", &plan2_str]);
+    let (code, _, _) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "npm",
+        "--project",
+        &project,
+        "--out",
+        &plan2_str,
+    ]);
     assert_eq!(code, 0);
     let first = std::fs::read_to_string(&plan).expect("read plan");
     let second = std::fs::read_to_string(&plan2).expect("read plan2");
@@ -1008,13 +1372,24 @@ fn adapt_npm_rejects_project_without_a_build_script() {
     let out = dir.path().join("plan.json");
     let out_str = out.to_string_lossy().into_owned();
 
-    let (code, _, stderr) = run_ant(&["adapt", "--adapter", "npm", "--project", &project, "--out", &out_str]);
+    let (code, _, stderr) = run_ant(&[
+        "adapt",
+        "--adapter",
+        "npm",
+        "--project",
+        &project,
+        "--out",
+        &out_str,
+    ]);
     assert_eq!(code, 1);
     assert!(
         stderr.contains("no `build` script"),
         "stderr was {stderr:?}"
     );
-    assert!(!out.exists(), "no plan may be written without a build script");
+    assert!(
+        !out.exists(),
+        "no plan may be written without a build script"
+    );
 }
 
 /// Without `--adapter`, `ant adapt` uses the single adapter that recognizes
@@ -1026,7 +1401,10 @@ fn adapt_auto_selects_the_single_matching_adapter() {
         "package.json",
         "{\"name\":\"auto-app\",\"version\":\"0.1.0\",\"scripts\":{\"build\":\"node build.js\"}}",
     );
-    dir.write("build.js", "require('fs').writeFileSync('auto-out.txt', 'auto');\n");
+    dir.write(
+        "build.js",
+        "require('fs').writeFileSync('auto-out.txt', 'auto');\n",
+    );
     let project = dir.path().to_string_lossy().into_owned();
     let plan = dir.path().join("plan.json");
     let plan_str = plan.to_string_lossy().into_owned();
@@ -1040,7 +1418,10 @@ fn adapt_auto_selects_the_single_matching_adapter() {
 
     let (code, stdout, stderr) = run_ant(&["run", "--workspace", &project, "--plan", &plan_str]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-    assert_eq!(fs::read_to_string(dir.path().join("auto-out.txt")).expect("artifact"), "auto");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("auto-out.txt")).expect("artifact"),
+        "auto"
+    );
 }
 
 /// Auto-selection never guesses: several matches or none fail with the
@@ -1094,26 +1475,47 @@ fn adapt_detect_reports_every_adapter_without_writing() {
     let project = dir.path().to_string_lossy().into_owned();
     let (code, stdout, stderr) = run_ant(&["adapt", "--detect", "--project", &project]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
-    assert!(stdout.contains("detect adapter=cargo supported=true"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("detect adapter=cargo supported=true"),
+        "stdout was {stdout:?}"
+    );
     assert!(
         stdout.contains("detect adapter=npm supported=false reason=no package.json"),
         "stdout was {stdout:?}"
     );
-    assert!(stdout.contains("supported_adapters=1"), "stdout was {stdout:?}");
-    assert!(!dir.path().join(".ant").exists(), "detection must not write anything");
+    assert!(
+        stdout.contains("supported_adapters=1"),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        !dir.path().join(".ant").exists(),
+        "detection must not write anything"
+    );
 
     let empty = dir.path().join("empty");
     fs::create_dir_all(&empty).expect("mkdir");
     let empty_str = empty.to_string_lossy().into_owned();
     let (code, stdout, _) = run_ant(&["adapt", "--detect", "--project", &empty_str]);
     assert_eq!(code, 1);
-    assert!(stdout.contains("supported_adapters=0"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("supported_adapters=0"),
+        "stdout was {stdout:?}"
+    );
 
     let out_str = dir.path().join("plan.json").to_string_lossy().into_owned();
-    let (code, _, stderr) =
-        run_ant(&["adapt", "--detect", "--project", &project, "--out", &out_str]);
+    let (code, _, stderr) = run_ant(&[
+        "adapt",
+        "--detect",
+        "--project",
+        &project,
+        "--out",
+        &out_str,
+    ]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--detect cannot be combined"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("--detect cannot be combined"),
+        "stderr was {stderr:?}"
+    );
 }
 
 /// An action that fails if a sibling ran at the same time: it creates its own
@@ -1123,19 +1525,26 @@ fn exclusive_probe(id: &str, mine: &str, other: &str) -> serde_json::Value {
     if cfg!(windows) {
         plan_action(
             id,
-            &format!("echo x> {mine} & ping -n 2 127.0.0.1 >nul & if exist {other} (del {mine} & exit 1) else (del {mine})"),
+            &format!(
+                "echo x> {mine} & ping -n 2 127.0.0.1 >nul & if exist {other} (del {mine} & exit 1) else (del {mine})"
+            ),
             &[],
         )
     } else {
         plan_action(
             id,
-            &format!("touch {mine} && sleep 1 && if [ -e {other} ]; then rm -f {mine}; exit 1; fi; rm -f {mine}"),
+            &format!(
+                "touch {mine} && sleep 1 && if [ -e {other} ]; then rm -f {mine}; exit 1; fi; rm -f {mine}"
+            ),
             &[],
         )
     }
 }
 
-fn with_resources(mut action: serde_json::Value, resources: serde_json::Value) -> serde_json::Value {
+fn with_resources(
+    mut action: serde_json::Value,
+    resources: serde_json::Value,
+) -> serde_json::Value {
     action["action"]["resources"] = resources;
     action
 }
@@ -1148,22 +1557,54 @@ fn parallel_cpu_weights_serialize_heavy_actions() {
     let dir = TempDir::new("par-cpu-weight");
     let workspace = dir.path().to_string_lossy().into_owned();
 
-    let control = write_plan(&dir, &[
-        exclusive_probe("a", "a.run", "b.run"),
-        exclusive_probe("b", "b.run", "a.run"),
+    let control = write_plan(
+        &dir,
+        &[
+            exclusive_probe("a", "a.run", "b.run"),
+            exclusive_probe("b", "b.run", "a.run"),
+        ],
+    );
+    let (code, stdout, _) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &control,
+        "--jobs",
+        "2",
     ]);
-    let (code, stdout, _) = run_ant(&["run", "--workspace", &workspace, "--plan", &control, "--jobs", "2"]);
-    assert_eq!(code, 1, "control: default-weight actions must overlap and be detected; stdout was {stdout:?}");
+    assert_eq!(
+        code, 1,
+        "control: default-weight actions must overlap and be detected; stdout was {stdout:?}"
+    );
     let _ = fs::remove_file(dir.path().join("a.run"));
     let _ = fs::remove_file(dir.path().join("b.run"));
 
-    let weighted = write_plan(&dir, &[
-        with_resources(exclusive_probe("a", "a.run", "b.run"), json!({ "cpu": 2 })),
-        with_resources(exclusive_probe("b", "b.run", "a.run"), json!({ "cpu": 2 })),
+    let weighted = write_plan(
+        &dir,
+        &[
+            with_resources(exclusive_probe("a", "a.run", "b.run"), json!({ "cpu": 2 })),
+            with_resources(exclusive_probe("b", "b.run", "a.run"), json!({ "cpu": 2 })),
+        ],
+    );
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &weighted,
+        "--jobs",
+        "2",
     ]);
-    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &weighted, "--jobs", "2"]);
-    assert_eq!(code, 0, "cpu=2 actions overlapped under --jobs 2; stderr was {stderr:?}; stdout was {stdout:?}");
-    assert!(stdout.contains("action=a status=succeeded") && stdout.contains("action=b status=succeeded"), "{stdout:?}");
+    assert_eq!(
+        code, 0,
+        "cpu=2 actions overlapped under --jobs 2; stderr was {stderr:?}; stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains("action=a status=succeeded")
+            && stdout.contains("action=b status=succeeded"),
+        "{stdout:?}"
+    );
 }
 
 /// A memory budget serializes actions whose declared memory does not fit
@@ -1173,14 +1614,34 @@ fn parallel_cpu_weights_serialize_heavy_actions() {
 fn parallel_memory_budget_and_clamping() {
     let dir = TempDir::new("par-mem-weight");
     let workspace = dir.path().to_string_lossy().into_owned();
-    let plan = write_plan(&dir, &[
-        with_resources(exclusive_probe("a", "a.run", "b.run"), json!({ "memory_mb": 600 })),
-        with_resources(exclusive_probe("b", "b.run", "a.run"), json!({ "cpu": 8, "memory_mb": 600 })),
-    ]);
+    let plan = write_plan(
+        &dir,
+        &[
+            with_resources(
+                exclusive_probe("a", "a.run", "b.run"),
+                json!({ "memory_mb": 600 }),
+            ),
+            with_resources(
+                exclusive_probe("b", "b.run", "a.run"),
+                json!({ "cpu": 8, "memory_mb": 600 }),
+            ),
+        ],
+    );
     let (code, stdout, stderr) = run_ant(&[
-        "run", "--workspace", &workspace, "--plan", &plan, "--jobs", "4", "--memory-mb", "1000",
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--jobs",
+        "4",
+        "--memory-mb",
+        "1000",
     ]);
-    assert_eq!(code, 0, "600+600 MiB must not fit a 1000 MiB budget; stderr was {stderr:?}; stdout was {stdout:?}");
+    assert_eq!(
+        code, 0,
+        "600+600 MiB must not fit a 1000 MiB budget; stderr was {stderr:?}; stdout was {stdout:?}"
+    );
     assert!(
         stdout.contains("ant: note: action=b requests cpu=8 memory_mb=600 exceeding capacity cpu=4 memory_mb=1000; clamped to cpu=4 memory_mb=600"),
         "stdout was {stdout:?}"
@@ -1191,34 +1652,74 @@ fn parallel_memory_budget_and_clamping() {
 fn resource_requests_and_flags_are_validated() {
     let dir = TempDir::new("res-validate");
     let workspace = dir.path().to_string_lossy().into_owned();
-    let plan = write_plan(&dir, &[with_resources(plan_action("zero", "echo hi", &[]), json!({ "cpu": 0 }))]);
+    let plan = write_plan(
+        &dir,
+        &[with_resources(
+            plan_action("zero", "echo hi", &[]),
+            json!({ "cpu": 0 }),
+        )],
+    );
     let (code, _, stderr) = run_ant(&["plan", "validate", "--plan", &plan]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("InvalidResources") || stderr.to_lowercase().contains("resource"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("InvalidResources") || stderr.to_lowercase().contains("resource"),
+        "stderr was {stderr:?}"
+    );
 
-    let plan = write_plan(&dir, &[with_resources(plan_action("bogus", "echo hi", &[]), json!({ "gpu": 1 }))]);
+    let plan = write_plan(
+        &dir,
+        &[with_resources(
+            plan_action("bogus", "echo hi", &[]),
+            json!({ "gpu": 1 }),
+        )],
+    );
     let (code, _, _) = run_ant(&["plan", "validate", "--plan", &plan]);
     assert_eq!(code, 1, "unknown resource fields must be rejected");
 
     let ok = write_plan(&dir, &[plan_action("ok", "echo hi", &[])]);
-    let (code, _, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &ok, "--memory-mb", "0"]);
+    let (code, _, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &ok,
+        "--memory-mb",
+        "0",
+    ]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--memory-mb requires a positive integer"), "stderr was {stderr:?}");
-    let (code, _, stderr) = run_ant(&["run", "--workspace", &workspace, "--memory-mb", "100", "--", "cmd"]);
+    assert!(
+        stderr.contains("--memory-mb requires a positive integer"),
+        "stderr was {stderr:?}"
+    );
+    let (code, _, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--memory-mb",
+        "100",
+        "--",
+        "cmd",
+    ]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--memory-mb applies only to plan execution"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("--memory-mb applies only to plan execution"),
+        "stderr was {stderr:?}"
+    );
 }
 
 fn keep_going_plan(dir: &TempDir) -> String {
     // `bad` fails; `child` and `grandchild` sit downstream of it; `independent`
     // does not depend on it. Ready actions start in action-ID order, so
     // without keep-going `independent` would be skipped after `bad` fails.
-    write_plan(dir, &[
-        plan_action("bad", "exit 3", &[]),
-        plan_action("child", "echo child> child.txt", &["bad"]),
-        plan_action("grandchild", "echo grandchild> grandchild.txt", &["child"]),
-        plan_action("independent", "echo ok> independent.txt", &[]),
-    ])
+    write_plan(
+        dir,
+        &[
+            plan_action("bad", "exit 3", &[]),
+            plan_action("child", "echo child> child.txt", &["bad"]),
+            plan_action("grandchild", "echo grandchild> grandchild.txt", &["child"]),
+            plan_action("independent", "echo ok> independent.txt", &[]),
+        ],
+    )
 }
 
 #[test]
@@ -1229,22 +1730,63 @@ fn keep_going_runs_independent_actions_and_skips_dependents() {
         let workspace = dir.path().to_string_lossy().into_owned();
 
         // Control: the default stops new starts at the first failure.
-        let (code, stdout, _) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--jobs", "1"]);
+        let (code, stdout, _) = run_ant(&[
+            "run",
+            "--workspace",
+            &workspace,
+            "--plan",
+            &plan,
+            "--jobs",
+            "1",
+        ]);
         assert_eq!(code, 1);
-        assert!(stdout.contains("action=independent status=skipped"), "control stdout was {stdout:?}");
+        assert!(
+            stdout.contains("action=independent status=skipped"),
+            "control stdout was {stdout:?}"
+        );
         assert!(!dir.path().join("independent.txt").exists());
 
         let (code, stdout, stderr) = run_ant(&[
-            "run", "--workspace", &workspace, "--plan", &plan, "--jobs", jobs, "--keep-going",
+            "run",
+            "--workspace",
+            &workspace,
+            "--plan",
+            &plan,
+            "--jobs",
+            jobs,
+            "--keep-going",
         ]);
-        assert_eq!(code, 1, "jobs={jobs}: a failure must still fail the run; stderr was {stderr:?}");
-        assert!(stdout.contains("action=bad status=failed"), "jobs={jobs}: {stdout:?}");
-        assert!(stdout.contains("action=independent status=succeeded"), "jobs={jobs}: {stdout:?}");
-        assert!(dir.path().join("independent.txt").exists(), "jobs={jobs}: independent action must run");
-        assert!(stdout.contains("action=child status=skipped"), "jobs={jobs}: {stdout:?}");
-        assert!(stdout.contains("action=grandchild status=skipped"), "jobs={jobs}: {stdout:?}");
-        assert!(!dir.path().join("child.txt").exists() && !dir.path().join("grandchild.txt").exists());
-        assert!(!stdout.contains("action=bad status=skipped"), "a failed action is not skipped: {stdout:?}");
+        assert_eq!(
+            code, 1,
+            "jobs={jobs}: a failure must still fail the run; stderr was {stderr:?}"
+        );
+        assert!(
+            stdout.contains("action=bad status=failed"),
+            "jobs={jobs}: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("action=independent status=succeeded"),
+            "jobs={jobs}: {stdout:?}"
+        );
+        assert!(
+            dir.path().join("independent.txt").exists(),
+            "jobs={jobs}: independent action must run"
+        );
+        assert!(
+            stdout.contains("action=child status=skipped"),
+            "jobs={jobs}: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("action=grandchild status=skipped"),
+            "jobs={jobs}: {stdout:?}"
+        );
+        assert!(
+            !dir.path().join("child.txt").exists() && !dir.path().join("grandchild.txt").exists()
+        );
+        assert!(
+            !stdout.contains("action=bad status=skipped"),
+            "a failed action is not skipped: {stdout:?}"
+        );
     }
 }
 
@@ -1257,15 +1799,42 @@ fn keep_going_reports_the_worst_outcome_and_is_plan_only() {
         plan_action("a-slow", "sleep 4", &[])
     };
     slow["action"]["timeout_ms"] = json!(500);
-    let plan = write_plan(&dir, &[slow, plan_action("b-fails", "exit 1", &[]), plan_action("c-ok", "echo ok> c.txt", &[])]);
+    let plan = write_plan(
+        &dir,
+        &[
+            slow,
+            plan_action("b-fails", "exit 1", &[]),
+            plan_action("c-ok", "echo ok> c.txt", &[]),
+        ],
+    );
     let workspace = dir.path().to_string_lossy().into_owned();
-    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--keep-going"]);
-    assert_eq!(code, 124, "a timeout outranks a plain failure; stderr was {stderr:?}; stdout was {stdout:?}");
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--keep-going",
+    ]);
+    assert_eq!(
+        code, 124,
+        "a timeout outranks a plain failure; stderr was {stderr:?}; stdout was {stdout:?}"
+    );
     assert!(dir.path().join("c.txt").exists(), "stdout was {stdout:?}");
 
-    let (code, _, stderr) = run_ant(&["run", "--workspace", &workspace, "--keep-going", "--", "cmd"]);
+    let (code, _, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--keep-going",
+        "--",
+        "cmd",
+    ]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--keep-going applies only to plan execution"), "stderr was {stderr:?}");
+    assert!(
+        stderr.contains("--keep-going applies only to plan execution"),
+        "stderr was {stderr:?}"
+    );
 }
 
 /// PowerShell action that commits `alloc_mb` MiB on top of its own baseline
@@ -1299,7 +1868,14 @@ fn enforce_memory_caps_committed_memory() {
     let workspace = dir.path().to_string_lossy().into_owned();
 
     let fits = write_plan(&dir, &[alloc_action(20, 400)]);
-    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &fits, "--enforce-memory"]);
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &fits,
+        "--enforce-memory",
+    ]);
     assert_eq!(code, 0, "stderr was {stderr:?}; stdout was {stdout:?}");
     assert!(
         stdout.contains("memory_limit_bytes=419430400 memory_limit_hit=false"),
@@ -1308,16 +1884,38 @@ fn enforce_memory_caps_committed_memory() {
 
     let too_big = write_plan(&dir, &[alloc_action(600, 300)]);
     let (code, stdout, _) = run_ant(&["run", "--workspace", &workspace, "--plan", &too_big]);
-    assert_eq!(code, 0, "control: without the flag the allocation succeeds; stdout was {stdout:?}");
-    assert!(stdout.contains("memory_limit_bytes=none"), "stdout was {stdout:?}");
+    assert_eq!(
+        code, 0,
+        "control: without the flag the allocation succeeds; stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains("memory_limit_bytes=none"),
+        "stdout was {stdout:?}"
+    );
 
     for extra in [&[][..], &["--sandbox"][..]] {
-        let mut args = vec!["run", "--workspace", &workspace, "--plan", &too_big, "--enforce-memory"];
+        let mut args = vec![
+            "run",
+            "--workspace",
+            &workspace,
+            "--plan",
+            &too_big,
+            "--enforce-memory",
+        ];
         args.extend_from_slice(extra);
         let (code, stdout, _) = run_ant(&args);
-        assert_eq!(code, 1, "{extra:?}: the cap must refuse the allocation; stdout was {stdout:?}");
-        assert!(stdout.contains("action=alloc status=failed"), "{extra:?}: {stdout:?}");
-        assert!(stdout.contains("memory_limit_hit=true"), "{extra:?}: {stdout:?}");
+        assert_eq!(
+            code, 1,
+            "{extra:?}: the cap must refuse the allocation; stdout was {stdout:?}"
+        );
+        assert!(
+            stdout.contains("action=alloc status=failed"),
+            "{extra:?}: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("memory_limit_hit=true"),
+            "{extra:?}: {stdout:?}"
+        );
     }
 }
 
@@ -1325,12 +1923,25 @@ fn enforce_memory_caps_committed_memory() {
 fn enforce_memory_is_plan_only_and_fails_closed_off_windows() {
     let dir = TempDir::new("enforce-memory-flags");
     let workspace = dir.path().to_string_lossy().into_owned();
-    let (code, _, stderr) = run_ant(&["run", "--workspace", &workspace, "--enforce-memory", "--", "cmd"]);
+    let (code, _, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--enforce-memory",
+        "--",
+        "cmd",
+    ]);
     assert_eq!(code, 1);
     if cfg!(windows) {
-        assert!(stderr.contains("--enforce-memory applies only to plan execution"), "stderr was {stderr:?}");
+        assert!(
+            stderr.contains("--enforce-memory applies only to plan execution"),
+            "stderr was {stderr:?}"
+        );
     } else {
-        assert!(stderr.contains("Windows job objects only") || stderr.contains("plan execution"), "stderr was {stderr:?}");
+        assert!(
+            stderr.contains("Windows job objects only") || stderr.contains("plan execution"),
+            "stderr was {stderr:?}"
+        );
     }
 }
 
@@ -1356,7 +1967,9 @@ fn network_isolation_ready() -> bool {
     let (code, stdout, _) = run_ant(&["sandbox", "status"]);
     let ready = code == 0 && stdout.contains("ready=true");
     if !ready {
-        eprintln!("skipping: network isolation not set up on this machine (run 'ant sandbox setup' elevated)");
+        eprintln!(
+            "skipping: network isolation not set up on this machine (run 'ant sandbox setup' elevated)"
+        );
     }
     ready
 }
@@ -1390,29 +2003,82 @@ fn network_isolated_runs_as_sandbox_account_and_blocks_connections() {
     let dir = TempDir::new("net-iso");
     fs::create_dir_all(dir.path().join(".ant").join("tmp")).expect("staging");
     let workspace = dir.path().to_string_lossy().into_owned();
-    let mut who = system_action("a-who", &[r"C:\Windows\System32\cmd.exe", "/C", r"C:\Windows\System32\whoami.exe > who.txt"], "never");
+    let mut who = system_action(
+        "a-who",
+        &[
+            r"C:\Windows\System32\cmd.exe",
+            "/C",
+            r"C:\Windows\System32\whoami.exe > who.txt",
+        ],
+        "never",
+    );
     who["action"]["outputs"] = json!([{ "path": "who.txt", "kind": "file" }]);
     let curl = system_action(
         "b-curl",
-        &[r"C:\Windows\System32\curl.exe", "-sS", "-m", "15", "-o", "NUL", "https://1.1.1.1/"],
+        &[
+            r"C:\Windows\System32\curl.exe",
+            "-sS",
+            "-m",
+            "15",
+            "-o",
+            "NUL",
+            "https://1.1.1.1/",
+        ],
         "never",
     );
     let plan = write_plan(&dir, &[who, curl]);
 
-    let (code, stdout, stderr) = run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--keep-going"]);
-    assert_eq!(code, 0, "control: connection must succeed without isolation; stderr {stderr:?} stdout {stdout:?}");
-    assert!(!fs::read_to_string(dir.path().join("who.txt")).expect("who").to_lowercase().contains("antsandboxoffline"));
-
-    let (code, stdout, stderr) =
-        run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--keep-going", "--network-isolated"]);
-    assert_eq!(code, 1, "the connection must fail under isolation; stderr {stderr:?} stdout {stdout:?}");
-    assert!(stdout.contains("action=a-who status=succeeded"), "{stdout:?}");
-    assert!(stdout.contains("action=b-curl status=failed exit_code=7"), "curl exit 7 = connect refused; {stdout:?}");
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--keep-going",
+    ]);
+    assert_eq!(
+        code, 0,
+        "control: connection must succeed without isolation; stderr {stderr:?} stdout {stdout:?}"
+    );
     assert!(
-        fs::read_to_string(dir.path().join("who.txt")).expect("who").to_lowercase().contains("antsandboxoffline"),
+        !fs::read_to_string(dir.path().join("who.txt"))
+            .expect("who")
+            .to_lowercase()
+            .contains("antsandboxoffline")
+    );
+
+    let (code, stdout, stderr) = run_ant(&[
+        "run",
+        "--workspace",
+        &workspace,
+        "--plan",
+        &plan,
+        "--keep-going",
+        "--network-isolated",
+    ]);
+    assert_eq!(
+        code, 1,
+        "the connection must fail under isolation; stderr {stderr:?} stdout {stdout:?}"
+    );
+    assert!(
+        stdout.contains("action=a-who status=succeeded"),
+        "{stdout:?}"
+    );
+    assert!(
+        stdout.contains("action=b-curl status=failed exit_code=7"),
+        "curl exit 7 = connect refused; {stdout:?}"
+    );
+    assert!(
+        fs::read_to_string(dir.path().join("who.txt"))
+            .expect("who")
+            .to_lowercase()
+            .contains("antsandboxoffline"),
         "the action must run as the sandbox account"
     );
-    assert!(stdout.contains("blockers=[PolicyNever, MissingToolchainIdentity]"), "only plan-level blockers remain; {stdout:?}");
+    assert!(
+        stdout.contains("blockers=[PolicyNever, MissingToolchainIdentity]"),
+        "only plan-level blockers remain; {stdout:?}"
+    );
 }
 
 /// The cache gate opens under network isolation: a fully declared action is
@@ -1430,7 +2096,11 @@ fn network_isolated_cache_reuses_and_invalidates() {
     fs::write(ws.join("in.txt"), "hello cache").expect("input");
     let cmd = r"C:\Windows\System32\cmd.exe";
     let digest = build_digest::digest_file(std::path::Path::new(cmd)).expect("digest cmd.exe");
-    let mut action = system_action("copy", &[cmd, "/C", "copy /Y in.txt out.txt >nul"], "eligible");
+    let mut action = system_action(
+        "copy",
+        &[cmd, "/C", "copy /Y in.txt out.txt >nul"],
+        "eligible",
+    );
     action["action"]["inputs"] = json!([{ "path": "in.txt", "kind": "file" }]);
     action["action"]["outputs"] = json!([{ "path": "out.txt", "kind": "file" }]);
     // Truthful identity: the real digest of the executable that runs.
@@ -1444,26 +2114,51 @@ fn network_isolated_cache_reuses_and_invalidates() {
     let workspace = ws.to_string_lossy().into_owned();
     let cache = dir.path().join("cache").to_string_lossy().into_owned();
     let run = |extra: &str| {
-        run_ant(&["run", "--workspace", &workspace, "--plan", &plan, "--cache-dir", &cache, extra])
+        run_ant(&[
+            "run",
+            "--workspace",
+            &workspace,
+            "--plan",
+            &plan,
+            "--cache-dir",
+            &cache,
+            extra,
+        ])
     };
 
     let (code, stdout, stderr) = run("--sandbox");
     assert_eq!(code, 0, "stderr {stderr:?}");
-    assert!(stdout.contains("blockers=[NetworkIsolationUnavailable]"), "control stays gated: {stdout:?}");
+    assert!(
+        stdout.contains("blockers=[NetworkIsolationUnavailable]"),
+        "control stays gated: {stdout:?}"
+    );
 
     let (code, stdout, stderr) = run("--network-isolated");
     assert_eq!(code, 0, "stderr {stderr:?}; stdout {stdout:?}");
-    assert!(stdout.contains("action=copy status=succeeded") && stdout.contains("cache_eligible=true blockers=[]"), "{stdout:?}");
+    assert!(
+        stdout.contains("action=copy status=succeeded")
+            && stdout.contains("cache_eligible=true blockers=[]"),
+        "{stdout:?}"
+    );
 
     fs::remove_file(ws.join("out.txt")).expect("delete output");
     let (code, stdout, stderr) = run("--network-isolated");
     assert_eq!(code, 0, "stderr {stderr:?}");
     assert!(stdout.contains("action=copy status=reused"), "{stdout:?}");
-    assert_eq!(fs::read_to_string(ws.join("out.txt")).expect("restored"), "hello cache");
+    assert_eq!(
+        fs::read_to_string(ws.join("out.txt")).expect("restored"),
+        "hello cache"
+    );
 
     fs::write(ws.join("in.txt"), "changed input").expect("change");
     let (code, stdout, _) = run("--network-isolated");
     assert_eq!(code, 0);
-    assert!(stdout.contains("action=copy status=succeeded"), "a changed input must rebuild: {stdout:?}");
-    assert_eq!(fs::read_to_string(ws.join("out.txt")).expect("rebuilt"), "changed input");
+    assert!(
+        stdout.contains("action=copy status=succeeded"),
+        "a changed input must rebuild: {stdout:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(ws.join("out.txt")).expect("rebuilt"),
+        "changed input"
+    );
 }

@@ -17,11 +17,8 @@ struct Workspace {
 
 impl Workspace {
     fn new(label: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "ant-sandbox-it-{}-{}",
-            label,
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ant-sandbox-it-{}-{}", label, std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp workspace");
         Self { dir }
     }
@@ -51,10 +48,7 @@ fn minimal_env() -> Vec<(String, String)> {
     let mut env = Vec::new();
     for key in &["SystemRoot", "PATH", "PATHEXT", "TEMP", "TMP"] {
         if let Some(value) = std::env::var_os(key) {
-            env.push((
-                (*key).to_owned(),
-                value.to_string_lossy().into_owned(),
-            ));
+            env.push(((*key).to_owned(), value.to_string_lossy().into_owned()));
         }
     }
     env
@@ -95,7 +89,10 @@ fn confined_write_outside_workspace_is_blocked() {
             .as_nanos()
     ));
     // Sanity: the escape target must NOT be inside the workspace.
-    assert!(!outside.starts_with(&ws.dir), "escape target must be outside");
+    assert!(
+        !outside.starts_with(&ws.dir),
+        "escape target must be outside"
+    );
 
     let sandbox = Sandbox::prepare(&ws.dir).expect("prepare");
     let argv = vec![

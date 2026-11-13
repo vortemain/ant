@@ -54,11 +54,17 @@ pub struct Detection {
 
 impl Detection {
     pub fn supported() -> Self {
-        Self { supported: true, reason: String::new() }
+        Self {
+            supported: true,
+            reason: String::new(),
+        }
     }
 
     pub fn unsupported(reason: impl Into<String>) -> Self {
-        Self { supported: false, reason: reason.into() }
+        Self {
+            supported: false,
+            reason: reason.into(),
+        }
     }
 }
 
@@ -134,7 +140,9 @@ impl AdapterOptions {
     /// ambiguous, so it fails rather than letting the last one win).
     pub fn insert_assignment(&mut self, assignment: &str) -> Result<(), AdapterError> {
         let Some((key, value)) = assignment.split_once('=') else {
-            return Err(AdapterError::Option(format!("'{assignment}' is not KEY=VALUE")));
+            return Err(AdapterError::Option(format!(
+                "'{assignment}' is not KEY=VALUE"
+            )));
         };
         self.insert(key, value)
     }
@@ -147,7 +155,9 @@ impl AdapterOptions {
             )));
         }
         if self.values.contains_key(key) {
-            return Err(AdapterError::Option(format!("option '{key}' given more than once")));
+            return Err(AdapterError::Option(format!(
+                "option '{key}' given more than once"
+            )));
         }
         self.values.insert(key.to_owned(), value.to_owned());
         Ok(())
@@ -179,7 +189,11 @@ pub fn check_option_keys(
             let known = if specs.is_empty() {
                 "none".to_owned()
             } else {
-                specs.iter().map(|spec| spec.key).collect::<Vec<_>>().join(", ")
+                specs
+                    .iter()
+                    .map(|spec| spec.key)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             return Err(AdapterError::Option(format!(
                 "adapter '{}' does not accept option '{key}' (accepted: {known})",
@@ -223,7 +237,9 @@ pub fn available() -> Vec<&'static dyn BuildAdapter> {
 
 /// Look up an adapter by its stable name.
 pub fn adapter(name: &str) -> Option<&'static dyn BuildAdapter> {
-    available().into_iter().find(|candidate| candidate.name() == name)
+    available()
+        .into_iter()
+        .find(|candidate| candidate.name() == name)
 }
 
 /// One adapter's detection outcome for a project root, for diagnostics.
@@ -255,7 +271,10 @@ pub enum SelectionError {
     Ambiguous(Vec<&'static str>),
     /// An adapter's detection itself failed, so the outcome is unknown and
     /// selection fails closed rather than skipping it.
-    Detect { adapter: &'static str, error: AdapterError },
+    Detect {
+        adapter: &'static str,
+        error: AdapterError,
+    },
 }
 
 impl fmt::Display for SelectionError {
@@ -290,7 +309,12 @@ pub fn select_adapter(project_root: &Path) -> Result<&'static dyn BuildAdapter, 
     let mut reasons = Vec::new();
     for report in detect_all(project_root) {
         match report.outcome {
-            Err(error) => return Err(SelectionError::Detect { adapter: report.adapter, error }),
+            Err(error) => {
+                return Err(SelectionError::Detect {
+                    adapter: report.adapter,
+                    error,
+                });
+            }
             Ok(detection) if detection.supported => matches.push(report.adapter),
             Ok(detection) => reasons.push((report.adapter, detection.reason)),
         }
@@ -305,22 +329,24 @@ pub fn select_adapter(project_root: &Path) -> Result<&'static dyn BuildAdapter, 
 /// Canonicalize a project root for adapter work and return both the canonical
 /// root and a helper that makes absolute paths workspace-relative.
 pub(crate) fn canonical_root(project_root: &Path) -> Result<PathBuf, AdapterError> {
-    project_root
-        .canonicalize()
-        .map_err(|error| AdapterError::Project(format!(
+    project_root.canonicalize().map_err(|error| {
+        AdapterError::Project(format!(
             "cannot resolve project root {}: {error}",
             project_root.display()
-        )))
+        ))
+    })
 }
 
 /// Convert an absolute path under `root` into a workspace-relative path,
 /// failing closed when the path is outside the root.
 pub(crate) fn relative_to(root: &Path, path: &Path) -> Result<PathBuf, AdapterError> {
-    let outside = || AdapterError::Project(format!(
-        "path {} is not inside the project root {}",
-        path.display(),
-        root.display()
-    ));
+    let outside = || {
+        AdapterError::Project(format!(
+            "path {} is not inside the project root {}",
+            path.display(),
+            root.display()
+        ))
+    };
     let relative = path.strip_prefix(root).map_err(|_| outside())?;
     // A lexical prefix match is not containment: `root/../elsewhere` strips
     // to `../elsewhere`. Only plain components stay inside the root.
@@ -379,10 +405,12 @@ pub(crate) fn executable_version(executable: &Path, root: &Path) -> Result<Strin
         .arg("--version")
         .current_dir(root)
         .output()
-        .map_err(|error| AdapterError::Toolchain(format!(
-            "cannot run {executable}: {error}",
-            executable = executable.display()
-        )))?;
+        .map_err(|error| {
+            AdapterError::Toolchain(format!(
+                "cannot run {executable}: {error}",
+                executable = executable.display()
+            ))
+        })?;
     if !output.status.success() {
         return Err(AdapterError::Toolchain(format!(
             "{exe} --version failed: {stderr}",
@@ -434,11 +462,24 @@ mod tests {
 
     #[test]
     fn registry_finds_adapters_by_name() {
-        assert!(adapter("cargo").is_some(), "the cargo adapter must be registered");
+        assert!(
+            adapter("cargo").is_some(),
+            "the cargo adapter must be registered"
+        );
         assert!(adapter("no-such-adapter").is_none());
-        assert!(available().iter().any(|candidate| candidate.name() == "cargo"));
-        assert!(adapter("npm").is_some(), "the npm adapter must be registered");
-        assert!(adapter("cmake").is_some(), "the cmake adapter must be registered");
+        assert!(
+            available()
+                .iter()
+                .any(|candidate| candidate.name() == "cargo")
+        );
+        assert!(
+            adapter("npm").is_some(),
+            "the npm adapter must be registered"
+        );
+        assert!(
+            adapter("cmake").is_some(),
+            "the cmake adapter must be registered"
+        );
     }
 
     #[test]
@@ -450,7 +491,10 @@ mod tests {
 
         let npm_dir = TempDir::new("select-npm");
         fs::write(npm_dir.path().join("package.json"), "{}").expect("write");
-        assert_eq!(select_adapter(npm_dir.path()).expect("select").name(), "npm");
+        assert_eq!(
+            select_adapter(npm_dir.path()).expect("select").name(),
+            "npm"
+        );
     }
 
     #[test]
@@ -461,7 +505,11 @@ mod tests {
             panic!("expected NoMatch, got {error:?}");
         };
         let names: Vec<_> = reasons.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, vec!["cargo", "npm", "cmake"], "one reason per registered adapter");
+        assert_eq!(
+            names,
+            vec!["cargo", "npm", "cmake"],
+            "one reason per registered adapter"
+        );
         let text = error.to_string();
         assert!(
             text.contains("no Cargo.toml")
@@ -517,7 +565,10 @@ mod tests {
         assert!(options.is_empty());
         options.insert_assignment("profile=release").expect("valid");
         assert_eq!(options.get("profile"), Some("release"));
-        assert!(options.insert_assignment("profile=dev").is_err(), "duplicates fail");
+        assert!(
+            options.insert_assignment("profile=dev").is_err(),
+            "duplicates fail"
+        );
         assert!(options.insert_assignment("novalue").is_err());
         assert!(options.insert_assignment("=x").is_err());
         assert!(options.insert_assignment("k=").is_err());
@@ -532,7 +583,9 @@ mod tests {
         check_option_keys(&cargo::CargoAdapter, &options).expect("cargo accepts profile");
         let error = check_option_keys(&npm::NpmAdapter, &options).expect_err("npm rejects");
         assert!(
-            error.to_string().contains("adapter 'npm' does not accept option 'profile'"),
+            error
+                .to_string()
+                .contains("adapter 'npm' does not accept option 'profile'"),
             "{error}"
         );
     }

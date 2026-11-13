@@ -100,17 +100,16 @@ impl Sandbox {
         }
         #[cfg(windows)]
         {
-            let workspace = workspace.canonicalize().map_err(|error| SandboxError::WorkspaceUnavailable {
-                path: workspace.to_path_buf(),
-                reason: error.to_string(),
-            })?;
+            let workspace =
+                workspace
+                    .canonicalize()
+                    .map_err(|error| SandboxError::WorkspaceUnavailable {
+                        path: workspace.to_path_buf(),
+                        reason: error.to_string(),
+                    })?;
             let sid_string = sid::capability_sid_for_workspace(&workspace);
             let capability = token::LocalSid::from_string(&sid_string)?;
-            acl::grant_mask(
-                &workspace,
-                capability.as_ptr(),
-                acl::WRITE_ALLOW_MASK,
-            )?;
+            acl::grant_mask(&workspace, capability.as_ptr(), acl::WRITE_ALLOW_MASK)?;
             acl::grant_null_device(capability.as_ptr())?;
             let token = token::create_workspace_write_restricted_token(&capability)?;
             Ok(Self {
@@ -134,21 +133,31 @@ impl Sandbox {
         }
         #[cfg(windows)]
         {
-            let workspace = workspace.canonicalize().map_err(|error| SandboxError::WorkspaceUnavailable {
-                path: workspace.to_path_buf(),
-                reason: error.to_string(),
-            })?;
+            let workspace =
+                workspace
+                    .canonicalize()
+                    .map_err(|error| SandboxError::WorkspaceUnavailable {
+                        path: workspace.to_path_buf(),
+                        reason: error.to_string(),
+                    })?;
             let sid_string = sid::capability_sid_for_workspace(&workspace);
             let capability = token::LocalSid::from_string(&sid_string)?;
             let token = token::create_workspace_write_restricted_token(&capability)?;
-            Ok(Self { token, workspace, capability_sid: sid_string })
+            Ok(Self {
+                token,
+                workspace,
+                capability_sid: sid_string,
+            })
         }
     }
 
     /// Grant `sid` (for example the sandbox account) the same write mask on
     /// the workspace root that the capability SID gets. Idempotent; run by
     /// the workspace owner before launching the runner as that account.
-    pub fn grant_workspace_to_sid(workspace: &std::path::Path, sid: &str) -> Result<(), SandboxError> {
+    pub fn grant_workspace_to_sid(
+        workspace: &std::path::Path,
+        sid: &str,
+    ) -> Result<(), SandboxError> {
         #[cfg(not(windows))]
         {
             let _ = (workspace, sid);
@@ -156,10 +165,13 @@ impl Sandbox {
         }
         #[cfg(windows)]
         {
-            let workspace = workspace.canonicalize().map_err(|error| SandboxError::WorkspaceUnavailable {
-                path: workspace.to_path_buf(),
-                reason: error.to_string(),
-            })?;
+            let workspace =
+                workspace
+                    .canonicalize()
+                    .map_err(|error| SandboxError::WorkspaceUnavailable {
+                        path: workspace.to_path_buf(),
+                        reason: error.to_string(),
+                    })?;
             let principal = token::LocalSid::from_string(sid)?;
             acl::grant_mask(&workspace, principal.as_ptr(), acl::WRITE_ALLOW_MASK)?;
             acl::grant_null_device(principal.as_ptr())
@@ -228,8 +240,15 @@ pub fn spawn_as_user(
     #[cfg(windows)]
     {
         let command_line = winutil::argv_to_command_line(argv);
-        logon::spawn_as_user(user, password, &command_line, cwd, environment, memory_limit_bytes)
-            .map(|inner| Child { inner })
+        logon::spawn_as_user(
+            user,
+            password,
+            &command_line,
+            cwd,
+            environment,
+            memory_limit_bytes,
+        )
+        .map(|inner| Child { inner })
     }
 }
 

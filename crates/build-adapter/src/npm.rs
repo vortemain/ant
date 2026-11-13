@@ -66,8 +66,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::{
-    canonical_root, check_option_keys, executable_version, locate_executable, AdapterError,
-    AdapterOptions, BuildAdapter, Detection, OptionSpec,
+    AdapterError, AdapterOptions, BuildAdapter, Detection, OptionSpec, canonical_root,
+    check_option_keys, executable_version, locate_executable,
 };
 
 pub struct NpmAdapter;
@@ -165,14 +165,21 @@ fn node_toolchain(root: &Path) -> Result<ToolchainIdentity, AdapterError> {
             ))
         })?
         .to_string();
-    Ok(ToolchainIdentity { name: "node".to_owned(), version, executable_digest })
+    Ok(ToolchainIdentity {
+        name: "node".to_owned(),
+        version,
+        executable_digest,
+    })
 }
 
 /// Read and parse `<root>/<package_dir>/package.json`.
 fn read_package_json(root: &Path, package_dir: &Path) -> Result<serde_json::Value, AdapterError> {
     let path = root.join(package_dir).join("package.json");
     let text = std::fs::read_to_string(&path).map_err(|error| {
-        AdapterError::Project(format!("cannot read package.json at {}: {error}", path.display()))
+        AdapterError::Project(format!(
+            "cannot read package.json at {}: {error}",
+            path.display()
+        ))
     })?;
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
         if package_dir.as_os_str().is_empty() {
@@ -195,12 +202,20 @@ fn read_package_json(root: &Path, package_dir: &Path) -> Result<serde_json::Valu
 
 /// The package's `build` script: `Ok(None)` when absent, an error when
 /// present but empty or not a string.
-fn build_script<'a>(package: &'a serde_json::Value, label: &str) -> Result<Option<&'a str>, AdapterError> {
-    let Some(build) = package.get("scripts").and_then(|scripts| scripts.get("build")) else {
+fn build_script<'a>(
+    package: &'a serde_json::Value,
+    label: &str,
+) -> Result<Option<&'a str>, AdapterError> {
+    let Some(build) = package
+        .get("scripts")
+        .and_then(|scripts| scripts.get("build"))
+    else {
         return Ok(None);
     };
     let Some(script) = build.as_str() else {
-        return Err(AdapterError::Project(format!("the `build` script in {label} is not a string")));
+        return Err(AdapterError::Project(format!(
+            "the `build` script in {label} is not a string"
+        )));
     };
     if script.trim().is_empty() {
         return Err(AdapterError::Project(format!(
@@ -225,7 +240,10 @@ fn npm_build_argv() -> Vec<String> {
 /// `TMP`/`TEMP` (plus `TMPDIR` off Windows) pointing at `.ant/tmp` relative
 /// to the action's working directory (T3.3 staging pattern).
 fn staging_environment() -> Vec<(String, String)> {
-    let staging_value = PathBuf::from(".ant").join("tmp").to_string_lossy().into_owned();
+    let staging_value = PathBuf::from(".ant")
+        .join("tmp")
+        .to_string_lossy()
+        .into_owned();
     let mut environment = vec![
         ("TMP".to_owned(), staging_value.clone()),
         ("TEMP".to_owned(), staging_value.clone()),
@@ -239,8 +257,14 @@ fn staging_environment() -> Vec<(String, String)> {
 
 /// Declare `<package_dir>/package.json`, `<package_dir>/src` (tree) and
 /// `<package_dir>/tsconfig.json` when present.
-fn declare_package_inputs(root: &Path, package_dir: &Path, inputs: &mut BTreeMap<PathBuf, InputKind>) {
-    inputs.entry(package_dir.join("package.json")).or_insert(InputKind::File);
+fn declare_package_inputs(
+    root: &Path,
+    package_dir: &Path,
+    inputs: &mut BTreeMap<PathBuf, InputKind>,
+) {
+    inputs
+        .entry(package_dir.join("package.json"))
+        .or_insert(InputKind::File);
     let src = package_dir.join("src");
     if root.join(&src).is_dir() {
         inputs.entry(src).or_insert(InputKind::Tree);
@@ -262,11 +286,17 @@ fn build_action(
         id,
         argv: npm_build_argv(),
         working_directory,
-        inputs: inputs.into_iter().map(|(path, kind)| Input { path, kind }).collect(),
+        inputs: inputs
+            .into_iter()
+            .map(|(path, kind)| Input { path, kind })
+            .collect(),
         // Outputs only when the user asserted entry points (see module docs).
         outputs: outputs
             .into_iter()
-            .map(|path| Output { path, kind: OutputKind::File })
+            .map(|path| Output {
+                path,
+                kind: OutputKind::File,
+            })
             .collect(),
         environment: staging_environment(),
         // node_modules content is an undeclared input, so these actions must
@@ -299,7 +329,9 @@ fn single_package_plan(
     declare_package_inputs(root, Path::new(""), &mut inputs);
     let outputs = match mode {
         OutputsMode::None => BTreeSet::new(),
-        OutputsMode::EntryPoints => entry_point_outputs(package, Path::new(""), "package.json", &inputs)?,
+        OutputsMode::EntryPoints => {
+            entry_point_outputs(package, Path::new(""), "package.json", &inputs)?
+        }
     };
     let id = package
         .get("name")
@@ -335,7 +367,9 @@ fn workspace_plan(
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
     for pattern in patterns {
         let Some(pattern) = pattern.as_str() else {
-            return Err(AdapterError::Project("`workspaces` entries must be strings".to_owned()));
+            return Err(AdapterError::Project(
+                "`workspaces` entries must be strings".to_owned(),
+            ));
         };
         dirs.extend(expand_workspace_pattern(root, pattern)?);
     }
@@ -363,7 +397,14 @@ fn workspace_plan(
                 dir.display()
             )));
         }
-        packages.insert(name, WorkspacePackage { dir, manifest, builds });
+        packages.insert(
+            name,
+            WorkspacePackage {
+                dir,
+                manifest,
+                builds,
+            },
+        );
     }
     if !packages.values().any(|package| package.builds) {
         return Err(AdapterError::Project(
@@ -406,7 +447,11 @@ fn workspace_plan(
                 edges.insert(dep.to_owned());
             } else {
                 declare_package_inputs(root, &dep_package.dir, &mut inputs);
-                stack.extend(workspace_dependencies(&dep_package.manifest, &packages, dep));
+                stack.extend(workspace_dependencies(
+                    &dep_package.manifest,
+                    &packages,
+                    dep,
+                ));
             }
         }
 
@@ -435,7 +480,12 @@ fn workspace_dependencies<'a>(
     own_name: &str,
 ) -> Vec<&'a str> {
     let mut names: BTreeSet<&'a str> = BTreeSet::new();
-    for field in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] {
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
         if let Some(deps) = manifest.get(field).and_then(|deps| deps.as_object()) {
             for dep in deps.keys() {
                 if dep != own_name
@@ -457,7 +507,10 @@ fn expand_workspace_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, 
             "workspace pattern '{pattern}' is not supported ({why}); supported: literal paths and `*` within a path segment"
         ))
     };
-    let trimmed = pattern.trim().trim_start_matches("./").trim_end_matches('/');
+    let trimmed = pattern
+        .trim()
+        .trim_start_matches("./")
+        .trim_end_matches('/');
     if trimmed.is_empty() {
         return Err(unsupported("empty"));
     }
@@ -468,13 +521,18 @@ fn expand_workspace_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, 
         return Err(unsupported("`**` recursion"));
     }
     if trimmed.contains(['?', '[', ']', '{', '}', '\\']) {
-        return Err(unsupported("character classes, braces, `?`, or backslashes"));
+        return Err(unsupported(
+            "character classes, braces, `?`, or backslashes",
+        ));
     }
     if Path::new(trimmed).is_absolute() || trimmed.starts_with('/') {
         return Err(unsupported("absolute path"));
     }
     let segments: Vec<&str> = trimmed.split('/').collect();
-    if segments.iter().any(|segment| segment.is_empty() || *segment == "." || *segment == "..") {
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
         return Err(unsupported("empty, `.`, or `..` segment"));
     }
     let has_wildcard = segments.iter().any(|segment| segment.contains('*'));
@@ -659,7 +717,10 @@ mod tests {
     fn detect_recognizes_package_json_and_rejects_other_projects() {
         let adapter = NpmAdapter;
         let dir = TempDir::new("detect");
-        write(&dir.path().join("package.json"), &package_json("detect-app"));
+        write(
+            &dir.path().join("package.json"),
+            &package_json("detect-app"),
+        );
         assert!(adapter.detect(dir.path()).expect("detect").supported);
         let empty = TempDir::new("empty");
         let detection = adapter.detect(empty.path()).expect("detect");
@@ -674,12 +735,22 @@ mod tests {
         write(&dir.path().join("package.json"), &package_json("gen-app"));
         // A src tree and a lock file are declared when present.
         write(&dir.path().join("src/index.js"), "module.exports = 1;\n");
-        write(&dir.path().join("package-lock.json"), "{\"lockfileVersion\":3}");
+        write(
+            &dir.path().join("package-lock.json"),
+            "{\"lockfileVersion\":3}",
+        );
         // tsconfig is a common build driver; declare it when present.
-        write(&dir.path().join("tsconfig.json"), "{\"compilerOptions\":{}}");
+        write(
+            &dir.path().join("tsconfig.json"),
+            "{\"compilerOptions\":{}}",
+        );
 
-        let first = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
-        let second = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate again");
+        let first = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        let second = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate again");
         assert_eq!(first, second, "generation must be deterministic");
 
         assert_eq!(first.actions.len(), 1);
@@ -696,7 +767,11 @@ mod tests {
         assert_eq!(action.working_directory, PathBuf::from("."));
 
         // Declared inputs: package.json, package-lock.json, src tree, tsconfig.
-        let paths: Vec<&Path> = action.inputs.iter().map(|input| input.path.as_path()).collect();
+        let paths: Vec<&Path> = action
+            .inputs
+            .iter()
+            .map(|input| input.path.as_path())
+            .collect();
         assert!(paths.contains(&Path::new("package.json")));
         assert!(paths.contains(&Path::new("package-lock.json")));
         assert!(paths.contains(&Path::new("tsconfig.json")));
@@ -715,13 +790,19 @@ mod tests {
         assert_eq!(manifest_input.kind, InputKind::File);
 
         // Outputs are intentionally omitted (npm has no standard layout).
-        assert!(action.outputs.is_empty(), "npm adapter must not guess outputs");
+        assert!(
+            action.outputs.is_empty(),
+            "npm adapter must not guess outputs"
+        );
 
         // node_modules is an undeclared input, so policy is never.
         assert_eq!(action.cache_policy, CachePolicy::Never);
 
         // Scratch writes are redirected into the workspace staging dir.
-        let staging = PathBuf::from(".ant").join("tmp").to_string_lossy().into_owned();
+        let staging = PathBuf::from(".ant")
+            .join("tmp")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             action.environment,
             vec![
@@ -747,10 +828,19 @@ mod tests {
         let adapter = NpmAdapter;
         let dir = TempDir::new("minimal");
         // package.json with a build script but no src, no lock, no tsconfig.
-        write(&dir.path().join("package.json"), &package_json("minimal-app"));
-        let plan = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
+        write(
+            &dir.path().join("package.json"),
+            &package_json("minimal-app"),
+        );
+        let plan = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
         let action = &plan.actions[0].action;
-        let paths: Vec<&Path> = action.inputs.iter().map(|input| input.path.as_path()).collect();
+        let paths: Vec<&Path> = action
+            .inputs
+            .iter()
+            .map(|input| input.path.as_path())
+            .collect();
         // Only package.json is declared; nothing else is invented.
         assert_eq!(paths, vec![Path::new("package.json")]);
     }
@@ -759,10 +849,15 @@ mod tests {
     fn generate_rejects_projects_without_a_build_script() {
         let adapter = NpmAdapter;
         let dir = TempDir::new("no-build");
-        write(&dir.path().join("package.json"), "{\"name\":\"no-build\",\"version\":\"0.1.0\",\"scripts\":{\"test\":\"node test.js\"}}");
+        write(
+            &dir.path().join("package.json"),
+            "{\"name\":\"no-build\",\"version\":\"0.1.0\",\"scripts\":{\"test\":\"node test.js\"}}",
+        );
         let detection = adapter.detect(dir.path()).expect("detect");
         assert!(detection.supported, "package.json present means supported");
-        let error = adapter.generate(dir.path(), &AdapterOptions::new()).expect_err("must fail without a build script");
+        let error = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect_err("must fail without a build script");
         assert!(
             error.to_string().contains("no `build` script"),
             "error was {error}"
@@ -774,7 +869,9 @@ mod tests {
         let adapter = NpmAdapter;
         let dir = TempDir::new("bad-json");
         write(&dir.path().join("package.json"), "{ not valid json");
-        let error = adapter.generate(dir.path(), &AdapterOptions::new()).expect_err("must fail on invalid JSON");
+        let error = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect_err("must fail on invalid JSON");
         assert!(
             error.to_string().contains("package.json is not valid JSON"),
             "error was {error}"
@@ -785,10 +882,17 @@ mod tests {
     fn generate_rejects_empty_build_script() {
         let adapter = NpmAdapter;
         let dir = TempDir::new("empty-build");
-        write(&dir.path().join("package.json"), "{\"name\":\"empty\",\"version\":\"0.1.0\",\"scripts\":{\"build\":\"   \"}}");
-        let error = adapter.generate(dir.path(), &AdapterOptions::new()).expect_err("must fail on empty build script");
+        write(
+            &dir.path().join("package.json"),
+            "{\"name\":\"empty\",\"version\":\"0.1.0\",\"scripts\":{\"build\":\"   \"}}",
+        );
+        let error = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect_err("must fail on empty build script");
         assert!(
-            error.to_string().contains("`build` script in package.json is empty"),
+            error
+                .to_string()
+                .contains("`build` script in package.json is empty"),
             "error was {error}"
         );
     }
@@ -802,7 +906,11 @@ mod tests {
     }
 
     fn paths(action: &Action) -> Vec<PathBuf> {
-        action.inputs.iter().map(|input| input.path.clone()).collect()
+        action
+            .inputs
+            .iter()
+            .map(|input| input.path.clone())
+            .collect()
     }
 
     /// Root with `packages/*`: `core` builds, `util` (no build script)
@@ -814,12 +922,18 @@ mod tests {
             &dir.path().join("package.json"),
             "{\"name\":\"root\",\"private\":true,\"workspaces\":[\"packages/*\"],\"scripts\":{\"build\":\"npm run build --workspaces\"}}",
         );
-        write(&dir.path().join("package-lock.json"), "{\"lockfileVersion\":3}");
+        write(
+            &dir.path().join("package-lock.json"),
+            "{\"lockfileVersion\":3}",
+        );
         write(
             &dir.path().join("packages/core/package.json"),
             "{\"name\":\"@demo/core\",\"main\":\"dist/core.js\",\"scripts\":{\"build\":\"node build.js\"}}",
         );
-        write(&dir.path().join("packages/core/src/index.js"), "module.exports = 1;\n");
+        write(
+            &dir.path().join("packages/core/src/index.js"),
+            "module.exports = 1;\n",
+        );
         write(
             &dir.path().join("packages/util/package.json"),
             "{\"name\":\"@demo/util\",\"dependencies\":{\"@demo/core\":\"*\"}}",
@@ -829,11 +943,20 @@ mod tests {
             &dir.path().join("packages/app/package.json"),
             "{\"name\":\"@demo/app\",\"bin\":{\"demo\":\"./dist/app.js\"},\"devDependencies\":{\"@demo/util\":\"*\",\"left-pad\":\"1\"},\"scripts\":{\"build\":\"node build.js\"}}",
         );
-        write(&dir.path().join("packages/docs/package.json"), "{\"name\":\"docs\"}");
+        write(
+            &dir.path().join("packages/docs/package.json"),
+            "{\"name\":\"docs\"}",
+        );
         // Not packages: a hidden dir, node_modules, and a dir without a
         // package.json are never matched by the wildcard.
-        write(&dir.path().join("packages/.hidden/package.json"), "{\"name\":\"hidden\",\"scripts\":{\"build\":\"x\"}}");
-        write(&dir.path().join("packages/node_modules/package.json"), "{\"name\":\"nm\",\"scripts\":{\"build\":\"x\"}}");
+        write(
+            &dir.path().join("packages/.hidden/package.json"),
+            "{\"name\":\"hidden\",\"scripts\":{\"build\":\"x\"}}",
+        );
+        write(
+            &dir.path().join("packages/node_modules/package.json"),
+            "{\"name\":\"nm\",\"scripts\":{\"build\":\"x\"}}",
+        );
         fs::create_dir_all(dir.path().join("packages/empty")).expect("mkdir");
         dir
     }
@@ -842,12 +965,24 @@ mod tests {
     fn workspaces_generate_one_action_per_building_package_with_edges() {
         let adapter = NpmAdapter;
         let dir = monorepo();
-        let first = adapter.generate(dir.path(), &AdapterOptions::new()).expect("generate");
-        let second = adapter.generate(dir.path(), &AdapterOptions::new()).expect("again");
+        let first = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        let second = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("again");
         assert_eq!(first, second, "generation must be deterministic");
 
-        let ids: Vec<&str> = first.actions.iter().map(|entry| entry.action.id.as_str()).collect();
-        assert_eq!(ids, vec!["@demo/app", "@demo/core"], "building packages only, sorted");
+        let ids: Vec<&str> = first
+            .actions
+            .iter()
+            .map(|entry| entry.action.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["@demo/app", "@demo/core"],
+            "building packages only, sorted"
+        );
 
         // app reaches core through the non-building util: core is an edge,
         // util's sources are inputs; external deps (left-pad) are ignored.
@@ -890,10 +1025,31 @@ mod tests {
             .generate(dir.path(), &options(&[("outputs", "entry-points")]))
             .expect("generate");
         let output = |index: usize| -> Vec<PathBuf> {
-            plan.actions[index].action.outputs.iter().map(|o| o.path.clone()).collect()
+            plan.actions[index]
+                .action
+                .outputs
+                .iter()
+                .map(|o| o.path.clone())
+                .collect()
         };
-        assert_eq!(output(0), vec![PathBuf::from("packages").join("app").join("dist").join("app.js")]);
-        assert_eq!(output(1), vec![PathBuf::from("packages").join("core").join("dist").join("core.js")]);
+        assert_eq!(
+            output(0),
+            vec![
+                PathBuf::from("packages")
+                    .join("app")
+                    .join("dist")
+                    .join("app.js")
+            ]
+        );
+        assert_eq!(
+            output(1),
+            vec![
+                PathBuf::from("packages")
+                    .join("core")
+                    .join("dist")
+                    .join("core.js")
+            ]
+        );
 
         let single = TempDir::new("entry-single");
         write(
@@ -905,8 +1061,17 @@ mod tests {
             .expect("generate");
         let lib = PathBuf::from("lib");
         assert_eq!(
-            plan.actions[0].action.outputs.iter().map(|o| o.path.clone()).collect::<Vec<_>>(),
-            vec![lib.join("cli.js"), lib.join("index.d.ts"), lib.join("index.js")],
+            plan.actions[0]
+                .action
+                .outputs
+                .iter()
+                .map(|o| o.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                lib.join("cli.js"),
+                lib.join("index.d.ts"),
+                lib.join("index.js")
+            ],
             "`files` is never used"
         );
     }
@@ -923,24 +1088,39 @@ mod tests {
         let error = adapter
             .generate(dir.path(), &options(&[("outputs", "entry-points")]))
             .expect_err("source entry rejected");
-        assert!(error.to_string().contains("a source cannot also be a build output"), "{error}");
-        assert!(!dir.path().join(".ant").exists(), "no staging directory on failure");
+        assert!(
+            error
+                .to_string()
+                .contains("a source cannot also be a build output"),
+            "{error}"
+        );
+        assert!(
+            !dir.path().join(".ant").exists(),
+            "no staging directory on failure"
+        );
 
         let none = TempDir::new("entry-none");
         write(&none.path().join("package.json"), &package_json("n"));
         let error = adapter
             .generate(none.path(), &options(&[("outputs", "entry-points")]))
             .expect_err("no entry points");
-        assert!(error.to_string().contains("declares no main, types, typings, or bin"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("declares no main, types, typings, or bin"),
+            "{error}"
+        );
 
         let escape = TempDir::new("entry-escape");
         write(
             &escape.path().join("package.json"),
             "{\"name\":\"e\",\"main\":\"../x.js\",\"scripts\":{\"build\":\"node b.js\"}}",
         );
-        assert!(adapter
-            .generate(escape.path(), &options(&[("outputs", "entry-points")]))
-            .is_err());
+        assert!(
+            adapter
+                .generate(escape.path(), &options(&[("outputs", "entry-points")]))
+                .is_err()
+        );
 
         let error = adapter
             .generate(none.path(), &options(&[("outputs", "dist")]))
@@ -957,11 +1137,28 @@ mod tests {
         let expand = |pattern: &str| expand_workspace_pattern(dir.path(), pattern);
         assert_eq!(
             expand("apps/web-*").expect("wildcard"),
-            vec![PathBuf::from("apps").join("web-a"), PathBuf::from("apps").join("web-b")]
+            vec![
+                PathBuf::from("apps").join("web-a"),
+                PathBuf::from("apps").join("web-b")
+            ]
         );
-        assert_eq!(expand("./tools/cli/").expect("literal"), vec![PathBuf::from("tools").join("cli")]);
-        assert_eq!(expand("*/cli").expect("leading wildcard"), vec![PathBuf::from("tools").join("cli")]);
-        for bad in ["apps/**", "!apps/api", "../x", "apps/{a,b}", "apps/web-?", "/abs", ""] {
+        assert_eq!(
+            expand("./tools/cli/").expect("literal"),
+            vec![PathBuf::from("tools").join("cli")]
+        );
+        assert_eq!(
+            expand("*/cli").expect("leading wildcard"),
+            vec![PathBuf::from("tools").join("cli")]
+        );
+        for bad in [
+            "apps/**",
+            "!apps/api",
+            "../x",
+            "apps/{a,b}",
+            "apps/web-?",
+            "/abs",
+            "",
+        ] {
             assert!(expand(bad).is_err(), "pattern {bad:?} must be rejected");
         }
         let error = expand("apps/missing").expect_err("literal without package.json");
@@ -983,7 +1180,9 @@ mod tests {
             }
             let result = adapter.generate(dir.path(), &AdapterOptions::new());
             let staged = dir.path().join(".ant").exists()
-                || members.iter().any(|(path, _)| dir.path().join(path).join(".ant").exists());
+                || members
+                    .iter()
+                    .any(|(path, _)| dir.path().join(path).join(".ant").exists());
             assert!(!staged, "no staging directories on failure");
             result.expect_err("must fail").to_string()
         };
@@ -991,13 +1190,22 @@ mod tests {
         let error = generate("{\"workspaces\":{\"packages\":[\"p/*\"]}}", &[]);
         assert!(error.contains("must be an array"), "{error}");
         let error = generate("{\"workspaces\":[\"p/*\"]}", &[("p/a", "{\"name\":\"a\"}")]);
-        assert!(error.contains("no workspace package has a `build` script"), "{error}");
+        assert!(
+            error.contains("no workspace package has a `build` script"),
+            "{error}"
+        );
         let error = generate(
             "{\"workspaces\":[\"p/*\"]}",
-            &[("p/a", &format!("{{\"name\":\"x\",\"scripts\":{build}}}")), ("p/b", "{\"name\":\"x\"}")],
+            &[
+                ("p/a", &format!("{{\"name\":\"x\",\"scripts\":{build}}}")),
+                ("p/b", "{\"name\":\"x\"}"),
+            ],
         );
         assert!(error.contains("share the name 'x'"), "{error}");
-        let error = generate("{\"workspaces\":[\"p/*\"]}", &[("p/a", &format!("{{\"scripts\":{build}}}"))]);
+        let error = generate(
+            "{\"workspaces\":[\"p/*\"]}",
+            &[("p/a", &format!("{{\"scripts\":{build}}}"))],
+        );
         assert!(error.contains("has no `name`"), "{error}");
         let error = generate("{\"workspaces\":[\"p/*\"]}", &[]);
         assert!(error.contains("matched no packages"), "{error}");
@@ -1005,8 +1213,18 @@ mod tests {
         let error = generate(
             "{\"workspaces\":[\"p/*\"]}",
             &[
-                ("p/a", &format!("{{\"name\":\"a\",\"dependencies\":{{\"b\":\"*\"}},\"scripts\":{build}}}")),
-                ("p/b", &format!("{{\"name\":\"b\",\"dependencies\":{{\"a\":\"*\"}},\"scripts\":{build}}}")),
+                (
+                    "p/a",
+                    &format!(
+                        "{{\"name\":\"a\",\"dependencies\":{{\"b\":\"*\"}},\"scripts\":{build}}}"
+                    ),
+                ),
+                (
+                    "p/b",
+                    &format!(
+                        "{{\"name\":\"b\",\"dependencies\":{{\"a\":\"*\"}},\"scripts\":{build}}}"
+                    ),
+                ),
             ],
         );
         assert!(error.contains("generated plan is invalid"), "{error}");
