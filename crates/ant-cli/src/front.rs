@@ -86,7 +86,7 @@ fn choose_adapter(
             names[0]
         ),
         build_adapter::SelectionError::NoMatch(_) => format!(
-            "no supported project found in {} (Ant currently builds Cargo, Go, npm, CMake, and Gradle wrapper projects;\
+            "no supported project found in {} (Ant currently builds Cargo, Go, npm, CMake, Gradle/Android, Flutter, Xcode, Maven, Python, Tauri, Electron, and Docker projects;\
              see docs/vision.md for what is coming)",
             shown(root)
         ),
@@ -129,6 +129,14 @@ fn build_options(
     if accepts("home") {
         chosen.insert("home".into(), "user".into());
     }
+    // Flutter's build mode and Xcode's configuration: release by default,
+    // like cargo's profile; `--dev` selects debug (D-036).
+    if accepts("mode") {
+        chosen.insert("mode".into(), "release".into());
+    }
+    if accepts("configuration") {
+        chosen.insert("configuration".into(), "Release".into());
+    }
     for (key, value) in configured {
         chosen.insert(key.clone(), value.clone());
     }
@@ -138,6 +146,20 @@ fn build_options(
         }
         if accepts("config") {
             chosen.insert("config".into(), "Debug".into());
+        }
+        if accepts("mode") {
+            chosen.insert("mode".into(), "debug".into());
+        }
+        if accepts("configuration") {
+            chosen.insert("configuration".into(), "Debug".into());
+        }
+    }
+    if release {
+        if accepts("mode") {
+            chosen.insert("mode".into(), "release".into());
+        }
+        if accepts("configuration") {
+            chosen.insert("configuration".into(), "Release".into());
         }
     }
     // Android: debug APKs by default (installable with no setup); release
@@ -159,7 +181,14 @@ fn build_options(
         }
         return Ok((options, flavor));
     }
+    let named_mode = chosen
+        .get("mode")
+        .or_else(|| chosen.get("configuration"))
+        .map(|value| value.to_ascii_lowercase());
     let flavor = match (chosen.get("profile"), chosen.get("config")) {
+        _ if named_mode.as_deref() == Some("debug") => "debug",
+        _ if named_mode.as_deref() == Some("profile") => "profile",
+        _ if named_mode.is_some() => "release",
         (Some(profile), _) if profile == "dev" => "debug",
         (_, Some(config)) if config == "Debug" => "debug",
         (Some(_), _) | (_, Some(_)) => "release",
@@ -193,7 +222,7 @@ fn safe_relative_dir(value: &str) -> Result<PathBuf, String> {
 // ant build
 // ---------------------------------------------------------------------------
 
-const BUILD_USAGE: &str = "usage: ant build [android] [--dev|--release] [--fresh] [--project PATH] [--jobs N] [--verbose]";
+const BUILD_USAGE: &str = "usage: ant build [android|ios] [--dev|--release] [--fresh] [--project PATH] [--jobs N] [--verbose]";
 
 pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     build_and_collect(args).map(|(code, _)| code)
@@ -228,12 +257,11 @@ pub fn build_and_collect(
                         .ok_or("--jobs requires a positive integer")?,
                 )
             }
-            "android" if target.is_none() => target = Some("android".to_owned()),
+            "android" | "ios" if target.is_none() => target = Some(arg.clone()),
             other if !other.starts_with('-') => {
                 return Err(format!(
-                    "build target '{other}' is not supported yet: `ant build` builds the detected \
-                     project, and `ant build android` an Android one. iOS arrives in roadmap phase \
-                     P5 (docs/plan.md)."
+                    "build target '{other}' is not supported: `ant build` builds the detected \
+                     project; the named targets are `android` (Gradle) and `ios` (Xcode, on a Mac)."
                 ));
             }
             other => return Err(format!("unexpected argument '{other}'\n{BUILD_USAGE}")),
@@ -248,11 +276,21 @@ pub fn build_and_collect(
         return Err("choose one of --dev and --release".to_owned());
     }
     let android = adapter.name() == "gradle";
-    if target.is_some() && !android {
-        return Err(format!(
-            "`ant build android` needs an Android (Gradle wrapper) project; this one builds with {}",
-            adapter.name()
-        ));
+    match target.as_deref() {
+        Some("android") if !android => {
+            return Err(format!(
+                "`ant build android` needs an Android (Gradle wrapper) project; this one builds with {}",
+                adapter.name()
+            ));
+        }
+        Some("ios") if adapter.name() != "xcode" => {
+            return Err(format!(
+                "`ant build ios` needs an iOS project (a *.xcodeproj or *.xcworkspace, built with \
+                 Xcode on a Mac); this one builds with {}",
+                adapter.name()
+            ));
+        }
+        _ => {}
     }
     let (options, flavor) = build_options(adapter, &config.options, dev, release)?;
     let out_dir = safe_relative_dir(config.out_dir.as_deref().unwrap_or(DEFAULT_OUT_DIR))?;
@@ -384,7 +422,21 @@ pub fn build_and_collect(
     }
     let installed = install_artifacts(&root, &out_dir, &adapter.built_artifacts(&root, &plan))?;
     build_digest::profile::mark("collect deliverables");
-    if installed.is_empty() {
+    // Directory outputs (Vite/Electron/Python `dist/`, Maven `target/`,
+    // Tauri bundles) are the deliverables themselves; say where they are.
+    let tree_outputs: Vec<String> = plan
+        .actions
+        .iter()
+        .flat_map(|planned| planned.action.outputs.iter())
+        .filter(|output| output.kind == build_action::OutputKind::Tree)
+        .map(|output| format!("{}/", output.path.display()))
+        .collect();
+    if installed.is_empty() && !tree_outputs.is_empty() {
+        println!(
+            "\nBuilt in {elapsed:.1}s. Build products are in {}",
+            tree_outputs.join(", ")
+        );
+    } else if installed.is_empty() {
         println!(
             "\nBuilt in {elapsed:.1}s. {}",
             match adapter.name() {

@@ -202,10 +202,10 @@ fn ant_build_explains_what_it_cannot_do() {
     let (code, _, stderr) = ant_in(dir.path(), &["build"]);
     assert_eq!(code, 1);
     assert!(stderr.contains("ant init --adapter cargo"), "{stderr:?}");
-    // Targets that do not exist yet say when they arrive.
-    let (code, _, stderr) = ant_in(dir.path(), &["build", "ios"]);
+    // Unknown targets name the ones that exist.
+    let (code, _, stderr) = ant_in(dir.path(), &["build", "web"]);
     assert_eq!(code, 1);
-    assert!(stderr.contains("P5"), "{stderr:?}");
+    assert!(stderr.contains("named targets"), "{stderr:?}");
     // Typos in ant.toml fail loudly.
     write(&dir.path().join("ant.toml"), "adaptr = \"cargo\"\n");
     let (code, _, stderr) = ant_in(dir.path(), &["build"]);

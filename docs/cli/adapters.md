@@ -253,6 +253,186 @@ package becomes `.ant/go/bin/<name>[.exe]` (named like `go build` names it;
 - **Honest limits:** with cgo, the C compiler is not part of the toolchain
   identity; cross-machine reuse is not offered.
 
+## The `flutter` adapter (P6, D-037)
+
+Detects a Flutter app or plugin: a `pubspec.yaml` whose dependencies reference
+the Flutter SDK (`sdk: flutter`). A plain Dart package (CLI, server) has no
+such reference and is not recognized — Ant does not yet build non-Flutter
+Dart. Generation emits one `flutter build web --<mode>` action and re-validates
+the plan through the build graph before any side effect.
+
+- **Target (T3.13):** only `web` is supported in this phase (`--option
+  target=web`, the default). Its output layout (`build/web/index.html`,
+  `build/web/main.dart.js`) is deterministic and portable, so the declared
+  outputs are real. Other targets (`apk`, `ios`, desktop) have
+  platform-SDK-dependent layouts and arrive in a later roadmap phase;
+  `--option target=` anything but `web` fails closed.
+- **Mode:** `release` (default), `debug`, or `profile` (`--option mode=...`).
+  Flutter's build mode is a real choice (like cargo's profile), so the summary
+  always labels it: `ant build · flutter · release · 1 step` (or `debug`/`profile`).
+  `--dev` selects debug, `--release` restores release.
+- **Inputs declared:** `pubspec.yaml`, `pubspec.lock` when present, and the
+  `lib` (Dart sources), `web` (web template) and `assets` trees when present.
+  Pub package sources live in the pub cache (`~/.pub-cache` / `PUB_CACHE`)
+  outside the workspace and are intentionally not declared — they are the
+  derived product of `flutter pub get` against the registry, not source.
+- **Outputs declared:** the deterministic web files `build/web/index.html` and
+  `build/web/main.dart.js`, **verified, not trusted** (the executor fails the
+  action when one is not created).
+- **Caching:** because pub package sources and the bundled Dart VM are
+  undeclared inputs, generated actions are `cache_policy: Local` (D-028): this
+  machine may reuse its own result (pubspec pins versions locally) but it is
+  never shared — the same honest stance the Gradle adapter takes when its
+  dependencies are not locally declared.
+- **Truthful toolchain identity** from the real Flutter SDK: `flutter
+  --version` for the version, and the SHA-256 digest of the bundled Dart
+  executable the build actually runs (`<flutter_bin>/cache/dart-sdk/bin/
+  dart<EXE_SUFFIX>`). `flutter` itself is a launcher script (`flutter.bat` on
+  Windows), not a standalone executable; the bundled Dart VM is the truthful
+  runtime identity, the way `node` is for npm.
+- **Windows invocation:** `flutter` is `flutter.bat` and `CreateProcess`
+  cannot launch batch scripts directly, so the argv is
+  `cmd /C flutter build ...` on Windows and `flutter build ...` elsewhere.
+- **Workspace-relative scratch environment:** like the other adapters, every
+  generated action sets `TMP`/`TEMP` (plus `TMPDIR` on non-Windows) to `.ant/tmp`,
+  resolved against the action's working directory.
+- **Honest limits:** Flutter actions are honestly **path-dependent** (local keys stay
+  path-specific, D-031): the Dart compiler and bundler write absolute source paths
+  into source maps and the generated `main.dart.js`, so outputs may embed this
+  clone's path and a shared cache could restore a wrong binary into a second
+  clone. Keys therefore keep the workspace path and a second clone in another
+  folder rebuilds; the marker exists only for adapters whose outputs Ant can
+  prove path-independent. The Flutter SDK itself is a host installation,
+  identified by its launcher location and the bundled Dart digest, not a
+  workspace input. Verified end to end: adapt → run builds a Flutter web project
+  through a stub SDK (no Flutter install, Dart SDK, or network needed), the
+  declared web files flow from `lib/main.dart` to `dist/`, and a no-change
+  rebuild reuses the local result without running Flutter again
+  (`ant-cli/tests/flutter_build.rs`).
+
+## The `xcode` adapter (P5, D-038) — `ant build ios`
+
+Detects an iOS app by a root-level `*.xcodeproj` or `*.xcworkspace` (a pure iOS
+app keeps one at the project root; a Flutter/React Native project keeps its iOS
+project in an `ios/` subfolder, so there is no collision with the Flutter
+adapter's `pubspec.yaml` detection). The single build action runs
+`xcodebuild -scheme <scheme> -configuration <config> -sdk <sdk>
+-derivedDataPath .ant/build build` — `-scheme` is omitted when unspecified
+(xcodebuild uses the project default), `-configuration` is `Release` by
+default (`--dev` for `Debug`), and `-sdk` is `iphoneos` (the device, the
+deliverable) by default (`iphonesimulator` for a credential-free simulator
+build).
+
+The declared inputs are the project package, `Package.swift`, `Podfile`,
+`Podfile.lock`, and `Sources`/`App` trees when present; the declared output is
+the `.ant/build` derived-data directory. The `.app` product name is not known
+without parsing the project, so — like the CMake adapter — no deliverable is
+claimed and the build directory is the only declared output.
+
+- **Honest limits:** only the **build** verb is supported in this phase. A
+  signed `.ipa` export (the full P5 success criterion) needs an Apple Developer
+  identity and a provisioning profile the owner must supply, so a signed export
+  is a later step; unsigned simulator and development builds need no
+  credentials. Mac workers and certificate/provisioning-profile management are
+  not yet implemented.
+- **Cache policy `Local`:** SPM clone sources and the Pods cache live outside
+  the workspace and are undeclared inputs, so these actions never claim shared
+  cache eligibility. Local reuse is allowed: `Package.resolved` / `Podfile.lock`
+  pin versions and this machine may reuse its own result (D-028).
+- **Truthful toolchain identity** from the real Xcode: the version from
+  `xcodebuild -version` and the SHA-256 digest of the resolved `xcodebuild`
+  executable. `xcodebuild` is a real executable (an `xcrun` shim on macOS), so
+  no `cmd /C` wrapper is needed; on a non-Mac it is simply absent and
+  `generate` fails closed with a toolchain error.
+- **Verified:** the adapter unit tests skip honestly where `xcodebuild` is
+  absent (no Xcode on Linux/Windows) so the main CI matrix stays green, and run
+  for real on a macOS CI runner (`verify-ios.yml`, `macos-latest`) where real
+  Xcode is present — exercising the genuine toolchain capture and plan
+  assembly on Apple hardware without needing an Apple Developer identity or a
+  sample app (the adapter builds a plan; it does not run `xcodebuild build`).
+
+## The `python` adapter (P6, D-039)
+
+A Python project has a `pyproject.toml` (PEP 518/621, with a `[build-system]`
+table) or a legacy `setup.py`. The adapter generates one action that runs
+`python -m build`, declaring the workspace inputs it can honestly cover and
+the `dist/` tree it produces.
+
+- **Build:** `python -m build [--wheel | --sdist]` — calls the PEP 517 backend
+declared in `pyproject.toml`'s `[build-system]` (or the legacy
+  `setup.py`/`setup.cfg` metadata) and writes a wheel and an sdist into
+  `dist/`. `--option format=wheel` (default) builds only the wheel,
+  `--option format=sdist` only the source distribution, `--option format=all`
+  both (no flag).
+- **Detection:** a `pyproject.toml` with a `[build-system]` table is a
+  buildable package (PEP 518). One without it may be tooling-only config
+  (ruff, black, etc.) and is not recognized unless `setup.py` is also present.
+  A bare `setup.py` is recognized (legacy).
+- **Declared inputs:** `pyproject.toml`, `setup.py`, `setup.cfg`, and
+  `requirements.txt` when present, and the `src/` source tree when present.
+  PEP 517 build dependencies and the pip registry are outside the workspace
+  and intentionally not declared.
+- **Declared output:** `dist/` (`OutputKind::Tree`). A wheel's filename
+  encodes the version, platform, and Python tag — all deterministic for a given
+  project, but not a fixed name the adapter can hardcode. The tree output
+  covers the wheel (`dist/*.whl`) and the sdist (`dist/*.tar.gz`) without
+  guessing either name.
+- **Cache policy `Never`:** PEP 517 build dependencies and the pip registry are
+  undeclared inputs (they live outside the workspace), so generated actions
+  never claim cache eligibility (D-003, D-010).
+- **Truthful toolchain identity** from the real `python` runtime: the resolved
+  PATH executable's SHA-256 digest and `python --version`. `python` is a
+  standalone executable (`python3` on Linux, `python.exe` on Windows), not a
+  batch shim, so no `cmd /C` wrapper is needed on Windows.
+- **Workspace-relative scratch:** `TMP`/`TEMP` (plus `TMPDIR` off Windows)
+  point at `.ant/tmp`, the staging pattern shared with the other adapters.
+
+## npm framework outputs (P6, D-040)
+
+The npm adapter declares a framework's output directory automatically when it
+finds the framework in `package.json`: `vite` in `dependencies` or
+`devDependencies` declares `dist/`, `next` in `dependencies` declares `.next/`
+(both as tree outputs, in each workspace package that uses them). Entry-point
+outputs (`outputs=entry-points`) are added on top when requested. Actions stay
+`cache_policy: never` (`node_modules` is an undeclared input).
+
+## The `maven` adapter (P6, D-041)
+
+A `pom.xml` at the root: one action `mvn package -DskipTests`
+(`--option goal=package|verify|compile`; `verify` runs the tests). Declares
+`target/` as a tree output (the artifact name encodes `artifactId` and
+`version`). `cache_policy: never`: dependencies resolve from Maven Central into
+`~/.m2`, outside the project.
+
+## The `docker` adapter (P6, D-041)
+
+A `Dockerfile` at the root: `docker build -t <tag> .` (`--option tag=NAME`,
+default the directory name). With the default `output=image` the image goes to
+the Docker daemon and no file is declared; `--option output=tar` writes a
+portable image tar to `.ant/docker/image.tar` (BuildKit), which `ant build`
+collects into `dist/image.tar`. `Dockerfile` and `.dockerignore` are declared
+inputs; the rest of the build context and pulled base images are not, so
+`cache_policy: never`. Docker is **packaging-only** for project detection: a
+Rust, Go, or other project that also has a `Dockerfile` keeps building with its
+own adapter; Docker is chosen when the `Dockerfile` is all there is, or when
+`ant.toml` says `adapter = "docker"` (D-036).
+
+## The `tauri` adapter (P6, D-041)
+
+`src-tauri/tauri.conf.json`: one action `npm run tauri build`, which compiles
+the Rust backend with cargo, bundles the frontend, and writes installers to
+`src-tauri/target/release/bundle/` (declared as a tree output). npm and cargo
+registry dependencies are undeclared, so `cache_policy: never`. A Tauri app is
+also an npm project and contains a cargo crate; the Tauri adapter supersedes
+both in detection (D-036).
+
+## The `electron` adapter (P6, D-041)
+
+An npm project with `electron` in `dependencies` or `devDependencies`: one
+action `npx electron-builder` (`cmd /C npx` on Windows), installers in `dist/`
+(declared as a tree output). `cache_policy: never` (`node_modules`). Electron
+supersedes npm in detection (D-036).
+
 ## The `gradle` adapter (P4, D-024)
 
 Detects a Gradle **wrapper** project (`settings.gradle[.kts]` plus `gradlew`

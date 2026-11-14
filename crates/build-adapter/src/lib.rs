@@ -37,9 +37,16 @@
 
 pub mod cargo;
 pub mod cmake;
+pub mod docker;
+pub mod electron;
+pub mod flutter;
 pub mod go;
 pub mod gradle;
+pub mod maven;
 pub mod npm;
+pub mod python;
+pub mod tauri;
+pub mod xcode;
 
 use build_graph::{GraphError, PlanFile};
 use std::collections::BTreeMap;
@@ -176,6 +183,11 @@ impl AdapterOptions {
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.values.keys().map(String::as_str)
     }
+
+    /// Iterator over `(key, value)` pairs in deterministic (BTreeMap) order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
 }
 
 /// Reject any option key `adapter` does not declare in
@@ -256,6 +268,20 @@ pub trait BuildAdapter {
     fn plan_cache_probe(&self, _project_root: &Path) -> Option<Vec<String>> {
         None
     }
+
+    /// Adapters this one wraps, so it wins when both detect a project
+    /// (Electron and Tauri apps are also npm projects). A structural fact
+    /// about the build, not an ecosystem priority (D-010, D-036).
+    fn supersedes(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Whether this adapter only packages a project another adapter builds
+    /// (Docker): it is selected only when no other adapter matches, or when
+    /// `ant.toml` names it (D-036).
+    fn packaging_only(&self) -> bool {
+        false
+    }
 }
 
 /// A file's filesystem stamp as plan-cache key material: path, size,
@@ -330,6 +356,13 @@ pub fn available() -> Vec<&'static dyn BuildAdapter> {
         &cmake::CmakeAdapter,
         &gradle::GradleAdapter,
         &go::GoAdapter,
+        &flutter::FlutterAdapter,
+        &xcode::XcodeAdapter,
+        &maven::MavenAdapter,
+        &python::PythonAdapter,
+        &tauri::TauriAdapter,
+        &electron::ElectronAdapter,
+        &docker::DockerAdapter,
     ]
 }
 
@@ -401,7 +434,10 @@ impl std::error::Error for SelectionError {}
 
 /// Pick the single adapter that recognizes `project_root`. Fails when none or
 /// several match (no ecosystem priority is invented — D-010 honesty rules),
-/// and fails closed when any adapter's detection errors.
+/// and fails closed when any adapter's detection errors. Two structural
+/// facts narrow the matches first (D-036): an adapter that wraps another
+/// ([`BuildAdapter::supersedes`]) wins over it, and packaging-only adapters
+/// ([`BuildAdapter::packaging_only`]) drop out when anything else matched.
 pub fn select_adapter(project_root: &Path) -> Result<&'static dyn BuildAdapter, SelectionError> {
     let mut matches = Vec::new();
     let mut reasons = Vec::new();
@@ -416,6 +452,18 @@ pub fn select_adapter(project_root: &Path) -> Result<&'static dyn BuildAdapter, 
             Ok(detection) if detection.supported => matches.push(report.adapter),
             Ok(detection) => reasons.push((report.adapter, detection.reason)),
         }
+    }
+    let superseded: Vec<&str> = matches
+        .iter()
+        .filter_map(|name| adapter(name))
+        .flat_map(|matched| matched.supersedes().iter().copied())
+        .collect();
+    matches.retain(|name| !superseded.contains(name));
+    if matches
+        .iter()
+        .any(|name| adapter(name).is_some_and(|matched| !matched.packaging_only()))
+    {
+        matches.retain(|name| adapter(name).is_some_and(|matched| !matched.packaging_only()));
     }
     match matches.as_slice() {
         [] => Err(SelectionError::NoMatch(reasons)),
@@ -499,8 +547,18 @@ pub(crate) fn is_executable(path: &Path) -> bool {
 /// Run `executable --version` in `root` and return its trimmed stdout, for
 /// truthful toolchain identity capture.
 pub(crate) fn executable_version(executable: &Path, root: &Path) -> Result<String, AdapterError> {
+    executable_version_with_args(executable, root, &["--version"])
+}
+
+/// Run `executable <args...>` in `root` and return its trimmed stdout, for
+/// toolchain identity capture (`xcodebuild -version` takes one dash).
+pub(crate) fn executable_version_with_args(
+    executable: &Path,
+    root: &Path,
+    args: &[&str],
+) -> Result<String, AdapterError> {
     let output = std::process::Command::new(executable)
-        .arg("--version")
+        .args(args)
         .current_dir(root)
         .output()
         .map_err(|error| {
@@ -511,16 +569,18 @@ pub(crate) fn executable_version(executable: &Path, root: &Path) -> Result<Strin
         })?;
     if !output.status.success() {
         return Err(AdapterError::Toolchain(format!(
-            "{exe} --version failed: {stderr}",
+            "{exe} {args} failed: {stderr}",
             exe = executable.display(),
+            args = args.join(" "),
             stderr = String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
     let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if version.is_empty() {
         return Err(AdapterError::Toolchain(format!(
-            "{exe} --version produced no output",
-            exe = executable.display()
+            "{exe} {args} produced no output",
+            exe = executable.display(),
+            args = args.join(" ")
         )));
     }
     Ok(version)
@@ -723,6 +783,56 @@ mod tests {
         );
     }
 
+    /// D-036: wrappers beat what they wrap, packaging-only adapters step
+    /// aside, and genuinely different ecosystems stay ambiguous.
+    #[test]
+    fn selection_prefers_wrappers_and_sets_packaging_aside() {
+        let write = |dir: &Path, name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, text).expect("write");
+        };
+        // A Rust project with a Dockerfile builds with cargo.
+        let rust = TempDir::new("select-rust-docker");
+        write(
+            rust.path(),
+            "Cargo.toml",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        );
+        write(rust.path(), "Dockerfile", "FROM scratch\n");
+        assert_eq!(select_adapter(rust.path()).expect("select").name(), "cargo");
+        // A Dockerfile alone selects Docker.
+        let image = TempDir::new("select-docker-only");
+        write(image.path(), "Dockerfile", "FROM scratch\n");
+        assert_eq!(
+            select_adapter(image.path()).expect("select").name(),
+            "docker"
+        );
+        // An Electron app (an npm project with electron) selects Electron.
+        let electron = TempDir::new("select-electron");
+        write(
+            electron.path(),
+            "package.json",
+            r#"{"name":"app","scripts":{"build":"electron-builder"},"devDependencies":{"electron":"30.0.0"}}"#,
+        );
+        assert_eq!(
+            select_adapter(electron.path()).expect("select").name(),
+            "electron"
+        );
+        // Two unrelated ecosystems still ask the user.
+        let mixed = TempDir::new("select-mixed");
+        write(
+            mixed.path(),
+            "Cargo.toml",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        );
+        write(mixed.path(), "go.mod", "module example.com/x\n");
+        assert!(matches!(
+            select_adapter(mixed.path()),
+            Err(SelectionError::Ambiguous(_))
+        ));
+    }
+
     #[test]
     fn selection_reports_every_reason_when_nothing_matches() {
         let dir = TempDir::new("select-none");
@@ -733,7 +843,10 @@ mod tests {
         let names: Vec<_> = reasons.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            vec!["cargo", "npm", "cmake", "gradle", "go"],
+            vec![
+                "cargo", "npm", "cmake", "gradle", "go", "flutter", "xcode", "maven", "python",
+                "tauri", "electron", "docker"
+            ],
             "one reason per registered adapter"
         );
         let text = error.to_string();
@@ -742,7 +855,10 @@ mod tests {
                 && text.contains("no package.json")
                 && text.contains("no CMakeLists.txt")
                 && text.contains("no settings.gradle")
-                && text.contains("no go.mod"),
+                && text.contains("no go.mod")
+                && text.contains("no pubspec.yaml")
+                && text.contains("no pom.xml")
+                && text.contains("no Dockerfile"),
             "{text}"
         );
     }

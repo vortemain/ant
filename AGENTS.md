@@ -36,6 +36,7 @@ For each work item, record: owner; files/contracts owned; dependencies; acceptan
 
 ### State of `main`
 - Phases done: P1 front door, P2 speed engine (shared remote cache measured), P4.1 Gradle/Android adapter + benchmark, P4.2 shared Gradle task cache, P3.1 local no-change speed (change detection, one cargo call, absolute temp dirs), P3.2 local result reuse (`cache_policy: local`, `ant build --fresh`). Decisions through **D-028** in `docs/plan.md`; the ledger rows P3.1/P3.2/P4.1/P4.2 hold the measured numbers.
+- **Branch `integrate-adapters` (P6.2, not merged):** the parallel `p3-local-speed` line's unique adapters (Flutter, Xcode, Python, Maven, Docker, Tauri, Electron, npm framework outputs) on top of `main`, plus adapter selection rules (D-036–D-041). `p3-local-speed`/`p5-ios` are another session's branches: do not delete them without the owner.
 - **P6.1 (merged to `main` 2026-11-15 from `p6-go`; CI green, run 43644177715):** Go adapter and CMake deliverables via the File API (D-035); 264 tests pass locally.
 - **P4.4 (merged to `main` 2026-11-15 from `p4-install`; CI green, run 43641121631):** `ant install` over USB (adb) or Wi-Fi with a terminal QR code (D-034); 260 tests pass locally.
 - **P3.5 + P4.3 (merged to `main` 2026-11-14 from `p4-signing`; CI green, run 43639873797):** Linux benchmark workflow `bench-local.yml` (results in `benchmarks/local/results/2026-11-14-linux-ci/`), signed Android releases (`ant build --release`, `ant build android`), `ant signing status|export|import`, `SecretEnvironment` injected only by the direct local executor (D-033). 257 tests pass locally.
@@ -60,6 +61,7 @@ For each work item, record: owner; files/contracts owned; dependencies; acceptan
 | ✓ | Signed Android releases (P4.3) | met on the minimal app: signed APK + AAB, key generated/imported/exported, password never stored or logged in plain text on Windows | D-033. Open: Keychain/Secret Service off Windows, install-by-QR, Play upload |
 | ✓ | Install-by-QR (P4.4) | `ant install` serves the APK on the LAN behind a random token and prints a QR code; installs over USB with adb when a phone is connected | D-034. Verify with a real phone (none here) |
 | ✓ | Go adapter + CMake deliverables (P6.1) | Go module and CMake exe/DLL build and collect into `dist/` with `ant build` | D-035. Next ecosystems for P6: Vite/Next web builds, Python wheels, .NET, Flutter, containers |
+| ✓ | Integrate the parallel adapter work (P6.2) | 7 adapters + npm framework outputs on `main`'s base; overlapping features keep `main`'s version | D-036. Real builds for Maven/Python/Flutter/Docker still unverified here |
 | 6 | Measure npm and a real-size Android app (JetNews) | numbers recorded like `docs/benchmarks/` | done: Windows laptop (Rust scripted, minimal Android hand-run) and Linux CI runner (Rust, `bench-local.yml`); JetNews needs a large download (ask the owner). The owner's 10× claim is met for branch switching (Rust ~30×, Android ~10–30×) and Android no-change (~20×+), not for Rust no-change (~2.5×) or cold builds (equal) |
 
 ### Gotchas learned the hard way

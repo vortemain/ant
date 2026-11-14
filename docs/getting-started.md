@@ -52,6 +52,14 @@ All fields are optional. Unknown keys are rejected, so typos fail loudly instead
 | JavaScript/TypeScript (npm, including workspaces) | `package.json` with a `build` script | none by default (your build script writes its own output); set `outputs = "entry-points"` under `[options]` to have Ant verify and collect the entries named in `package.json` |
 | C/C++ (CMake) | `CMakeLists.txt` | executables and shared libraries (from CMake's own target list); Visual Studio's bundled CMake is found automatically on Windows |
 | Go (modules) | `go.mod` | one executable per `main` package (release builds are trimmed: no paths or symbols) |
+| Flutter (web) | `pubspec.yaml` using the Flutter SDK | `index.html` and `main.dart.js` |
+| iOS (Xcode, on a Mac) | `*.xcodeproj` / `*.xcworkspace` | none yet (the build lands in `.ant/build`); `ant build ios` |
+| Java (Maven) | `pom.xml` | the `target/` folder (your JAR/WAR) |
+| Python packages | `pyproject.toml` with `[build-system]`, or `setup.py` | the `dist/` folder (wheel and/or sdist) |
+| Desktop apps (Tauri, Electron) | `src-tauri/tauri.conf.json`; an npm project using `electron` | the installer folder (`src-tauri/target/release/bundle/`, `dist/`) |
+| Container images (Docker) | a `Dockerfile` (alone, or `adapter = "docker"` in `ant.toml`) | the image in Docker, or `dist/image.tar` with `output = "tar"` |
+
+Vite and Next.js projects (npm) report their `dist/` / `.next/` folder automatically.
 | Android (Gradle wrapper) | `settings.gradle(.kts)` + `gradlew` | each app module's debug APK, signed with your usual debug key; Ant finds the Android SDK in its default location if `ANDROID_HOME` is not set, uses your own Gradle cache, and keeps Gradle's daemon warm between builds |
 
 iOS, web bundlers, desktop installers, containers, and more languages are on the roadmap ([vision](vision.md), [plan](plan.md)).
