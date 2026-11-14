@@ -41,11 +41,18 @@ use std::path::{Path, PathBuf};
 
 pub struct GradleAdapter;
 
-const OPTIONS: &[OptionSpec] = &[OptionSpec {
-    key: "task",
-    values: "assembleDebug|assembleRelease",
-    description: "Gradle task to run; assembleDebug declares each application module's debug APK as an output",
-}];
+const OPTIONS: &[OptionSpec] = &[
+    OptionSpec {
+        key: "task",
+        values: "assembleDebug|assembleRelease",
+        description: "Gradle task to run; assembleDebug declares each application module's debug APK as an output",
+    },
+    OptionSpec {
+        key: "home",
+        values: "project|user",
+        description: "Gradle/Android homes: project keeps them in .ant/ (sandbox and workers); user uses ~/.gradle and ~/.android so local builds reuse downloaded dependencies and the usual debug key (ant build's default)",
+    },
+];
 
 /// The in-project read-only dependency cache directory (Gradle
 /// `GRADLE_RO_DEP_CACHE` layout).
@@ -89,6 +96,44 @@ impl BuildAdapter for GradleAdapter {
         OPTIONS
     }
 
+    /// Gradle plans read only project files (all declared inputs, plus the
+    /// top-level listing the plan cache adds) and, outside the project, the
+    /// JDK on `PATH` (`java -version`), `JAVA_HOME`, the Android SDK and
+    /// home locations, and the developer's home directory (D-029, D-032).
+    fn plan_cache_probe(&self, _project_root: &Path) -> Option<Vec<String>> {
+        let mut probe = vec!["gradle plan probe v1".to_owned()];
+        probe.extend(crate::environment_probe(&[
+            "JAVA",
+            "ANDROID",
+            "GRADLE",
+            "HOME",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+        ]));
+        let java = locate_executable(&format!("java{}", std::env::consts::EXE_SUFFIX)).ok()?;
+        probe.push(crate::stamp_line(&java));
+        if let Ok(real) = java.canonicalize() {
+            probe.push(crate::stamp_line(&real));
+        }
+        if let Some(home) = crate::home_dir() {
+            for default_sdk in [
+                home.join("Android").join("Sdk"),
+                home.join("Library").join("Android").join("sdk"),
+            ] {
+                probe.push(format!(
+                    "{} {}",
+                    default_sdk.display(),
+                    default_sdk.is_dir()
+                ));
+            }
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let sdk = PathBuf::from(local).join("Android").join("Sdk");
+            probe.push(format!("{} {}", sdk.display(), sdk.is_dir()));
+        }
+        Some(probe)
+    }
+
     fn detect(&self, project_root: &Path) -> Result<Detection, AdapterError> {
         if settings_file(project_root).is_none() {
             return Ok(Detection::unsupported(format!(
@@ -118,6 +163,15 @@ impl BuildAdapter for GradleAdapter {
             Some(other) => {
                 return Err(AdapterError::Option(format!(
                     "gradle task '{other}' is not supported (supported: assembleDebug, assembleRelease)"
+                )));
+            }
+        };
+        let user_home = match options.get("home") {
+            None | Some("project") => false,
+            Some("user") => true,
+            Some(other) => {
+                return Err(AdapterError::Option(format!(
+                    "gradle home '{other}' is not supported (supported: project, user)"
                 )));
             }
         };
@@ -211,17 +265,25 @@ impl BuildAdapter for GradleAdapter {
         let mut environment = vec![
             ("TMP".to_owned(), rel(staging.join("tmp"))),
             ("TEMP".to_owned(), rel(staging.join("tmp"))),
+        ];
+        if user_home {
+            // Local builds (`ant build`): the developer's own Gradle and
+            // Android homes, named explicitly because the child environment
+            // never inherits profile variables. Absolute values are key
+            // material, so results stay specific to this machine (D-032).
+            environment.extend(user_homes(&root)?);
+        } else {
             // Gradle's and Android's writable homes stay inside the
             // workspace (never inputs: `.ant/` is excluded).
-            (
+            environment.push((
                 "GRADLE_USER_HOME".to_owned(),
                 rel(staging.join("gradle-home")),
-            ),
-            (
+            ));
+            environment.push((
                 "ANDROID_USER_HOME".to_owned(),
                 rel(staging.join("android-home")),
-            ),
-        ];
+            ));
+        }
         if cfg!(not(windows)) {
             environment.push(("TMPDIR".to_owned(), rel(staging.join("tmp"))));
         }
@@ -249,7 +311,14 @@ impl BuildAdapter for GradleAdapter {
                 "gradlew".into(),
             ]
         };
-        argv.extend(["--no-daemon".to_owned(), "--console=plain".to_owned()]);
+        // Local builds keep Gradle's daemon warm between builds (it survives
+        // the action through `background_services`, D-032): the edit loop
+        // then pays neither JVM startup nor configuration again. Sandboxed
+        // and worker runs stay daemon-free.
+        if !user_home {
+            argv.push("--no-daemon".to_owned());
+        }
+        argv.push("--console=plain".to_owned());
         if fully_declared {
             // Not `--offline`: Gradle disables its remote build cache in
             // offline mode, and the sandbox already has no network, so a
@@ -296,6 +365,7 @@ impl BuildAdapter for GradleAdapter {
             toolchain: Some(toolchain),
             timeout_ms: None,
             resources: None,
+            background_services: user_home,
         };
         let mut file = PlanFile::new();
         file.actions.push(PlanAction {
@@ -305,6 +375,54 @@ impl BuildAdapter for GradleAdapter {
         file.to_graph()?;
         Ok(file)
     }
+}
+
+/// The developer's own Gradle home, Android user home, JDK, and Android SDK
+/// for `home=user` plans. The SDK comes from `ANDROID_HOME` /
+/// `ANDROID_SDK_ROOT`, else `local.properties` (`sdk.dir`, read by the
+/// Android Gradle Plugin itself), else the platform's default install
+/// location when it exists.
+fn user_homes(root: &Path) -> Result<Vec<(String, String)>, AdapterError> {
+    let home = crate::home_dir().ok_or_else(|| {
+        AdapterError::Toolchain("cannot find your home directory for home=user".to_owned())
+    })?;
+    let text = |path: PathBuf| path.to_string_lossy().into_owned();
+    let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let mut environment = vec![
+        (
+            "GRADLE_USER_HOME".to_owned(),
+            env("GRADLE_USER_HOME").unwrap_or_else(|| text(home.join(".gradle"))),
+        ),
+        (
+            "ANDROID_USER_HOME".to_owned(),
+            env("ANDROID_USER_HOME").unwrap_or_else(|| text(home.join(".android"))),
+        ),
+    ];
+    if let Some(java_home) = env("JAVA_HOME") {
+        environment.push(("JAVA_HOME".to_owned(), java_home));
+    }
+    let sdk_in_properties = std::fs::read_to_string(root.join("local.properties"))
+        .is_ok_and(|text| text.lines().any(|line| line.trim().starts_with("sdk.dir")));
+    let sdk = env("ANDROID_HOME")
+        .or_else(|| env("ANDROID_SDK_ROOT"))
+        .or_else(|| {
+            if sdk_in_properties {
+                return None;
+            }
+            let default = if cfg!(windows) {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|dir| PathBuf::from(dir).join("Android").join("Sdk"))
+            } else if cfg!(target_os = "macos") {
+                Some(home.join("Library").join("Android").join("sdk"))
+            } else {
+                Some(home.join("Android").join("Sdk"))
+            };
+            default.filter(|dir| dir.is_dir()).map(text)
+        });
+    if let Some(sdk) = sdk {
+        environment.push(("ANDROID_HOME".to_owned(), sdk));
+    }
+    Ok(environment)
 }
 
 /// Whether `dir` (absolute) contains a Gradle build file anywhere below it.
@@ -501,6 +619,51 @@ mod tests {
                 .version
                 .contains("gradle-9.5.0")
         );
+    }
+
+    #[test]
+    fn user_home_plans_keep_the_daemon_and_name_the_developer_homes() {
+        let dir = android_project(true);
+        let env = |action: &Action, name: &str| {
+            action
+                .environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+
+        // Default (`home=project`): homes in `.ant/`, no daemon, strict cleanup.
+        let plan = GradleAdapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        let action = &plan.actions[0].action;
+        assert!(action.argv.iter().any(|arg| arg == "--no-daemon"));
+        assert!(!action.background_services);
+        assert_eq!(
+            env(action, "GRADLE_USER_HOME").map(PathBuf::from),
+            Some(PathBuf::from(".ant").join("gradle-home"))
+        );
+
+        // `home=user` (ant build): the developer's own homes, warm daemon.
+        let mut options = AdapterOptions::new();
+        options.insert("home", "user").expect("option");
+        let plan = GradleAdapter
+            .generate(dir.path(), &options)
+            .expect("generate");
+        let action = &plan.actions[0].action;
+        assert!(!action.argv.iter().any(|arg| arg == "--no-daemon"));
+        assert!(action.background_services);
+        for name in ["GRADLE_USER_HOME", "ANDROID_USER_HOME"] {
+            let value = env(action, name).unwrap_or_else(|| panic!("{name} declared"));
+            assert!(Path::new(&value).is_absolute(), "{name} = {value}");
+        }
+
+        let mut bad = AdapterOptions::new();
+        bad.insert("home", "elsewhere").expect("option");
+        assert!(matches!(
+            GradleAdapter.generate(dir.path(), &bad),
+            Err(AdapterError::Option(_))
+        ));
     }
 
     #[test]

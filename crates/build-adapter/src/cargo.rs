@@ -475,6 +475,7 @@ impl BuildAdapter for CargoAdapter {
                 }),
                 timeout_ms: None,
                 resources: None,
+                background_services: false,
             };
             all_outputs.extend(action.outputs.iter().map(|output| output.path.clone()));
             file.actions.push(PlanAction {

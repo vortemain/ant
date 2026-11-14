@@ -45,6 +45,8 @@ Every number below comes with its raw data and script in this repository. Each o
 |---|---|---:|---:|---|
 | **Rust on a laptop**: Ant itself, plain `ant build`, Core i5-8365U, Windows 11 | switch back to a branch you built before | cargo: 12.9–19.1 s | **0.38–0.53 s** | ~30× |
 | | nothing changed | cargo: 0.39–0.42 s | **0.14–0.21 s** | ~2.5× |
+| **Android on a laptop**: minimal one-screen app, plain `ant build`, same laptop (hand-run) | one-line edit | Gradle, warm daemon: 6.2–29.5 s | **2.3–4.4 s** | ~2× |
+| | nothing changed | Gradle, warm daemon: 5.9–8.6 s | **0.11–0.35 s** | ~20× |
 | **Android**: JetNews (Jetpack Compose) | fresh checkout | Gradle, warm daemon + build cache: 4.0–4.6 s | **0.65–0.85 s** | ~5× |
 | | nothing changed | Gradle, warm daemon: 1.6–2.2 s | **0.66–0.86 s** | ~2.5× |
 | | first build ever | Gradle: 156.9 s | 159.0 s | tie |

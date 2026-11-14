@@ -123,6 +123,11 @@ fn build_options(
     if accepts("granularity") {
         chosen.insert("granularity".into(), "workspace".into());
     }
+    // Local Gradle builds use the developer's own Gradle/Android homes:
+    // downloaded dependencies and the usual debug key (D-032).
+    if accepts("home") {
+        chosen.insert("home".into(), "user".into());
+    }
     for (key, value) in configured {
         chosen.insert(key.clone(), value.clone());
     }

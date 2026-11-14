@@ -333,7 +333,7 @@ pub fn execute_prepared(
     // guard must stay alive until the child has exited.
     #[cfg(windows)]
     let job_guard = match prepared.memory_limit_bytes {
-        None => attach_child_to_job(&child),
+        None => attach_child_to_job(&child, action.background_services),
         Some(limit) => match attach_capped_and_resume(&child, limit) {
             Ok(job) => Some(job),
             Err(message) => {
@@ -990,10 +990,15 @@ fn attach_capped_and_resume(child: &Child, limit_bytes: u64) -> Result<win32job:
 /// If the child has already exited or the job cannot be created, no guard is
 /// returned; execution continues and cleanup is best-effort.
 #[cfg(windows)]
-fn attach_child_to_job(child: &Child) -> Option<win32job::Job> {
+fn attach_child_to_job(child: &Child, background_services: bool) -> Option<win32job::Job> {
     use std::os::windows::io::AsRawHandle;
     let mut info = win32job::ExtendedLimitInfo::new();
     info.limit_kill_on_job_close();
+    if background_services {
+        // Processes the action starts leave the job, so a declared build
+        // daemon survives the action (D-032). The main process stays in it.
+        info.limit_silent_breakaway_ok();
+    }
     let job = win32job::Job::create_with_limit_info(&info).ok()?;
     job.assign_process(child.as_raw_handle() as isize).ok()?;
     Some(job)
@@ -1204,6 +1209,41 @@ mod tests {
         ];
     }
 
+    /// D-032: a helper process the action starts is killed with the action's
+    /// job unless the action declares `background_services`.
+    #[cfg(windows)]
+    #[test]
+    fn background_services_let_helpers_outlive_the_action_on_windows() {
+        let helper_lines = |background_services: bool| {
+            let workspace = TempDir::new(&format!("bg-{background_services}"));
+            // `start /B` returns at once; ping keeps writing for ~3 s.
+            let mut planned = action(
+                "bg",
+                vec![
+                    "cmd".to_owned(),
+                    "/C".to_owned(),
+                    "start /B ping -n 4 127.0.0.1 > helper.txt".to_owned(),
+                ],
+            );
+            planned.background_services = background_services;
+            let prepared = prepare(workspace.path(), &planned).expect("prepare");
+            let result = execute_prepared(&prepared, &CancellationToken::new()).expect("execute");
+            assert!(result.success());
+            std::thread::sleep(Duration::from_secs(6));
+            fs::read_to_string(workspace.path().join("helper.txt"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+        };
+        let killed = helper_lines(false);
+        let survived = helper_lines(true);
+        assert!(
+            survived > killed && survived >= 6,
+            "helper output lines: killed={killed} survived={survived}"
+        );
+    }
+
     #[test]
     fn relative_directory_variables_become_absolute_at_spawn() {
         let mut planned = action("env", vec!["x".to_owned()]);
@@ -1242,6 +1282,7 @@ mod tests {
             toolchain: None,
             timeout_ms: None,
             resources: None,
+            background_services: false,
         }
     }
 

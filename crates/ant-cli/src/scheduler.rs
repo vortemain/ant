@@ -1186,6 +1186,7 @@ mod tests {
                 cpu: 16,
                 memory_mb: Some(9000),
             }),
+            background_services: false,
         };
         let capacity = Capacity {
             cpu: 4,

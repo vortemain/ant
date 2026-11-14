@@ -1,0 +1,26 @@
+tool,scenario,rep,seconds,notes
+ant,cold,1,111.7,first ant build ever: user Gradle home (AGP 8.11.0 already cached); --no-daemon plan
+ant,no-change,1,0.383,plan regenerated (no Gradle plan cache yet)
+ant-no-daemon,edit,1,37.17,one-line edit of MainActivity.java; --no-daemon plan
+ant-no-daemon,edit,2,37.89,
+ant-no-daemon,edit,3,86.73,thermal/background noise not controlled
+ant-no-daemon,switch-back,2,0.295,git checkout of the edited file; restored
+ant-no-daemon,switch-back,3,0.942,restored
+ant-no-daemon,no-change,1,0.324,
+ant-no-daemon,no-change,2,0.352,
+ant-no-daemon,no-change,3,0.680,
+gradle-warm-daemon,edit,1,6.245,./gradlew.bat assembleDebug with ANDROID_HOME set
+gradle-warm-daemon,edit,2,29.519,
+gradle-warm-daemon,edit,3,6.216,
+gradle-warm-daemon,switch-back,1,6.863,
+gradle-warm-daemon,switch-back,2,9.741,
+gradle-warm-daemon,switch-back,3,10.047,
+gradle-warm-daemon,no-change,1,8.634,
+gradle-warm-daemon,no-change,2,5.947,
+gradle-warm-daemon,no-change,3,6.260,
+ant-daemon,edit,1,4.437,home=user plan with background_services (D-032); daemon possibly warm from the gradle runs
+ant-daemon,edit,2,2.565,
+ant-daemon,edit,3,2.660,
+ant-daemon,edit,4,2.915,
+ant-daemon,no-change,1,0.267,before the Gradle plan cache
+ant-daemon,no-change,2,0.110,with the Gradle plan cache (wall); other hits 0.35 s

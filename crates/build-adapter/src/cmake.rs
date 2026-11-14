@@ -175,6 +175,7 @@ impl BuildAdapter for CmakeAdapter {
             toolchain: Some(toolchain.clone()),
             timeout_ms: None,
             resources: None,
+            background_services: false,
         };
         let strings = |items: &[&str]| {
             items

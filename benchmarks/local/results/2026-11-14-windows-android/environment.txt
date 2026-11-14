@@ -1,0 +1,6 @@
+date_utc=2026-11-14
+machine=same laptop as ../2026-11-14-windows (Intel Core i5-8365U, 4 cores/8 threads, 7.8 GiB RAM, SSD, Windows 11 Pro 10.0.26300)
+subject=minimal plain-Java Android app written for this test (one Activity, no AndroidX): AGP 8.11.0, Gradle 8.14.3 wrapper, compileSdk/targetSdk 35, minSdk 24, build-tools 35.0.0
+jdk=Java 17.0.12
+method=hand-run in one session (no script yet); wall times from bash date +%s%N around each command; observations transcribed from the terminal, none dropped
+git=core.autocrlf=true (git checkout rewrites edited files with CRLF; an LF original therefore keys differently)

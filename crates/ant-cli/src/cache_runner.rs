@@ -247,7 +247,15 @@ fn try_reuse(
     // Restore re-digests every file it writes and removes partial output on
     // integrity failure, so a corrupted cache never reaches the build.
     build_digest::profile::mark("cache lookup");
-    cache.restore(&entry, workspace, &declared).ok()?;
+    if let Err(error) = cache.restore(&entry, workspace, &declared) {
+        // Not fatal (the action runs instead), but worth saying: a stored
+        // result that cannot be restored usually means a damaged store.
+        crate::scheduler::emit_line(format!(
+            "ant: note: rebuilding {}: its saved result could not be restored ({error})",
+            action.id
+        ));
+        return None;
+    }
     build_digest::profile::mark("restore outputs");
     let mut output_digests = Vec::with_capacity(action.outputs.len());
     for output in &action.outputs {
@@ -350,6 +358,7 @@ mod tests {
             }),
             timeout_ms: None,
             resources: None,
+            background_services: false,
         }
     }
 

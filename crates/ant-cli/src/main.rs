@@ -316,6 +316,7 @@ fn run() -> Result<u8, String> {
         toolchain: None,
         timeout_ms,
         resources: None,
+        background_services: false,
     };
     events
         .lock()

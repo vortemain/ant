@@ -236,7 +236,22 @@ skip notice on machines with neither.
 Detects a Gradle **wrapper** project (`settings.gradle[.kts]` plus `gradlew`
 / `gradlew.bat` at the project root) and emits one action that runs the
 wrapper task (`--option task=assembleDebug|assembleRelease`, default
-`assembleDebug`) with `--no-daemon --console=plain`.
+`assembleDebug`) with `--console=plain`, plus `--no-daemon` unless
+`--option home=user`.
+
+- **Homes (`--option home=project|user`):** `project` (the default for
+  `ant adapt`, sandboxed runs, and workers) keeps Gradle's and Android's
+  homes in `.ant/` as described under Environment. `user` (what `ant build`
+  passes, D-032) uses the developer's own `~/.gradle` and `~/.android` (or
+  `GRADLE_USER_HOME`/`ANDROID_USER_HOME` when set), so local builds reuse
+  already-downloaded dependencies and the usual debug signing key, and it
+  declares `JAVA_HOME` and the Android SDK (`ANDROID_HOME`/`ANDROID_SDK_ROOT`,
+  else `sdk.dir` in `local.properties`, else the default install location
+  when it exists). These absolute values are key material, so such results
+  are reused only on this machine. `user` plans also keep Gradle's daemon
+  warm: they drop `--no-daemon` and set `background_services` so the daemon
+  survives the action (on Windows it leaves the action's job object; see
+  the action contract).
 
 - **Inputs:** the whole project except Gradle's outputs and caches. Every
   module directory (one with `build.gradle[.kts]`) is listed child by child
@@ -270,6 +285,11 @@ wrapper task (`--option task=assembleDebug|assembleRelease`, default
   identified only by the environment values above (not digested); the
   toolchain identity is the wrapper jar digest, the distribution, and
   `java --version`. Only the single-root wrapper layout is supported.
+  Verified locally on Windows (2026-11-14): a minimal plain-Java app (AGP
+  8.11.0, Gradle 8.14.3, compileSdk 35) builds with `ant build` alone, the
+  debug APK lands in `dist/`, and `apksigner` verifies it. Plans are cached
+  (`plan_cache_probe`: JDK on `PATH`, `JAVA_*`/`ANDROID_*`/`GRADLE_*` and
+  home environment, default SDK locations).
 
 ## Sandbox compatibility
 

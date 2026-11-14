@@ -79,6 +79,16 @@ pub struct Action {
     /// the action's outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequest>,
+    /// The action may leave long-lived helper processes running after it
+    /// exits, such as a build tool's daemon that keeps the next build warm
+    /// (Gradle). Only unsandboxed local execution honors it: on Windows the
+    /// action's descendants may then leave its kill-on-close job object, so
+    /// cancellation and timeouts stop the main process but not helpers it
+    /// started. Sandboxed, network-isolated, and memory-capped runs ignore
+    /// it and keep strict descendant cleanup. Excluded from the action key:
+    /// it cannot change outputs (decision D-032).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background_services: bool,
 }
 
 /// Resources an action asks the scheduler to reserve while it runs.
@@ -270,6 +280,7 @@ mod tests {
             toolchain: None,
             timeout_ms: None,
             resources: None,
+            background_services: false,
         }
     }
 
@@ -278,6 +289,26 @@ mod tests {
             action.validate(),
             Err(expected),
             "unexpected validation outcome"
+        );
+    }
+
+    #[test]
+    fn background_services_is_opt_in_and_invisible_when_off() {
+        let action = sample();
+        let json = serde_json::to_string(&action).expect("serialize");
+        assert!(
+            !json.contains("background_services"),
+            "plans without the flag serialize exactly as before"
+        );
+        let back: Action = serde_json::from_str(&json).expect("old plans parse");
+        assert!(!back.background_services);
+        let mut daemon = sample();
+        daemon.background_services = true;
+        let json = serde_json::to_string(&daemon).expect("serialize");
+        assert!(json.contains("\"background_services\":true"));
+        assert_eq!(
+            serde_json::from_str::<Action>(&json).expect("parse"),
+            daemon
         );
     }
 
