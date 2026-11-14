@@ -507,13 +507,12 @@ mod tests {
             write(&root.join(BUILD_DIR).join(built), "x");
         }
         let found = file_api_artifacts(&root, "Release").expect("reply");
-        assert_eq!(
-            found,
-            vec![
-                Path::new(BUILD_DIR).join(dll),
-                Path::new(BUILD_DIR).join(exe),
-            ]
-        );
+        let mut expected = vec![
+            Path::new(BUILD_DIR).join(dll),
+            Path::new(BUILD_DIR).join(exe),
+        ];
+        expected.sort();
+        assert_eq!(found, expected);
         assert!(file_api_artifacts(&root.join("elsewhere"), "Release").is_none());
     }
 
