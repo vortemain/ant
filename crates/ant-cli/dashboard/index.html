@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Ant · Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="logo.svg">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Main">
+      <div class="sidebar-brand">
+        <img src="logo.svg" alt="" width="32" height="32">
+        <div class="brand-text">
+          <span class="brand-name">Ant</span>
+          <span class="brand-scope">Local · this computer</span>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="#overview" data-page="overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4zm0 7h6v-5H4zm10 0h6v-9h-6zm0-16v5h6V4z"/></svg>
+          <span>Overview</span>
+        </a>
+        <a href="#builds" data-page="builds">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 4 14h7l-1 7 9-11h-7z"/></svg>
+          <span>Builds</span>
+          <span class="nav-count" id="nav-builds"></span>
+        </a>
+        <a href="#projects" data-page="projects">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H10l2 2h7.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>
+          <span>Projects</span>
+          <span class="nav-count" id="nav-projects"></span>
+        </a>
+        <a href="#deliverables" data-page="deliverables">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0-4-4m4 4 4-4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"/></svg>
+          <span>Deliverables</span>
+          <span class="nav-count" id="nav-deliverables"></span>
+        </a>
+      </nav>
+      <div class="sidebar-foot">
+        <p class="foot-title">Build from a terminal</p>
+        <code>ant build</code>
+        <p class="foot-note">New builds appear here within a few seconds.</p>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <div class="main">
+      <header class="topbar">
+        <button type="button" class="icon-button menu" id="menu" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div class="title-block">
+          <p class="crumb">Ant <span aria-hidden="true">/</span> Local</p>
+          <h1 id="page-title">Overview</h1>
+        </div>
+        <div class="top-actions">
+          <label class="search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.3-4.3M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14z"/></svg>
+            <span class="sr-only">Search projects and toolchains</span>
+            <input id="search" type="search" placeholder="Search projects, toolchains…" autocomplete="off">
+          </label>
+          <p class="live" id="live" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="live-text">Connecting…</span></p>
+          <button type="button" class="icon-button" id="theme" aria-label="Switch color theme">
+            <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4V2m0 20v-2m8-8h2M2 12h2m13.66-5.66 1.41-1.41M4.93 19.07l1.41-1.41m0-11.32L4.93 4.93m14.14 14.14-1.41-1.41M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z"/></svg>
+            <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="banner" id="banner" role="alert" hidden></div>
+
+      <main id="content" tabindex="-1">
+        <!-- Overview -->
+        <section class="page" id="page-overview" aria-labelledby="page-title">
+          <div class="kpis">
+            <article class="card kpi">
+              <p class="kpi-label">Builds · last 7 days</p>
+              <p class="kpi-value" id="kpi-builds">–</p>
+              <p class="kpi-sub" id="kpi-builds-sub">&nbsp;</p>
+              <svg class="spark" id="spark-builds" viewBox="0 0 120 32" aria-hidden="true" preserveAspectRatio="none"></svg>
+            </article>
+            <article class="card kpi">
+              <p class="kpi-label">Success rate</p>
+              <p class="kpi-value" id="kpi-success">–</p>
+              <p class="kpi-sub" id="kpi-success-sub">&nbsp;</p>
+              <div class="meter" aria-hidden="true"><span id="meter-success"></span></div>
+            </article>
+            <article class="card kpi">
+              <p class="kpi-label">Reused instead of rebuilt</p>
+              <p class="kpi-value" id="kpi-reuse">–</p>
+              <p class="kpi-sub" id="kpi-reuse-sub">&nbsp;</p>
+              <div class="meter meter-brand" aria-hidden="true"><span id="meter-reuse"></span></div>
+            </article>
+            <article class="card kpi">
+              <p class="kpi-label">Time saved by reuse</p>
+              <p class="kpi-value" id="kpi-saved">–</p>
+              <p class="kpi-sub" id="kpi-saved-sub">&nbsp;</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="card">
+              <header class="card-head">
+                <div>
+                  <h2>Activity</h2>
+                  <p class="card-sub">Builds per day, last 14 days</p>
+                </div>
+                <ul class="legend" aria-label="Legend">
+                  <li><span class="swatch built"></span>Built</li>
+                  <li><span class="swatch reused"></span>Reused</li>
+                  <li><span class="swatch failed"></span>Failed</li>
+                </ul>
+              </header>
+              <svg class="chart" id="chart" viewBox="0 0 640 220" role="img" aria-labelledby="chart-desc"></svg>
+              <p class="sr-only" id="chart-desc"></p>
+            </article>
+            <article class="card">
+              <header class="card-head">
+                <div>
+                  <h2>Projects</h2>
+                  <p class="card-sub">Most recently built</p>
+                </div>
+                <a class="link" href="#projects">View all</a>
+              </header>
+              <ul class="mini-projects" id="overview-projects"></ul>
+            </article>
+          </div>
+
+          <article class="card">
+            <header class="card-head">
+              <div>
+                <h2>Recent builds</h2>
+                <p class="card-sub">The latest builds on this computer</p>
+              </div>
+              <a class="link" href="#builds">View all builds</a>
+            </header>
+            <div class="table-wrap"><table class="table" id="overview-builds"></table></div>
+          </article>
+        </section>
+
+        <!-- Builds -->
+        <section class="page" id="page-builds" hidden aria-labelledby="page-title">
+          <article class="card">
+            <header class="card-head wrap">
+              <div class="chips" role="group" aria-label="Filter by outcome">
+                <button type="button" class="chip" data-filter="all" aria-pressed="true">All <span id="count-all"></span></button>
+                <button type="button" class="chip" data-filter="built" aria-pressed="false">Built <span id="count-built"></span></button>
+                <button type="button" class="chip" data-filter="reused" aria-pressed="false">Reused <span id="count-reused"></span></button>
+                <button type="button" class="chip" data-filter="failed" aria-pressed="false">Failed <span id="count-failed"></span></button>
+              </div>
+              <p class="card-sub" id="builds-scope"></p>
+            </header>
+            <div class="table-wrap"><table class="table expandable" id="builds-table"></table></div>
+          </article>
+        </section>
+
+        <!-- Projects -->
+        <section class="page" id="page-projects" hidden aria-labelledby="page-title">
+          <div class="project-grid" id="project-grid"></div>
+        </section>
+
+        <!-- Deliverables -->
+        <section class="page" id="page-deliverables" hidden aria-labelledby="page-title">
+          <article class="card">
+            <header class="card-head">
+              <div>
+                <h2>Ready to download</h2>
+                <p class="card-sub">What each project's latest build put in its output folder</p>
+              </div>
+            </header>
+            <ul class="files" id="files"></ul>
+          </article>
+        </section>
+
+        <div class="empty card" id="empty" hidden>
+          <img src="logo.svg" alt="" width="56" height="56">
+          <h2>No builds yet</h2>
+          <p>Run <code>ant build</code> in any project. It shows up here within a few seconds, with its deliverables ready to download.</p>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

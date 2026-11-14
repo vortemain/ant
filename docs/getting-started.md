@@ -88,6 +88,14 @@ ant install
 
 Ant builds (instantly if nothing changed) and installs the APK on every phone connected over USB with USB debugging on. With no phone plugged in, it shares the app over your Wi-Fi instead and prints a QR code: scan it with the phone's camera, tap the link, and allow your browser to install apps when Android asks. Press Ctrl+C to stop sharing (or pass `--once`). `ant install --release` installs the signed release build; `--qr` shares over Wi-Fi even when a phone is plugged in. The link is only for your local network, and only someone who has the link can download the app.
 
+## See your builds
+
+```
+ant dashboard --open
+```
+
+Opens a dashboard of this computer's builds in your browser: success rate, how much was reused instead of rebuilt (and roughly how much time that saved), a 14-day activity chart, every project with its recent builds, and the deliverables of each project's latest build, ready to download. It updates by itself while you build. Only your computer can open it (it listens on `127.0.0.1` behind a random link); press Ctrl+C to stop it.
+
 ## Good to know
 
 - Ant never overwrites a `dist/` directory it did not create. If your project already uses `dist/`, set `out_dir` in `ant.toml`.

@@ -301,6 +301,7 @@ pub fn build_and_collect(
     });
 
     let started = Instant::now();
+    let started_ms = crate::history::now_ms();
     // Reuse the plan while nothing that shapes it changed (D-029);
     // `--fresh` regenerates it.
     let plan_cache = build_adapter::user_cache_dir().and_then(|dir| {
@@ -384,8 +385,10 @@ pub fn build_and_collect(
     }
     let cancellation = local_executor::CancellationToken::new();
     crate::install_ctrl_c_handler(&cancellation);
+    let reporter = HumanReporter::default();
+    let steps = std::sync::Arc::clone(&reporter.steps);
     let events = std::sync::Mutex::new(EventStream::with_sink(
-        Box::new(HumanReporter::default()),
+        Box::new(reporter),
         crate::new_run_id(),
     ));
     let run_options = RunOptions {
@@ -416,8 +419,23 @@ pub fn build_and_collect(
     )?;
     build_digest::profile::mark("run plan");
     let elapsed = started.elapsed().as_secs_f64();
+    // History (D-042): what this build did, recorded whatever the outcome.
+    let history = |succeeded: bool, deliverables: Vec<PathBuf>| {
+        crate::history::record(&crate::history::BuildRecord {
+            id: crate::history::new_id(started_ms),
+            started_ms,
+            project: PathBuf::from(shown(&root)),
+            adapter: adapter.name().to_owned(),
+            flavor: flavor.trim_start_matches(" · ").to_owned(),
+            succeeded,
+            millis: started.elapsed().as_millis() as u64,
+            steps: steps.lock().map(|steps| steps.clone()).unwrap_or_default(),
+            deliverables,
+        });
+    };
     if code != 0 {
         println!("\nBuild failed after {elapsed:.1}s. Re-run with --verbose for engine details.");
+        history(false, Vec::new());
         return Ok((code, Vec::new()));
     }
     let installed = install_artifacts(&root, &out_dir, &adapter.built_artifacts(&root, &plan))?;
@@ -454,6 +472,7 @@ pub fn build_and_collect(
         }
         println!("\nBuilt in {elapsed:.1}s →{list}");
     }
+    history(true, installed.clone());
     Ok((0, installed.iter().map(|path| root.join(path)).collect()))
 }
 
@@ -517,10 +536,24 @@ fn install_artifacts(
     Ok(installed)
 }
 
-/// Renders engine events as short human progress lines.
+/// Renders engine events as short human progress lines, and keeps each
+/// step's outcome for the build history (D-042).
 #[derive(Default)]
 struct HumanReporter {
     started: HashMap<String, Instant>,
+    steps: std::sync::Arc<std::sync::Mutex<Vec<crate::history::StepRecord>>>,
+}
+
+impl HumanReporter {
+    fn record(&self, id: &str, status: &str, millis: u64) {
+        if let Ok(mut steps) = self.steps.lock() {
+            steps.push(crate::history::StepRecord {
+                id: id.to_owned(),
+                status: status.to_owned(),
+                millis,
+            });
+        }
+    }
 }
 
 impl EventSink for HumanReporter {
@@ -536,11 +569,22 @@ impl EventSink for HumanReporter {
                 error,
                 ..
             } => {
-                let took = self
-                    .started
-                    .remove(&action_id)
-                    .map(|start| format!("{:.1}s", start.elapsed().as_secs_f64()))
+                let elapsed = self.started.remove(&action_id).map(|start| start.elapsed());
+                let took = elapsed
+                    .map(|elapsed| format!("{:.1}s", elapsed.as_secs_f64()))
                     .unwrap_or_default();
+                let millis = elapsed.map_or(0, |elapsed| elapsed.as_millis() as u64);
+                self.record(
+                    &action_id,
+                    match status {
+                        ActionStatus::Succeeded => "succeeded",
+                        ActionStatus::Reused => "reused",
+                        ActionStatus::Failed => "failed",
+                        ActionStatus::TimedOut => "timed_out",
+                        ActionStatus::Cancelled => "cancelled",
+                    },
+                    millis,
+                );
                 let line = match status {
                     ActionStatus::Succeeded => format!("  ✓ {action_id}  {took}"),
                     ActionStatus::Reused => format!("  ✓ {action_id}  reused from cache"),
@@ -555,6 +599,7 @@ impl EventSink for HumanReporter {
                 println!("{line}");
             }
             EventKind::ActionSkipped { action_id } => {
+                self.record(&action_id, "skipped", 0);
                 println!("  – {action_id}  skipped (an earlier step failed)");
             }
             EventKind::RunStarted { .. } | EventKind::RunFinished { .. } => {}
