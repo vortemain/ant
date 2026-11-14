@@ -39,18 +39,20 @@ No config file. Ant detects the project, builds it on every core, and puts the d
 
 ## Measured, not promised
 
-Every number below comes from a public CI run, with its raw data in this repository. Each one ran on **a single 4-core machine**: no extra hardware and no network. They're single-machine measurements, not general claims.
+Every number below comes with its raw data and script in this repository. Each one ran on **a single 4-core machine**: no extra hardware and no network. The laptop rows are plain `ant build` on a 2019 Windows laptop; the others are public CI runs. They're single-machine measurements, not general claims.
 
 | Project | Scenario | Native tool | **Ant** | |
 |---|---|---:|---:|---|
+| **Rust on a laptop**: Ant itself, plain `ant build`, Core i5-8365U, Windows 11 | switch back to a branch you built before | cargo: 12.9–19.1 s | **0.38–0.53 s** | ~30× |
+| | nothing changed | cargo: 0.39–0.42 s | **0.14–0.21 s** | ~2.5× |
 | **Android**: JetNews (Jetpack Compose) | fresh checkout | Gradle, warm daemon + build cache: 4.0–4.6 s | **0.65–0.85 s** | ~5× |
 | | nothing changed | Gradle, warm daemon: 1.6–2.2 s | **0.66–0.86 s** | ~2.5× |
 | | first build ever | Gradle: 156.9 s | 159.0 s | tie |
 | **Rust**: Ant itself (10 crates, 291 MB vendored) | fresh checkout | cargo: 25.2 s | **0.54–0.74 s** | ~40× |
 | | first build ever | cargo: 24.3 s | 33.3 s | |
 
-Reports: [Android](docs/benchmarks/2026-11-13-android.md) · [Rust](docs/benchmarks/2026-11-13-remote-cache.md).
-A "fresh checkout" is a new clone or branch folder, or a teammate's copy. Native tools rebuild from scratch there, while Ant reuses the result it already proved. Today these numbers come from Ant's cache engine run as a local service (`ant remote run` against `127.0.0.1`). Making plain `ant build` do this automatically is the current phase (P3). Where Ant still loses, for example the one-file edit loop against a warm Gradle daemon, the reports say so.
+Reports: [Rust on a laptop](docs/benchmarks/2026-11-14-local-windows.md) · [Android](docs/benchmarks/2026-11-13-android.md) · [Rust](docs/benchmarks/2026-11-13-remote-cache.md).
+A "fresh checkout" is a new clone or branch folder, or a teammate's copy. Native tools rebuild from scratch there, while Ant reuses the result it already proved. The fresh-checkout numbers come from Ant's cache engine run as a local service (`ant remote run` against `127.0.0.1`). Plain `ant build` already reuses everything this machine built before (the laptop rows); doing the same across clones and for Android is the current phase (P3). Where Ant still loses, for example the one-file edit loop against a warm Gradle daemon, the reports say so.
 
 ## Why developers switch to Ant
 

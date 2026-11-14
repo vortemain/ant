@@ -999,12 +999,21 @@ fn attach_child_to_job(child: &Child) -> Option<win32job::Job> {
     Some(job)
 }
 
-/// Temp-directory variables whose workspace-relative values are made
-/// absolute at spawn time. Plans declare them relative (keys stay
-/// path-independent), but tools that change directory, such as cargo
-/// build scripts and the MSVC linker, would otherwise resolve them
-/// against the wrong directory (D-027).
-const ABSOLUTIZED_VARIABLES: &[&str] = &["TMP", "TEMP", "TMPDIR"];
+/// Directory variables whose workspace-relative values are made absolute
+/// at spawn time. Plans declare them relative (keys stay path-independent),
+/// but tools that change directory, such as cargo build scripts, the MSVC
+/// linker, and Android's build tools, would otherwise resolve them against
+/// the wrong directory (D-027). The Gradle/Android homes are included so
+/// Gradle plans launch on Windows the way the Unix `sh` launcher already
+/// arranges (P3).
+const ABSOLUTIZED_VARIABLES: &[&str] = &[
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+    "GRADLE_USER_HOME",
+    "ANDROID_USER_HOME",
+    "GRADLE_RO_DEP_CACHE",
+];
 
 /// The action's declared environment as the child sees it: relative
 /// temp-directory values resolved against the action's working directory.
@@ -1193,6 +1202,31 @@ mod tests {
             "-c".to_owned(),
             "cp in.txt out.txt".to_owned(),
         ];
+    }
+
+    #[test]
+    fn relative_directory_variables_become_absolute_at_spawn() {
+        let mut planned = action("env", vec!["x".to_owned()]);
+        planned.environment = vec![
+            ("TMP".to_owned(), ".ant/tmp".to_owned()),
+            ("GRADLE_USER_HOME".to_owned(), ".ant/gradle-home".to_owned()),
+            (
+                "ANDROID_USER_HOME".to_owned(),
+                ".ant/android-home".to_owned(),
+            ),
+            ("OTHER".to_owned(), "relative/value".to_owned()),
+        ];
+        let cwd = std::env::temp_dir();
+        let spawned: std::collections::HashMap<_, _> =
+            spawn_environment(&planned, &cwd).into_iter().collect();
+        for name in ["TMP", "GRADLE_USER_HOME", "ANDROID_USER_HOME"] {
+            assert!(
+                Path::new(&spawned[name]).is_absolute(),
+                "{name} = {}",
+                spawned[name]
+            );
+        }
+        assert_eq!(spawned["OTHER"], "relative/value", "others pass through");
     }
 
     fn action(id: &str, argv: Vec<String>) -> Action {

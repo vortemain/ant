@@ -330,7 +330,11 @@ pub fn run_plan(
         });
     // Opening the requested cache directory fails hard: the user asked for
     // cache participation and a silently ignored flag would hide the mistake.
-    let participant = CacheParticipant::new(cache_dir)?;
+    // Local reuse in `ant build` restores by hard link (P3); proof-based
+    // and sandboxed runs keep private copies.
+    let exec = options.exec;
+    let participant = CacheParticipant::new(cache_dir)?
+        .with_links(exec.local_reuse && !exec.sandbox && exec.isolated.is_none());
     let result = if jobs == 1 {
         run_sequential(
             workspace,

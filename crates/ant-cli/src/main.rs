@@ -13,6 +13,7 @@ use std::sync::Mutex;
 mod cache_runner;
 mod front;
 mod isolation;
+mod plan_cache;
 mod remote_cli;
 mod scheduler;
 
@@ -32,6 +33,7 @@ fn main() -> ExitCode {
     let result = run();
     if caches {
         build_digest::save_workspace_caches();
+        build_digest::profile::mark("save change-detection cache");
     }
     match result {
         Ok(code) => ExitCode::from(code),

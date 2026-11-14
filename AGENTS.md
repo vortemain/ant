@@ -23,7 +23,7 @@
 ## Ownership handoff template
 For each work item, record: owner; files/contracts owned; dependencies; acceptance criteria; validation performed and result; known risks; next action. Avoid parallel edits to the same contract files unless explicitly coordinated.
 
-## Start here: where work stands (handoff of 2026-11-13)
+## Start here: where work stands (handoff of 2026-11-14)
 
 **Read this section first; the "Current repository facts" further down are a detailed history and their oldest entries are partly stale.**
 
@@ -36,28 +36,32 @@ For each work item, record: owner; files/contracts owned; dependencies; acceptan
 
 ### State of `main` (f49c224)
 - Phases done: P1 front door, P2 speed engine (shared remote cache measured), P4.1 Gradle/Android adapter + benchmark, P4.2 shared Gradle task cache, P3.1 local no-change speed (change detection, one cargo call, absolute temp dirs), P3.2 local result reuse (`cache_policy: local`, `ant build --fresh`). Decisions through **D-028** in `docs/plan.md`; the ledger rows P3.1/P3.2/P4.1/P4.2 hold the measured numbers.
-- 244 tests pass locally on Windows; CI (`.github/workflows/ci.yml`) is green on Linux and Windows for the merged P3 branch. Branches on `origin`: only `main` plus the stale `p4-task-cache` (already merged; delete it on GitHub when convenient).
+- **Branch `claude/roadmap-benchmarks-8b4ceb` (P3.3, not yet merged or pushed):** linked restores (D-030), plan cache (D-029), cargo local keys stay path-specific (D-031), `ANT_PROFILE=1`, Gradle homes absolutized at spawn on Windows, `benchmarks/local/run.sh` + laptop report. 248 tests pass locally on Windows; CI has not run on it yet.
+- 244 tests pass locally on Windows on `main`; CI (`.github/workflows/ci.yml`) is green on Linux and Windows for the merged P3 branch. Branches on `origin`: only `main` plus the stale `p4-task-cache` (already merged; delete it on GitHub when convenient).
 - Branding: logo/banners in `docs/assets/` (SVG; tagline "Build everything. Fast. Right on your machine."), README pitch "Stop waiting on builds.", GitHub description and topics updated. No LICENSE yet: the owner has not chosen one, so do not add one or claim one.
 
 ### Measured today (all single 4-core machine; raw data in `benchmarks/*/results/`)
-- Rust (this repo, Windows, debug): `ant build` with nothing changed 0.55 s vs cargo 0.45 s; switching back to already-built code 2.7–4.5 s vs cargo 10–11 s.
+- Rust (this repo, plain `ant build --dev`, 2019 laptop i5-8365U, Windows 11; P3.3 branch): nothing changed 0.14–0.21 s vs cargo 0.39–0.42 s; switching back to already-built code 0.38–0.53 s vs cargo 12.9–19.1 s (`docs/benchmarks/2026-11-14-local-windows.md`). Before P3.3: 0.55 s and 2.7–4.5 s.
 - Rust (Linux, via `ant remote run` on loopback): fresh checkout 0.54–0.74 s vs cargo 25 s; cold 33 s vs 24 s.
 - Android JetNews (Linux, via `ant remote run` on loopback): no change 0.59–0.79 s vs Gradle 1.4 s; fresh checkout 0.58–0.78 s vs 3.5–4.9 s; cold 122 s vs 115 s; **one-file edit 73 s vs Gradle's warm incremental 2–3 s (Ant loses; see next actions).**
 
 ### Next actions (P3, in priority order)
 | # | Work | Acceptance criteria | Notes |
 |---|---|---|---|
-| 1 | Faster restores | switching back to built code on this repo ≤ 1 s | `build-cache` restore copies ~70 MB of outputs; hard-link (or reflink) from the store when on the same volume, falling back to copy; keep the integrity check |
-| 2 | Path-independent local reuse | a second clone in another folder restores instead of rebuilding | local keys include the workspace path (`ExecutionFingerprint::local`); decide per adapter whether outputs embed paths (cargo debug info does); record a decision |
-| 3 | Plan generation cost | no-change `ant build` ≤ cargo's own no-change time | ~0.5 s is `cargo metadata` + `cargo --version` per run; caching the plan is unsafe while a rustup switch is invisible to file stamps (D-027): key a plan cache on `rustup` toolchain resolution (`rust-toolchain*`, `RUSTUP_TOOLCHAIN`, rustup settings) or run both calls in parallel |
-| 4 | Android through `ant build` | `ant build` in an Android project builds the debug APK into `dist/` and reuses it locally | the Gradle adapter exists (`crates/build-adapter/src/gradle.rs`) but `ant build` has never run it locally; needs `BuildAdapter::artifacts` for Gradle and a Windows launch path (the Unix `sh` launcher absolutizes homes; Windows uses `cmd /C gradlew.bat`) |
-| 5 | Warm local edit loop | one-file edit in JetNews within ~1.5× of Gradle's warm daemon | today Ant's edit loop goes through a fresh workspace; for local builds run Gradle in the real project (it keeps its daemon and incremental state) and reuse only whole results |
-| 6 | Measure on Windows + a real old laptop | numbers recorded like `docs/benchmarks/` | the owner's 10× claim must be measured before it is stated |
+| ✓ | Faster restores | met: 0.38–0.53 s | linked restores, D-030 |
+| ✓ | Path-independent local reuse | decided against for cargo (D-031) | revisit for Gradle once item 4 lands |
+| ✓ | Plan generation cost | met: no change 0.14–0.21 s vs cargo 0.39–0.42 s | plan cache, D-029 |
+| 4 | Android through `ant build` | `ant build` in an Android project builds the debug APK into `dist/` and reuses it locally | the APK is already a declared output, so the default `BuildAdapter::artifacts` collects it; P3.3 absolutizes `GRADLE_USER_HOME`/`ANDROID_USER_HOME`/`GRADLE_RO_DEP_CACHE` at spawn so `cmd /C gradlew.bat` gets absolute homes on Windows. Still unverified end to end: this machine's SDK has no `platforms/` (needs an Android platform download, ask the owner), and plans redirect Gradle's home into `.ant/gradle-home`, so a first local build re-downloads every dependency |
+| 5 | Warm local edit loop | one-file edit within ~1.5× of the native tool (JetNews vs Gradle's warm daemon; also cargo after a restore) | for local builds, run Gradle in the real project with the user's own Gradle home and daemon, reusing only whole results. Blocker: the Windows job object kills descendants, so a daemon cannot outlive the action; that needs an explicit, documented opt-in. Cargo: after a restore, `target/` incremental state belongs to the other commit, so the first edit may recompile more than plain cargo |
+| 6 | Measure on Linux + npm/Android on a laptop | numbers recorded like `docs/benchmarks/` | the Windows laptop is done (P3.3); `benchmarks/local/run.sh` runs on both OSes. The owner's 10× claim is met for branch switching (~30×), not for no-change (~2.5×) or cold builds (equal) |
 
 ### Gotchas learned the hard way
 - **Editing files with Python heredocs mangles escapes**: `\t`, `\0`, `\A` inside `'''...'''` become real tabs/NUL bytes. One real NUL byte landed in a Rust string literal this session. Prefer the Edit tool, or write the patch script to a file and check `git diff`. Scan for NUL bytes before committing (`git ls-files` + a byte check).
 - Tests that run `ant build`/`ant run` must set `ANT_CACHE_HOME` (see `crates/ant-cli/tests/front_door.rs`) so they do not share the user's change-detection cache or local results store.
-- Gradle: never pass `--offline` together with the remote task cache (Gradle silently disables the remote cache offline; D-025). The local Windows machine has Java 17 but no Android SDK; Android work is verified in the `bench-android` workflow on GitHub runners.
+- Gradle: never pass `--offline` together with the remote task cache (Gradle silently disables the remote cache offline; D-025). The local Windows machine has Java 17, cached Gradle 8.11.1/8.14.3 distributions in `~/.gradle`, and an Android SDK at `%LOCALAPPDATA%\Android\Sdk` (build-tools 33–36) **without any `platforms/`**, so a real APK build there needs an Android platform download first (ask the owner). Android work is otherwise verified in the `bench-android` workflow on GitHub runners.
+- Use `ANT_PROFILE=1 ant build` to see per-phase timings (detect, plan, input digests, restore, save) before optimizing anything.
+- On Windows the first read of a freshly checked-out file is slow (antivirus scanning: ~0.33 s for 13 files after a branch switch here, the same for plain `cat`). That cost is outside Ant, and cargo pays it too; do not mistake it for hashing cost.
+- Local restores are hard links into the per-user store (D-030). Any code path that runs a tool over restored outputs must call `Cache::break_links` first, or tools that write in place will write into the store (or fail on the blob's ACL under a sandbox account).
 - The auto-mode permission checker may block deleting remote branches and other destructive git operations; ask the owner, do not work around it.
 - Benchmarks run in CI (`bench.yml`, `bench-android.yml`); each run may land on a different CPU model, so compare Ant with the native tool *within* one run.
 

@@ -146,6 +146,38 @@ impl DigestCache {
         Ok(digest)
     }
 
+    /// Record a content-only digest the caller has just established for
+    /// `path` by other means (for example, a file hard-linked from a blob
+    /// whose digest was verified a moment earlier), so the next lookup does
+    /// not re-read it. The usual racy-clean rule still applies when the
+    /// entry is read back.
+    pub fn record(&self, path: &Path, metadata: &fs::Metadata, digest: ContentDigest) {
+        let Some(current) = stamp(metadata) else {
+            return;
+        };
+        self.entries.lock().expect("digest cache").insert(
+            (path.to_path_buf(), false),
+            Entry {
+                stamp: current,
+                digest,
+                recorded_ns: now_ns(),
+            },
+        );
+        *self.dirty.lock().expect("digest cache") = true;
+    }
+
+    /// The content-only digest recorded for `path` while its stamp still
+    /// matches `metadata`, without reading the file or applying the
+    /// racy-clean rule. Only for *locating* related data (such as the blob
+    /// a restored output was linked from); never trust it as the file's
+    /// content.
+    pub fn recorded(&self, path: &Path, metadata: &fs::Metadata) -> Option<ContentDigest> {
+        let current = stamp(metadata)?;
+        let entries = self.entries.lock().expect("digest cache");
+        let entry = entries.get(&(path.to_path_buf(), false))?;
+        (entry.stamp == current).then_some(entry.digest)
+    }
+
     /// Write the cache back if anything changed (atomic replace). Entries
     /// whose files no longer exist are dropped.
     pub fn save(&self) -> std::io::Result<()> {

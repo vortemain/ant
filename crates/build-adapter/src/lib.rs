@@ -237,6 +237,71 @@ pub trait BuildAdapter {
     fn artifacts(&self, plan: &PlanFile) -> Vec<PathBuf> {
         declared_file_outputs(plan)
     }
+
+    /// Opt-in plan caching (P3, D-029). Return cheap, subprocess-free key
+    /// material describing everything *outside the project* that can change
+    /// this adapter's plan: toolchain resolution, global configuration, and
+    /// environment. Callers combine it with the digests of every declared
+    /// plan input and the project's top-level listing, so an adapter may opt
+    /// in only when its declared inputs cover every project file that
+    /// affects planning. `None` (the default) means plans are never cached.
+    fn plan_cache_probe(&self, _project_root: &Path) -> Option<Vec<String>> {
+        None
+    }
+}
+
+/// A file's filesystem stamp as plan-cache key material: path, size,
+/// modification time, and (on Windows) creation time, or `absent`. Reading
+/// it never opens the file.
+pub fn stamp_line(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let time = |time: std::io::Result<std::time::SystemTime>| {
+                time.ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |duration| duration.as_nanos())
+            };
+            #[cfg(unix)]
+            let changed = {
+                use std::os::unix::fs::MetadataExt as _;
+                (metadata.ino() as u128) << 64
+                    ^ metadata.ctime_nsec() as u128
+                    ^ (metadata.ctime() as u128) << 32
+            };
+            #[cfg(not(unix))]
+            let changed = time(metadata.created());
+            format!(
+                "{} {} {} {}",
+                path.display(),
+                metadata.len(),
+                time(metadata.modified()),
+                changed
+            )
+        }
+        Err(_) => format!("{} absent", path.display()),
+    }
+}
+
+/// Environment variables whose names start with one of `prefixes`, plus
+/// `PATH`, as sorted `NAME=value` key material.
+pub fn environment_probe(prefixes: &[&str]) -> Vec<String> {
+    let mut lines: Vec<String> = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let name = name.to_string_lossy().into_owned();
+            let upper = name.to_ascii_uppercase();
+            (upper == "PATH" || prefixes.iter().any(|prefix| upper.starts_with(prefix)))
+                .then(|| format!("env {name}={}", value.to_string_lossy()))
+        })
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// The user's home directory, when known.
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Every declared file output in a plan, in plan order.

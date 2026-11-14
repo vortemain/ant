@@ -291,3 +291,52 @@ fn ant_build_reuses_its_own_results_and_rebuilds_on_change() {
     assert_eq!(code, 0);
     assert!(!stdout.contains("reused"), "--fresh rebuilds: {stdout:?}");
 }
+
+/// Plan cache (D-029): an unchanged project reuses its plan; a manifest
+/// change, a new top-level entry, or a toolchain-environment change
+/// regenerates it; `--fresh` always regenerates; switching back hits again.
+#[test]
+fn ant_build_reuses_its_plan_until_something_that_shapes_it_changes() {
+    let dir = TempDir::new("plan-cache");
+    rust_workspace(dir.path());
+    let build = |extra: &[(&str, &str)], flags: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ant"));
+        command
+            .current_dir(dir.path())
+            .env("ANT_CACHE_HOME", dir.path().join(".ant").join("cache-home"))
+            .args(["build", "--dev", "--verbose"])
+            .args(flags);
+        for (name, value) in extra {
+            command.env(name, value);
+        }
+        let output = command.output().expect("spawn ant");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(output.status.success(), "{stdout:?}");
+        stdout.contains("plan=reused-from-cache")
+    };
+    assert!(!build(&[], &[]), "first build generates the plan");
+    // The first build created Cargo.lock (a new top-level file that changes
+    // the plan's policy), so the second regenerates once more.
+    assert!(
+        dir.path().join("Cargo.lock").is_file(),
+        "cargo wrote a lockfile"
+    );
+    assert!(!build(&[], &[]), "the new lockfile regenerates the plan");
+    assert!(build(&[], &[]), "unchanged project reuses the plan");
+    assert!(!build(&[], &["--fresh"]), "--fresh regenerates");
+
+    // A toolchain-selection change (here: the rustup override variable)
+    // changes the key even though no project file changed.
+    assert!(!build(&[("RUSTUP_TOOLCHAIN_ANT_TEST", "x")], &[]));
+    assert!(build(&[], &[]), "switching back hits the earlier plan");
+
+    write(&dir.path().join("NOTES.txt"), "a new top-level file\n");
+    assert!(!build(&[], &[]), "a new top-level entry regenerates");
+    assert!(build(&[], &[]));
+
+    let manifest = dir.path().join("app/Cargo.toml");
+    let text = fs::read_to_string(&manifest).expect("manifest");
+    write(&manifest, &format!("{text}\n# edited\n"));
+    assert!(!build(&[], &[]), "a manifest change regenerates");
+    assert_eq!(run_artifact(dir.path()), "hello, ant");
+}

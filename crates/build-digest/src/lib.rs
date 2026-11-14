@@ -5,6 +5,7 @@
 //! the project defines and tests cross-platform symlink semantics.
 
 mod digest_cache;
+pub mod profile;
 
 pub use digest_cache::{
     DigestCache, RACY_WINDOW_NS, enable_workspace_caches, save_workspace_caches, workspace_cache,

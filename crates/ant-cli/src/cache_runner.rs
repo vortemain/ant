@@ -69,6 +69,21 @@ impl CacheParticipant {
         };
         Ok(Self { cache })
     }
+
+    /// Restore local results by hard link (see `build_cache::Cache::with_links`).
+    pub fn with_links(mut self, links: bool) -> Self {
+        self.cache = self.cache.map(|cache| cache.with_links(links));
+        self
+    }
+}
+
+/// An action's declared outputs in the form the cache works with.
+fn declared_outputs(action: &Action) -> Vec<(std::path::PathBuf, OutputKind)> {
+    action
+        .outputs
+        .iter()
+        .map(|output| (output.path.clone(), output.kind))
+        .collect()
 }
 
 /// Run one action with cache participation.
@@ -121,6 +136,7 @@ pub fn run_action(
     } else {
         local_executor::prepare_with_metadata(workspace, action)?
     };
+    build_digest::profile::mark("digest inputs");
     if enforce_memory {
         prepared.enforce_memory_limit();
     }
@@ -154,6 +170,7 @@ pub fn run_action(
         None
     };
 
+    build_digest::profile::mark("action key");
     if !fresh
         && let Some(key) = &key
         && let Some(cache) = &participant.cache
@@ -166,6 +183,17 @@ pub fn run_action(
         });
     }
 
+    // A restored output may be a hard link into the local results store;
+    // give it a private copy before the tool can rewrite it in place.
+    if local_reuse
+        && let Some(cache) = &participant.cache
+        && let Err(error) = cache.break_links(workspace, &declared_outputs(action))
+    {
+        crate::scheduler::emit_line(format!(
+            "ant: warning: could not detach restored outputs of {}: {error}",
+            action.id
+        ));
+    }
     let result = execute_prepared_choice(&prepared, cancellation, sandbox, isolated)?;
     let mut store_warning = None;
     if result.success()
@@ -174,11 +202,7 @@ pub fn run_action(
         && let Some(key) = &key
         && let Some(cache) = &participant.cache
     {
-        let outputs: Vec<(std::path::PathBuf, OutputKind)> = action
-            .outputs
-            .iter()
-            .map(|output| (output.path.clone(), output.kind))
-            .collect();
+        let outputs = declared_outputs(action);
         // On success the executor re-verified the inputs unchanged, so
         // the pre-run candidate is the key these outputs belong to.
         if let Err(error) = cache.store(key, workspace, &outputs) {
@@ -219,14 +243,12 @@ fn try_reuse(
     workspace: &Path,
 ) -> Option<Vec<ActionContentDigest>> {
     let entry = cache.lookup(key).ok()??;
-    let declared: Vec<(std::path::PathBuf, OutputKind)> = action
-        .outputs
-        .iter()
-        .map(|output| (output.path.clone(), output.kind))
-        .collect();
+    let declared = declared_outputs(action);
     // Restore re-digests every file it writes and removes partial output on
     // integrity failure, so a corrupted cache never reaches the build.
+    build_digest::profile::mark("cache lookup");
     cache.restore(&entry, workspace, &declared).ok()?;
+    build_digest::profile::mark("restore outputs");
     let mut output_digests = Vec::with_capacity(action.outputs.len());
     for output in &action.outputs {
         let path = workspace.join(&output.path);
@@ -250,6 +272,7 @@ fn try_reuse(
             digest,
         });
     }
+    build_digest::profile::mark("digest restored outputs");
     Some(output_digests)
 }
 

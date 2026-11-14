@@ -1,0 +1,10 @@
+date_utc=2026-11-14T18:42:49Z
+subject=git@github.com:vortemain/ant.git old=6e4d1fc new=ec1d845
+cpu=Intel(R) Core(TM) i5-8365U CPU @ 1.60GHz
+cores=8 (4 physical)
+ram_gib=7.8
+os=Microsoft Windows 11 Pro 10.0.26300 (SSD; Git Bash)
+note=os/ram lines corrected by hand after the run (the script took its Linux branch under Git Bash; fixed since)
+rustc=rustc 1.95.0 (59807616e 2026-04-14)
+ant=Ant 0.1.0
+reps=3

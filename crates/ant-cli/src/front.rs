@@ -86,7 +86,7 @@ fn choose_adapter(
             names[0]
         ),
         build_adapter::SelectionError::NoMatch(_) => format!(
-            "no supported project found in {} (Ant currently builds Cargo, npm, and CMake projects; \
+            "no supported project found in {} (Ant currently builds Cargo, npm, CMake, and Gradle wrapper projects;\
              see docs/vision.md for what is coming)",
             shown(root)
         ),
@@ -202,9 +202,11 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             other => return Err(format!("unexpected argument '{other}'\n{BUILD_USAGE}")),
         }
     }
+    build_digest::profile::mark("start");
     let root = project_root(project.as_deref())?;
     let config = load_config(&root)?.unwrap_or_default();
     let adapter = choose_adapter(&root, config.adapter.as_deref())?;
+    build_digest::profile::mark("detect project");
     let (options, flavor) = build_options(adapter, &config.options, dev)?;
     let out_dir = safe_relative_dir(config.out_dir.as_deref().unwrap_or(DEFAULT_OUT_DIR))?;
     let jobs = jobs.unwrap_or_else(|| {
@@ -214,9 +216,32 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
     });
 
     let started = Instant::now();
-    let plan = adapter
-        .generate(&root, &options)
-        .map_err(|error| format!("{} could not plan this project: {error}", adapter.name()))?;
+    // Reuse the plan while nothing that shapes it changed (D-029);
+    // `--fresh` regenerates it.
+    let plan_cache = build_adapter::user_cache_dir().and_then(|dir| {
+        crate::plan_cache::PlanCache::new(&dir, &root, adapter, &options, &out_dir)
+    });
+    let cached = plan_cache
+        .as_ref()
+        .filter(|_| !fresh)
+        .and_then(|cache| cache.lookup());
+    let plan_reused = cached.is_some();
+    let plan = match cached {
+        Some(plan) => {
+            crate::plan_cache::ensure_scratch_dirs(&root, &plan);
+            plan
+        }
+        None => {
+            let plan = adapter.generate(&root, &options).map_err(|error| {
+                format!("{} could not plan this project: {error}", adapter.name())
+            })?;
+            if let Some(cache) = &plan_cache {
+                cache.store(&plan);
+            }
+            plan
+        }
+    };
+    build_digest::profile::mark("generate plan");
     let graph = plan.to_graph().map_err(|error| error.to_string())?;
     let plan_json = serde_json::to_string_pretty(&plan).map_err(|error| error.to_string())?;
     let ant_dir = root.join(".ant");
@@ -236,6 +261,9 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
         if count == 1 { "" } else { "s" }
     );
     scheduler::set_machine_output(verbose);
+    if plan_reused {
+        scheduler::emit_line("plan=reused-from-cache".to_owned());
+    }
     let cancellation = local_executor::CancellationToken::new();
     crate::install_ctrl_c_handler(&cancellation);
     let events = std::sync::Mutex::new(EventStream::with_sink(
@@ -267,12 +295,14 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
         results.as_deref(),
         &events,
     )?;
+    build_digest::profile::mark("run plan");
     let elapsed = started.elapsed().as_secs_f64();
     if code != 0 {
         println!("\nBuild failed after {elapsed:.1}s. Re-run with --verbose for engine details.");
         return Ok(code);
     }
     let installed = install_artifacts(&root, &out_dir, &adapter.artifacts(&plan))?;
+    build_digest::profile::mark("collect deliverables");
     if installed.is_empty() {
         println!(
             "\nBuilt in {elapsed:.1}s. {}",

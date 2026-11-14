@@ -113,6 +113,70 @@ impl BuildAdapter for CargoAdapter {
         OPTIONS
     }
 
+    /// Cargo plans come from `cargo --version` and `cargo metadata` (two
+    /// process launches through the rustup proxy, ~0.5 s on Windows). They
+    /// change only with project files (every project file is a declared
+    /// input of the workspace action, and member actions declare manifests,
+    /// sources, and the lockfile), with cargo configuration and
+    /// `rust-toolchain` files above the project, with the user's cargo
+    /// configuration, with rustup's toolchain choice (`settings.toml`,
+    /// installed toolchain binaries), or with `CARGO_*`/`RUSTUP_*`/`RUST*`
+    /// environment and `PATH`. A rustup switch therefore changes the key
+    /// even though the cargo proxy's own stamp does not (D-027, D-029).
+    fn plan_cache_probe(&self, project_root: &Path) -> Option<Vec<String>> {
+        let mut probe = vec!["cargo plan probe v1".to_owned()];
+        probe.extend(crate::environment_probe(&["CARGO", "RUSTUP", "RUST"]));
+        let cargo = locate_executable(&format!("cargo{}", std::env::consts::EXE_SUFFIX)).ok()?;
+        probe.push(crate::stamp_line(&cargo));
+        if let Ok(real) = cargo.canonicalize() {
+            probe.push(crate::stamp_line(&real));
+        }
+        let home = crate::home_dir();
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| home.join(".rustup")));
+        if let Some(rustup_home) = rustup_home {
+            probe.push(crate::stamp_line(&rustup_home.join("settings.toml")));
+            let mut toolchains: Vec<PathBuf> = std::fs::read_dir(rustup_home.join("toolchains"))
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok().map(|e| e.path()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            toolchains.sort();
+            for toolchain in toolchains {
+                for tool in ["cargo", "rustc"] {
+                    let name = format!("{tool}{}", std::env::consts::EXE_SUFFIX);
+                    probe.push(crate::stamp_line(&toolchain.join("bin").join(name)));
+                }
+            }
+        }
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| home.join(".cargo")));
+        if let Some(cargo_home) = cargo_home {
+            for name in ["config", "config.toml"] {
+                probe.push(crate::stamp_line(&cargo_home.join(name)));
+            }
+        }
+        // Configuration and toolchain files in the project's ancestors
+        // (the project's own are declared inputs).
+        for ancestor in project_root.ancestors().skip(1) {
+            for name in [
+                ".cargo/config",
+                ".cargo/config.toml",
+                "rust-toolchain",
+                "rust-toolchain.toml",
+            ] {
+                probe.push(crate::stamp_line(&ancestor.join(name)));
+            }
+        }
+        Some(probe)
+    }
+
     fn detect(&self, project_root: &Path) -> Result<Detection, AdapterError> {
         if project_root.join("Cargo.toml").is_file() {
             Ok(Detection::supported())
