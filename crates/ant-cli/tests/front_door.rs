@@ -340,3 +340,50 @@ fn ant_build_reuses_its_plan_until_something_that_shapes_it_changes() {
     assert!(!build(&[], &[]), "a manifest change regenerates");
     assert_eq!(run_artifact(dir.path()), "hello, ant");
 }
+
+/// Go (P6, D-035): `ant build` alone builds a module with a library and a
+/// command, collects the executable, reuses an unchanged build, and
+/// rebuilds after an edit.
+#[test]
+fn ant_build_builds_a_go_module_and_reuses_it() {
+    if Command::new("go").arg("version").output().is_err() {
+        eprintln!("skipping: go is not on PATH");
+        return;
+    }
+    let dir = TempDir::new("go-module");
+    write(
+        &dir.path().join("go.mod"),
+        "module example.com/hello\n\ngo 1.21\n",
+    );
+    write(
+        &dir.path().join("greeting/greeting.go"),
+        "package greeting\n\nfunc Text() string { return \"hello from Go\" }\n",
+    );
+    write(
+        &dir.path().join("cmd/greet/main.go"),
+        "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/hello/greeting\"\n)\n\nfunc main() { fmt.Println(greeting.Text()) }\n",
+    );
+    let run = || {
+        let output = Command::new(dir.path().join("dist").join(exe("greet")))
+            .output()
+            .expect("run the collected executable");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    let (code, stdout, stderr) = ant_in(dir.path(), &["build"]);
+    assert_eq!(code, 0, "{stdout:?} {stderr:?}");
+    assert!(stdout.contains("ant build · go · release"), "{stdout:?}");
+    assert_eq!(run(), "hello from Go");
+
+    let (code, stdout, _) = ant_in(dir.path(), &["build"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("reused from cache"), "{stdout:?}");
+
+    write(
+        &dir.path().join("greeting/greeting.go"),
+        "package greeting\n\nfunc Text() string { return \"edited\" }\n",
+    );
+    let (code, stdout, _) = ant_in(dir.path(), &["build"]);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains("reused"), "an edit rebuilds: {stdout:?}");
+    assert_eq!(run(), "edited");
+}

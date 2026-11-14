@@ -231,6 +231,28 @@ do not run under `--sandbox` with the Visual Studio generator (see below).
 The CMake e2e test locates `cmake` on PATH or through `vswhere`, and prints a
 skip notice on machines with neither.
 
+## The `go` adapter (P6, D-035)
+
+Detects a Go module (`go.mod` at the project root) and emits one action,
+`go build -o .ant/go/bin/ ./...`: every package is compiled and each `main`
+package becomes `.ant/go/bin/<name>[.exe]` (named like `go build` names it;
+`ant build` collects them into `dist/`).
+
+- **Options:** `profile=dev|release` (`ant build` uses `release`, which adds
+  `-trimpath -ldflags=-s -w`; `--dev` gives a plain, debuggable build).
+- **Inputs:** the whole project except `.ant/`, `.git/`, and output
+  directories Ant created.
+- **Environment:** the executor clears the child environment, so the plan
+  declares Go's effective settings from `go env -json` (module and build
+  caches, proxy and checksum settings, `GOFLAGS`, `GOTOOLCHAIN`,
+  `CGO_ENABLED`, `GOOS`, `GOARCH`) with `GOENV=off`, and workspace-relative
+  temp directories. The absolute cache paths make results machine-local.
+- **Caching:** `cache_policy: local` (modules are pinned by `go.sum`);
+  `never` when a `replace` points at a directory outside the project or the
+  project contains a symlink.
+- **Honest limits:** with cgo, the C compiler is not part of the toolchain
+  identity; cross-machine reuse is not offered.
+
 ## The `gradle` adapter (P4, D-024)
 
 Detects a Gradle **wrapper** project (`settings.gradle[.kts]` plus `gradlew`

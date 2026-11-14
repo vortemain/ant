@@ -50,7 +50,8 @@ All fields are optional. Unknown keys are rejected, so typos fail loudly instead
 |---|---|---|
 | Rust (Cargo, including workspaces) | `Cargo.toml` | the binaries |
 | JavaScript/TypeScript (npm, including workspaces) | `package.json` with a `build` script | none by default (your build script writes its own output); set `outputs = "entry-points"` under `[options]` to have Ant verify and collect the entries named in `package.json` |
-| C/C++ (CMake) | `CMakeLists.txt` | none yet (products stay in `build/`); Visual Studio's bundled CMake is found automatically on Windows |
+| C/C++ (CMake) | `CMakeLists.txt` | executables and shared libraries (from CMake's own target list); Visual Studio's bundled CMake is found automatically on Windows |
+| Go (modules) | `go.mod` | one executable per `main` package (release builds are trimmed: no paths or symbols) |
 | Android (Gradle wrapper) | `settings.gradle(.kts)` + `gradlew` | each app module's debug APK, signed with your usual debug key; Ant finds the Android SDK in its default location if `ANDROID_HOME` is not set, uses your own Gradle cache, and keeps Gradle's daemon warm between builds |
 
 iOS, web bundlers, desktop installers, containers, and more languages are on the roadmap ([vision](vision.md), [plan](plan.md)).

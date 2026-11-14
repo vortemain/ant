@@ -86,7 +86,7 @@ fn choose_adapter(
             names[0]
         ),
         build_adapter::SelectionError::NoMatch(_) => format!(
-            "no supported project found in {} (Ant currently builds Cargo, npm, CMake, and Gradle wrapper projects;\
+            "no supported project found in {} (Ant currently builds Cargo, Go, npm, CMake, and Gradle wrapper projects;\
              see docs/vision.md for what is coming)",
             shown(root)
         ),
@@ -382,7 +382,7 @@ pub fn build_and_collect(
         println!("\nBuild failed after {elapsed:.1}s. Re-run with --verbose for engine details.");
         return Ok((code, Vec::new()));
     }
-    let installed = install_artifacts(&root, &out_dir, &adapter.artifacts(&plan))?;
+    let installed = install_artifacts(&root, &out_dir, &adapter.built_artifacts(&root, &plan))?;
     build_digest::profile::mark("collect deliverables");
     if installed.is_empty() {
         println!(
@@ -391,7 +391,7 @@ pub fn build_and_collect(
                 "npm" =>
                     "Your build script wrote its output in place (set `outputs = \"entry-points\"` under [options] in ant.toml to have Ant verify and collect it).",
                 "cmake" =>
-                    "Build products are in build/ (Ant does not yet know CMake's target list, so nothing was collected).",
+                    "Build products are in build/ (CMake reported no executables or shared libraries to collect).",
                 _ => "This project declares no deliverables to collect.",
             }
         );

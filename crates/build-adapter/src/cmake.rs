@@ -26,6 +26,13 @@
 //!   single-config `build/`) and on target properties
 //!   (`RUNTIME_OUTPUT_DIRECTORY`, `OUTPUT_NAME`, ...) that only a configured
 //!   code model reports. Unknown layouts are omitted, not guessed.
+//! - Deliverables (D-035): generation also writes CMake's File API query
+//!   `build/.cmake/api/v1/query/codemodel-v2` (an empty file; the second
+//!   deliberate generation side effect after `.ant/tmp`), so configuring
+//!   writes the code model. After a successful build,
+//!   [`BuildAdapter::built_artifacts`] reads the reply and reports each
+//!   executable and shared library of the built configuration (import
+//!   libraries, PDBs, and static libraries are not deliverables).
 //! - Toolchain identity is the resolved PATH `cmake` executable's SHA-256
 //!   digest and the first line of `cmake --version`. The compiler CMake
 //!   selects is not captured (another reason policy stays `never`).
@@ -83,11 +90,29 @@ impl BuildAdapter for CmakeAdapter {
         }
     }
 
-    /// CMake's built targets are only known after configuring (File API is
-    /// future work); the one declared output, `CMakeCache.txt`, is not a
-    /// deliverable. No artifacts are claimed.
+    /// CMake's built targets are only known after configuring; the one
+    /// declared output, `CMakeCache.txt`, is not a deliverable. See
+    /// [`BuildAdapter::built_artifacts`].
     fn artifacts(&self, _plan: &PlanFile) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    /// Executables and shared libraries of the built configuration, from
+    /// CMake's File API reply (empty when there is none).
+    fn built_artifacts(&self, project_root: &Path, plan: &PlanFile) -> Vec<PathBuf> {
+        let config = plan
+            .actions
+            .iter()
+            .find(|planned| planned.action.id == "build")
+            .and_then(|planned| {
+                let argv = &planned.action.argv;
+                argv.iter()
+                    .position(|arg| arg == "--config")
+                    .and_then(|index| argv.get(index + 1))
+                    .cloned()
+            })
+            .unwrap_or_else(|| "Debug".to_owned());
+        file_api_artifacts(project_root, &config).unwrap_or_default()
     }
 
     fn generate(
@@ -211,10 +236,94 @@ impl BuildAdapter for CmakeAdapter {
             dependencies: vec!["configure".to_owned()],
         });
         file.to_graph()?;
-        // Prepare the staging directory (crate contract exception) last.
+        // Prepare the staging directory (crate contract exception) last,
+        // and ask CMake for its code model (File API query, D-035).
         std::fs::create_dir_all(root.join(".ant").join("tmp"))?;
+        let query = root.join(FILE_API).join("query");
+        std::fs::create_dir_all(&query)?;
+        let query_file = query.join("codemodel-v2");
+        if !query_file.is_file() {
+            std::fs::write(&query_file, b"")?;
+        }
         Ok(file)
     }
+}
+
+/// CMake's File API directory inside the build tree.
+const FILE_API: &str = "build/.cmake/api/v1";
+
+/// Deliverables listed by the newest File API reply for `config`, as
+/// workspace-relative paths of files that exist. `None` when there is no
+/// usable reply.
+fn file_api_artifacts(root: &Path, config: &str) -> Option<Vec<PathBuf>> {
+    let reply = root.join(FILE_API).join("reply");
+    let read = |name: &str| -> Option<serde_json::Value> {
+        serde_json::from_slice(&std::fs::read(reply.join(name)).ok()?).ok()
+    };
+    // The reply index with the lexically greatest name is the current one.
+    let index_name = std::fs::read_dir(&reply)
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("index-") && name.ends_with(".json"))
+        .max()?;
+    let index = read(&index_name)?;
+    let codemodel_file = index["reply"]["codemodel-v2"]["jsonFile"].as_str()?;
+    let codemodel = read(codemodel_file)?;
+    let build_dir = root.join(BUILD_DIR);
+    let configuration = codemodel["configurations"]
+        .as_array()?
+        .iter()
+        .find(|configuration| {
+            let name = configuration["name"].as_str().unwrap_or("");
+            name.eq_ignore_ascii_case(config) || name.is_empty()
+        })?;
+    let mut found = Vec::new();
+    for target in configuration["targets"].as_array()? {
+        let Some(target) = target["jsonFile"].as_str().and_then(&read) else {
+            continue;
+        };
+        let kind = target["type"].as_str().unwrap_or("");
+        if kind != "EXECUTABLE" && kind != "SHARED_LIBRARY" {
+            continue;
+        }
+        for artifact in target["artifacts"].as_array().into_iter().flatten() {
+            let Some(path) = artifact["path"].as_str() else {
+                continue;
+            };
+            let lower = path.to_ascii_lowercase();
+            let deliverable = match kind {
+                "EXECUTABLE" => {
+                    if cfg!(windows) {
+                        lower.ends_with(".exe")
+                    } else {
+                        !lower.ends_with(".pdb") && !lower.ends_with(".dSYM")
+                    }
+                }
+                _ => {
+                    lower.ends_with(".dll")
+                        || lower.ends_with(".so")
+                        || lower.contains(".so.")
+                        || lower.ends_with(".dylib")
+                }
+            };
+            if !deliverable {
+                continue;
+            }
+            let absolute = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                build_dir.join(path)
+            };
+            if let Ok(relative) = absolute.strip_prefix(root)
+                && absolute.is_file()
+            {
+                found.push(relative.to_path_buf());
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    Some(found)
 }
 
 /// Collect workspace-relative `CMakeLists.txt` and `*.cmake` files under
@@ -333,6 +442,79 @@ mod tests {
             fs::create_dir_all(parent).expect("mkdirs");
         }
         fs::write(path, contents).expect("write");
+    }
+
+    /// D-035: deliverables come from the newest File API reply, for the
+    /// built configuration, executables and shared libraries only, and only
+    /// files that exist inside the project.
+    #[test]
+    fn file_api_reply_yields_executables_and_shared_libraries() {
+        let dir = TempDir::new("file-api");
+        let root = dir.path().canonicalize().expect("canonical");
+        let reply = root.join(FILE_API).join("reply");
+        let (exe, dll) = if cfg!(windows) {
+            ("Release/hello.exe", "Release/greet.dll")
+        } else {
+            ("hello", "libgreet.so")
+        };
+        write(
+            &reply.join("index-2026-11-15T10-00-00-0000.json"),
+            r#"{"reply":{"codemodel-v2":{"jsonFile":"codemodel-v2-new.json"}}}"#,
+        );
+        write(
+            &reply.join("index-2026-11-14T10-00-00-0000.json"),
+            r#"{"reply":{"codemodel-v2":{"jsonFile":"missing.json"}}}"#,
+        );
+        write(
+            &reply.join("codemodel-v2-new.json"),
+            r#"{"configurations":[
+                {"name":"Debug","targets":[{"jsonFile":"t-debug.json"}]},
+                {"name":"Release","targets":[{"jsonFile":"t-exe.json"},{"jsonFile":"t-dll.json"},{"jsonFile":"t-lib.json"},{"jsonFile":"t-gone.json"}]}
+            ]}"#,
+        );
+        write(
+            &reply.join("t-exe.json"),
+            &format!(
+                r#"{{"type":"EXECUTABLE","artifacts":[{{"path":"{exe}"}},{{"path":"Release/hello.pdb"}}]}}"#
+            ),
+        );
+        write(
+            &reply.join("t-dll.json"),
+            &format!(
+                r#"{{"type":"SHARED_LIBRARY","artifacts":[{{"path":"{dll}"}},{{"path":"Release/greet.lib"}}]}}"#
+            ),
+        );
+        write(
+            &reply.join("t-lib.json"),
+            r#"{"type":"STATIC_LIBRARY","artifacts":[{"path":"Release/util.lib"}]}"#,
+        );
+        write(
+            &reply.join("t-gone.json"),
+            r#"{"type":"EXECUTABLE","artifacts":[{"path":"Release/never-built.exe"}]}"#,
+        );
+        write(
+            &reply.join("t-debug.json"),
+            r#"{"type":"EXECUTABLE","artifacts":[{"path":"Debug/hello.exe"}]}"#,
+        );
+        for built in [
+            exe,
+            dll,
+            "Release/hello.pdb",
+            "Release/greet.lib",
+            "Release/util.lib",
+            "Debug/hello.exe",
+        ] {
+            write(&root.join(BUILD_DIR).join(built), "x");
+        }
+        let found = file_api_artifacts(&root, "Release").expect("reply");
+        assert_eq!(
+            found,
+            vec![
+                Path::new(BUILD_DIR).join(dll),
+                Path::new(BUILD_DIR).join(exe),
+            ]
+        );
+        assert!(file_api_artifacts(&root.join("elsewhere"), "Release").is_none());
     }
 
     #[test]

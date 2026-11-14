@@ -37,6 +37,7 @@
 
 pub mod cargo;
 pub mod cmake;
+pub mod go;
 pub mod gradle;
 pub mod npm;
 
@@ -238,6 +239,13 @@ pub trait BuildAdapter {
         declared_file_outputs(plan)
     }
 
+    /// Deliverables after a successful run, for adapters that learn them
+    /// only from the build itself (CMake's File API, D-035). Paths are
+    /// workspace-relative existing files. Defaults to [`Self::artifacts`].
+    fn built_artifacts(&self, _project_root: &Path, plan: &PlanFile) -> Vec<PathBuf> {
+        self.artifacts(plan)
+    }
+
     /// Opt-in plan caching (P3, D-029). Return cheap, subprocess-free key
     /// material describing everything *outside the project* that can change
     /// this adapter's plan: toolchain resolution, global configuration, and
@@ -321,6 +329,7 @@ pub fn available() -> Vec<&'static dyn BuildAdapter> {
         &npm::NpmAdapter,
         &cmake::CmakeAdapter,
         &gradle::GradleAdapter,
+        &go::GoAdapter,
     ]
 }
 
@@ -724,7 +733,7 @@ mod tests {
         let names: Vec<_> = reasons.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            vec!["cargo", "npm", "cmake", "gradle"],
+            vec!["cargo", "npm", "cmake", "gradle", "go"],
             "one reason per registered adapter"
         );
         let text = error.to_string();
@@ -732,7 +741,8 @@ mod tests {
             text.contains("no Cargo.toml")
                 && text.contains("no package.json")
                 && text.contains("no CMakeLists.txt")
-                && text.contains("no settings.gradle"),
+                && text.contains("no settings.gradle")
+                && text.contains("no go.mod"),
             "{text}"
         );
     }

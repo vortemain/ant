@@ -530,7 +530,11 @@ fn metadata_value<'a>(
 
 /// Insert an input declaration without overwriting an existing kind for the
 /// same path.
-fn declare_input(inputs: &mut BTreeMap<PathBuf, InputKind>, path: PathBuf, kind: InputKind) {
+pub(crate) fn declare_input(
+    inputs: &mut BTreeMap<PathBuf, InputKind>,
+    path: PathBuf,
+    kind: InputKind,
+) {
     inputs.entry(path).or_insert(kind);
 }
 
@@ -539,7 +543,7 @@ fn declare_input(inputs: &mut BTreeMap<PathBuf, InputKind>, path: PathBuf, kind:
 /// `.ant-artifacts` marker): files as file inputs, directories as tree
 /// inputs, descending only where an excluded path lies inside. Symlinks are
 /// skipped and reported through `has_symlink`.
-fn declare_project(
+pub(crate) fn declare_project(
     root: &Path,
     dir_rel: &Path,
     excluded: &[PathBuf],
