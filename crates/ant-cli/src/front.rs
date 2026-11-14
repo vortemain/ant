@@ -11,12 +11,15 @@
 //!   directories out of git.
 
 use crate::scheduler::{self, Capacity, EventStream, RunOptions};
+use crate::serve;
+use crate::signing;
 use build_adapter::{AdapterOptions, BuildAdapter};
 use build_events::{ActionStatus, Event, EventKind, EventSink};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub const CONFIG_FILE: &str = "ant.toml";
@@ -108,6 +111,7 @@ fn build_options(
     adapter: &dyn BuildAdapter,
     configured: &BTreeMap<String, String>,
     dev: bool,
+    release: bool,
 ) -> Result<(AdapterOptions, &'static str), String> {
     let accepts = |key: &str| adapter.options().iter().any(|spec| spec.key == key);
     let mut chosen: BTreeMap<String, String> = BTreeMap::new();
@@ -131,6 +135,11 @@ fn build_options(
     if accepts("daemon") {
         chosen.insert("daemon".into(), "1".into());
     }
+    // Android (gradle): debug by default, the explicit --dev/--release flags
+    // beat ant.toml's `task`, which itself beats the adapter default.
+    if accepts("task") {
+        chosen.insert("task".into(), "assembleDebug".into());
+    }
     for (key, value) in configured {
         chosen.insert(key.clone(), value.clone());
     }
@@ -141,11 +150,35 @@ fn build_options(
         if accepts("config") {
             chosen.insert("config".into(), "Debug".into());
         }
+        if accepts("task") {
+            chosen.insert("task".into(), "assembleDebug".into());
+        }
     }
-    let flavor = match (chosen.get("profile"), chosen.get("config")) {
-        (Some(profile), _) if profile == "dev" => "debug",
-        (_, Some(config)) if config == "Debug" => "debug",
-        (Some(_), _) | (_, Some(_)) => "release",
+    if release {
+        if accepts("profile") {
+            chosen.insert("profile".into(), "release".into());
+        }
+        if accepts("config") {
+            chosen.insert("config".into(), "Release".into());
+        }
+        if accepts("task") {
+            chosen.insert("task".into(), "assembleRelease".into());
+        }
+    }
+    let flavor = match (
+        chosen.get("profile"),
+        chosen.get("config"),
+        chosen.get("task"),
+    ) {
+        (Some(profile), _, _) if profile == "dev" => "debug",
+        (_, Some(config), _) if config == "Debug" => "debug",
+        (_, _, Some(task)) if build_adapter::gradle::release_task(task) => "release",
+        // `assembleDebug` is Gradle's default build; like the plain npm build it
+        // shows no flavor label, so the summary stays `ant build · gradle ·
+        // 1 step`. Only the release task (assembleRelease/bundleRelease) labels
+        // the build, so a release run is obvious at a glance.
+        (_, _, Some(task)) if task == "assembleDebug" => "default",
+        (Some(_), _, _) | (_, Some(_), _) => "release",
         _ => "default",
     };
     let mut options = AdapterOptions::new();
@@ -176,21 +209,27 @@ fn safe_relative_dir(value: &str) -> Result<PathBuf, String> {
 // ant build
 // ---------------------------------------------------------------------------
 
-const BUILD_USAGE: &str =
-    "usage: ant build [--dev] [--fresh] [--project PATH] [--jobs N] [--verbose]";
+const BUILD_USAGE: &str = "usage: ant build [--dev|--release] [--fresh] [--no-serve] \
+    [android] [--project PATH] [--jobs N] [--verbose]";
 
 pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let mut project = None;
     let mut dev = false;
+    let mut release = false;
     let mut verbose = false;
     let mut fresh = false;
+    let mut no_serve = false;
+    let mut android = false;
     let mut jobs = None;
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dev" => dev = true,
+            "--release" => release = true,
+            "--no-serve" => no_serve = true,
             "--verbose" => verbose = true,
             "--fresh" => fresh = true,
+            "android" => android = true,
             "--project" => project = Some(args.next().ok_or("--project requires a path")?),
             "--jobs" => {
                 jobs = Some(
@@ -202,18 +241,62 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             }
             target if !target.starts_with('-') => {
                 return Err(format!(
-                    "build targets such as '{target}' are not supported yet: `ant build` builds the \
-                     detected project. Android and iOS targets arrive in roadmap phases P4/P5 \
-                     (docs/plan.md)."
+                    "build target '{target}' is not supported yet: today 'android' is the only \
+                     named target; iOS arrives in roadmap phase P5 (docs/plan.md)"
                 ));
             }
             other => return Err(format!("unexpected argument '{other}'\n{BUILD_USAGE}")),
         }
     }
+    if dev && release {
+        return Err("--dev and --release are exclusive".to_owned());
+    }
     let root = project_root(project.as_deref())?;
     let config = load_config(&root)?.unwrap_or_default();
+    // The `android` target is Gradle-only and shipped in roadmap phase P4
+    // (docs/plan.md). Asking for it on a project Gradle did not detect —
+    // including an ambiguous cargo/npm one, which would otherwise report a
+    // generic adapter pick — says so before adapter selection, so the user
+    // learns where Android lives instead of a misleading adapter prompt.
+    if android {
+        let gradle_match = build_adapter::detect_all(&root).into_iter().any(|report| {
+            report.adapter == "gradle" && report.outcome.as_ref().is_ok_and(|d| d.supported)
+        });
+        if !gradle_match {
+            return Err(
+                "build target 'android' needs a Gradle/Android project; Ant's Android support \
+                 shipped in roadmap phase P4 (docs/plan.md), but Gradle did not detect this \
+                 project. Run `ant build` for the detected project, or `ant init --adapter gradle` \
+                 only on an Android project."
+                    .to_string(),
+            );
+        }
+    }
     let adapter = choose_adapter(&root, config.adapter.as_deref())?;
-    let (options, flavor) = build_options(adapter, &config.options, dev)?;
+    if android && adapter.name() != "gradle" {
+        return Err(format!(
+            "build target 'android': {} detected this project, and it is not an Android one",
+            adapter.name()
+        ));
+    }
+    let (mut options, flavor) = build_options(adapter, &config.options, dev, release)?;
+    // Release signing (P4, D-036): on a Gradle release task with a
+    // registered keystore, the plan references the keystore by digest (the
+    // `sign` option) and the front door resolves the secrets now. Without a
+    // keystore the build is simply unsigned — Android debug builds need no
+    // signing, and release builds fail at Gradle's own unsigned check.
+    let sign_entry = if adapter.name() == "gradle"
+        && build_adapter::gradle::release_task(options.get("task").unwrap_or("assembleDebug"))
+    {
+        signing::registered(&root)
+    } else {
+        None
+    };
+    if let Some(entry) = &sign_entry {
+        options
+            .insert("sign", entry.keystore_digest.as_str())
+            .map_err(|error| error.to_string())?;
+    }
     let out_dir = safe_relative_dir(config.out_dir.as_deref().unwrap_or(DEFAULT_OUT_DIR))?;
     let jobs = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -265,6 +348,16 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             local_reuse: true,
             fresh,
         },
+        // Build-time signing secrets (D-036), resolved before the run:
+        // staging happens even for a cached build (the plan is generated
+        // first), but the values only ever reach the spawned process.
+        secrets: match &sign_entry {
+            Some(entry) => {
+                signing::ensure_init_script(&root)?;
+                Some(Arc::new(signing::unlock(&root, entry)?))
+            }
+            None => None,
+        },
     };
     let results = build_adapter::user_cache_dir().map(|dir| dir.join("local-results"));
     let code = scheduler::run_plan(
@@ -298,6 +391,19 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             let _ = write!(list, "\n  {}", path.display());
         }
         println!("\nBuilt in {elapsed:.1}s →{list}");
+    }
+    // Install-by-QR (D-037): a release build that collected APKs serves
+    // them on the LAN until Ctrl+C. Piped stdout cannot show a QR and
+    // --no-serve opts out; both simply skip serving and exit.
+    let task = options.get("task").unwrap_or("assembleDebug").to_owned();
+    if !no_serve
+        && adapter.name() == "gradle"
+        && build_adapter::gradle::release_task(&task)
+        && std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && !installed.is_empty()
+    {
+        let absolute: Vec<PathBuf> = installed.iter().map(|path| root.join(path)).collect();
+        return serve::serve_installed(&root, &absolute, &cancellation);
     }
     Ok(0)
 }
@@ -446,7 +552,7 @@ pub fn init_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> 
             ));
         }
     }
-    let (_, flavor) = build_options(adapter, &BTreeMap::new(), false)?;
+    let (_, flavor) = build_options(adapter, &BTreeMap::new(), false, false)?;
     std::fs::write(&config_path, render_config(adapter))
         .map_err(|error| format!("cannot write {}: {error}", config_path.display()))?;
     println!(
@@ -565,18 +671,20 @@ mod tests {
     #[test]
     fn release_is_default_and_dev_overrides() {
         let cargo = build_adapter::adapter("cargo").expect("cargo");
-        let (options, flavor) = build_options(cargo, &BTreeMap::new(), false).expect("options");
+        let (options, flavor) =
+            build_options(cargo, &BTreeMap::new(), false, false).expect("options");
         assert_eq!(
             (options.get("profile"), flavor),
             (Some("release"), "release")
         );
-        let (options, flavor) = build_options(cargo, &BTreeMap::new(), true).expect("options");
+        let (options, flavor) =
+            build_options(cargo, &BTreeMap::new(), true, false).expect("options");
         assert_eq!((options.get("profile"), flavor), (Some("dev"), "debug"));
         let cmake = build_adapter::adapter("cmake").expect("cmake");
-        let (options, _) = build_options(cmake, &BTreeMap::new(), false).expect("options");
+        let (options, _) = build_options(cmake, &BTreeMap::new(), false, false).expect("options");
         assert_eq!(options.get("config"), Some("Release"));
         let npm = build_adapter::adapter("npm").expect("npm");
-        let (options, flavor) = build_options(npm, &BTreeMap::new(), true).expect("options");
+        let (options, flavor) = build_options(npm, &BTreeMap::new(), true, false).expect("options");
         assert!(options.is_empty());
         assert_eq!(flavor, "default");
     }
@@ -587,11 +695,39 @@ mod tests {
         // between invocations); `ant.toml` can restore the hermetic one-shot
         // daemon with `daemon = "0"`.
         let gradle = build_adapter::adapter("gradle").expect("gradle");
-        let (options, _) = build_options(gradle, &BTreeMap::new(), false).expect("options");
+        let (options, _) = build_options(gradle, &BTreeMap::new(), false, false).expect("options");
         assert_eq!(options.get("daemon"), Some("1"));
         let mut configured = BTreeMap::new();
         configured.insert("daemon".to_owned(), "0".to_owned());
-        let (options, _) = build_options(gradle, &configured, false).expect("options");
+        let (options, _) = build_options(gradle, &configured, false, false).expect("options");
         assert_eq!(options.get("daemon"), Some("0"));
+    }
+
+    #[test]
+    fn android_release_flag_selects_the_release_task_and_beats_config() {
+        // The front door maps --release/--dev onto the Gradle task (P4,
+        // D-036); an explicit flag beats ant.toml's `task`.
+        let gradle = build_adapter::adapter("gradle").expect("gradle");
+        let (options, flavor) =
+            build_options(gradle, &BTreeMap::new(), false, false).expect("options");
+        assert_eq!(
+            (options.get("task"), flavor),
+            (Some("assembleDebug"), "default")
+        );
+        let (options, flavor) =
+            build_options(gradle, &BTreeMap::new(), false, true).expect("options");
+        assert_eq!(
+            (options.get("task"), flavor),
+            (Some("assembleRelease"), "release")
+        );
+        let mut configured = BTreeMap::new();
+        configured.insert("task".to_owned(), "bundleRelease".to_owned());
+        let (options, flavor) = build_options(gradle, &configured, false, false).expect("options");
+        assert_eq!(
+            (options.get("task"), flavor),
+            (Some("bundleRelease"), "release")
+        );
+        let (options, _) = build_options(gradle, &configured, false, true).expect("options");
+        assert_eq!(options.get("task"), Some("assembleRelease"));
     }
 }

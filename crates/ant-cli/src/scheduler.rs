@@ -203,13 +203,17 @@ pub struct Capacity {
 }
 
 /// Plan-run settings chosen on the command line.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct RunOptions {
     pub capacity: Capacity,
     pub keep_going: bool,
     /// How each action executes (direct, sandboxed, network-isolated) and
     /// whether declared memory is enforced.
     pub exec: cache_runner::ExecConfig,
+    /// Build-time secrets (release signing, D-036) resolved by the local
+    /// front door: `None` everywhere but `ant build`. Passed to the executor
+    /// by reference; never serialized, never in a key or event.
+    pub secrets: Option<std::sync::Arc<crate::signing::SigningSecrets>>,
 }
 
 /// Clamp an action's request to the run capacity. Returns the weight and
@@ -251,6 +255,9 @@ struct Shared {
     output: Mutex<()>,
     /// How actions execute; read by workers, set once at plan start.
     exec: cache_runner::ExecConfig,
+    /// Build-time secrets (D-036): only actions whose plan declared the
+    /// signing marker see them, and only in the spawned process.
+    secrets: Option<std::sync::Arc<crate::signing::SigningSecrets>>,
     /// Cache participation (`--cache-dir`); mechanics behind the D-003 gate.
     participant: CacheParticipant,
 }
@@ -404,7 +411,16 @@ fn run_sequential(
                 action_id: id.clone(),
             });
         executed_ids.insert(id.clone());
-        match cache_runner::run_action(participant, workspace, &task.action, cancellation, exec) {
+        match cache_runner::run_action(
+            participant,
+            workspace,
+            &task.action,
+            cancellation,
+            exec,
+            // The serial path (`ant run --program`) has no signing secrets;
+            // a plan that needs them names where to get them.
+            options.secrets.as_deref(),
+        ) {
             Ok(ActionRun::Reused {
                 candidate,
                 input_digests,
@@ -620,6 +636,7 @@ fn run_parallel(
         first_error: Mutex::new(None),
         output: Mutex::new(()),
         exec: options.exec,
+        secrets: options.secrets,
         participant,
     });
     let workspace = workspace.to_path_buf();
@@ -766,6 +783,7 @@ fn run_task(
         &shared.tasks[index].action,
         cancellation,
         shared.exec,
+        shared.secrets.as_deref(),
     ) {
         Ok(run) => run,
         Err(ExecutionError::Cancelled) => {

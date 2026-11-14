@@ -10,6 +10,7 @@
 //! `try_reuse` seam with a synthetic eligible key.
 
 use build_action::{Action, OutputKind};
+use build_adapter::gradle::SIGNING_MARKER;
 use build_cache::Cache;
 use build_digest::{ActionKeyCandidate, ContentDigest, ExecutionFingerprint};
 use local_executor::IsolatedAccount;
@@ -105,6 +106,7 @@ pub fn run_action(
     action: &Action,
     cancellation: &CancellationToken,
     exec: ExecConfig,
+    secrets: Option<&crate::signing::SigningSecrets>,
 ) -> Result<ActionRun, ExecutionError> {
     let ExecConfig {
         sandbox,
@@ -175,6 +177,43 @@ pub fn run_action(
     // links, so without a cache we leave outputs untouched.
     if participant.cache.is_some() {
         clear_declared_outputs(workspace, action);
+    }
+
+    // Build-time secrets (D-036), injected into the prepared action's
+    // environment here — after key computation above — so the values never
+    // touch the plan, the action key, the cache, or the events. A plan that
+    // declares signing must be matched by the secrets it was built with:
+    // a stale plan (the keystore was re-imported) fails closed instead of
+    // signing with the wrong key.
+    if action
+        .environment
+        .iter()
+        .any(|(key, _)| key == SIGNING_MARKER)
+    {
+        let secrets = secrets.ok_or_else(|| {
+            ExecutionError::Secrets(
+                "this plan signs its build, but this run has no secrets to sign \
+                 with; run 'ant build' from this project's front door"
+                    .to_owned(),
+            )
+        })?;
+        if !secrets.matches_action(action) {
+            return Err(ExecutionError::Secrets(format!(
+                "the plan expects keystore {} but the registered keystore is \
+                 {}; re-run 'ant build' (or 'ant keystore import' if that is the \
+                 keystore you meant)",
+                action
+                    .environment
+                    .iter()
+                    .find_map(|(key, value)| (key == SIGNING_MARKER).then_some(value.clone()))
+                    .unwrap_or_default(),
+                secrets.reference
+            )));
+        }
+        prepared
+            .action
+            .environment
+            .extend(secrets.values.iter().cloned());
     }
 
     let result = execute_prepared_choice(&prepared, cancellation, sandbox, isolated)?;
@@ -354,6 +393,155 @@ mod tests {
             timeout_ms: None,
             resources: None,
         }
+    }
+
+    /// Cache participation off: this test exercises signing, not the cache.
+    fn plain_exec() -> ExecConfig {
+        ExecConfig {
+            sandbox: false,
+            enforce_memory: false,
+            isolated: None,
+            local_reuse: false,
+            fresh: false,
+        }
+    }
+
+    /// A stub "release build": a plan whose environment declares the signing
+    /// marker (as `ant build --release` plans it), whose argv is a script that
+    /// records the four signing variables it received into a declared output.
+    /// This is the P4 e2e: secrets must reach exactly this spawned process,
+    /// only when the plan references the keystore they unlock.
+    fn signing_stub_action(reference: &str) -> Action {
+        use build_adapter::gradle::{
+            KEY_ALIAS_ENV, KEY_PASSWORD_ENV, KEYSTORE_ENV, SIGNING_MARKER, STORE_PASSWORD_ENV,
+        };
+        let argv = if cfg!(windows) {
+            vec![
+                "cmd".to_owned(),
+                "/C".to_owned(),
+                format!(
+                    "echo %{KEYSTORE_ENV}% %{STORE_PASSWORD_ENV}% %{KEY_ALIAS_ENV}% %{KEY_PASSWORD_ENV}%> probe.txt"
+                ),
+            ]
+        } else {
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                format!(
+                    "echo \"${KEYSTORE_ENV} ${STORE_PASSWORD_ENV} ${KEY_ALIAS_ENV} ${KEY_PASSWORD_ENV}\" > probe.txt"
+                ),
+            ]
+        };
+        Action {
+            schema_version: 1,
+            id: "assembleRelease".to_owned(),
+            argv,
+            working_directory: std::path::PathBuf::from("."),
+            inputs: vec![Input {
+                path: std::path::PathBuf::from("project.txt"),
+                kind: InputKind::File,
+            }],
+            outputs: vec![Output {
+                path: std::path::PathBuf::from("probe.txt"),
+                kind: OutputKind::File,
+            }],
+            environment: vec![(SIGNING_MARKER.to_owned(), reference.to_owned())],
+            cache_policy: CachePolicy::Local,
+            toolchain: None,
+            timeout_ms: None,
+            resources: None,
+        }
+    }
+
+    #[test]
+    fn signing_secrets_reach_only_a_matching_plan_and_never_a_cache() {
+        let workspace = TempDir::new("sign-ws");
+        workspace.write("project.txt", b"project");
+        let participant = CacheParticipant::new(None).expect("no cache participation");
+        let cancellation = CancellationToken::new();
+        let reference = format!("sha256:{}", "c".repeat(64));
+        let secrets = crate::signing::SigningSecrets {
+            reference: reference.clone(),
+            values: vec![
+                (
+                    build_adapter::gradle::KEYSTORE_ENV.to_owned(),
+                    "keystore-bytes".to_owned(),
+                ),
+                (
+                    build_adapter::gradle::STORE_PASSWORD_ENV.to_owned(),
+                    "store-pass".to_owned(),
+                ),
+                (
+                    build_adapter::gradle::KEY_ALIAS_ENV.to_owned(),
+                    "app".to_owned(),
+                ),
+                (
+                    build_adapter::gradle::KEY_PASSWORD_ENV.to_owned(),
+                    "key-pass".to_owned(),
+                ),
+            ],
+        };
+        let action = signing_stub_action(&reference);
+
+        // No secrets at all: a signing plan refuses to run unsigned.
+        let err = match run_action(
+            &participant,
+            workspace.path(),
+            &action,
+            &cancellation,
+            plain_exec(),
+            None,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a signing plan without secrets must fail closed"),
+        };
+        assert!(
+            matches!(err, ExecutionError::Secrets(_)),
+            "a signing plan without secrets fails closed: {err}"
+        );
+
+        // The wrong keystore: the plan's marker names a different digest.
+        let other = crate::signing::SigningSecrets {
+            reference: format!("sha256:{}", "d".repeat(64)),
+            values: secrets.values.clone(),
+        };
+        let err = match run_action(
+            &participant,
+            workspace.path(),
+            &action,
+            &cancellation,
+            plain_exec(),
+            Some(&other),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("the plan and the keystore must agree before anything runs"),
+        };
+        assert!(
+            matches!(err, ExecutionError::Secrets(_)),
+            "the plan and the keystore must agree before anything runs: {err}"
+        );
+
+        // The matching keystore: the stub build received the secret values.
+        let run = run_action(
+            &participant,
+            workspace.path(),
+            &action,
+            &cancellation,
+            plain_exec(),
+            Some(&secrets),
+        )
+        .expect("run the signing stub");
+        let result = match run {
+            ActionRun::Executed { result, .. } => result,
+            ActionRun::Reused { .. } => panic!("no cache participates; the stub must execute"),
+        };
+        assert!(result.success(), "the stub build must succeed");
+        let probe =
+            fs::read_to_string(workspace.path().join("probe.txt")).expect("stub wrote its probe");
+        assert!(
+            probe.contains("keystore-bytes") && probe.contains("store-pass"),
+            "the secrets must reach the spawned process: {probe}"
+        );
     }
 
     #[test]

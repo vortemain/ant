@@ -22,6 +22,17 @@ local-executor = { path = "../local-executor" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+# Release-signing keystore at-rest encryption (P4, D-036; see docs/adr/0005).
+aes-gcm.workspace = true
+pbkdf2.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+# Hidden password prompts for `ant keystore import` and build-time unlock.
+rpassword.workspace = true
+# LAN serving of collected APKs for install-by-QR (P4): the same small
+# synchronous HTTP server the remote coordinator uses.
+tiny_http.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI credential decryption and the sandbox runner's own-token restriction

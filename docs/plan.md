@@ -124,6 +124,55 @@ The owner's vision is a Bun/Expo-class tool that covers **everything**: every pl
 ### D-034: Path-independent keys and outputs for dev builds
 **Status:** Adopted 2026-11-14 (P3.8). Dev builds embed absolute source paths (debug info) and incremental-compilation codegen-unit names derived from a session id, so D-030 could not cover them: two clones of one project built different bytes and hashed different keys. The cargo adapter now makes every dev action carry the path-independence marker plus two settings: `CARGO_INCREMENTAL=0`, and `CARGO_ENCODED_RUSTFLAGS` joining `--remap-path-prefix` flags for every spelling of the workspace root (verbatim `\\?\`, plain, forward-slash) mapped to the fixed token `/ant-workspace` — so two clones produce byte-identical binaries. On the key side, `action_key_candidate` (with the marker present) additionally normalizes environment *values*: every spelling of the workspace path inside a value is replaced by `<workspace>`, because the remap flags themselves name this clone's absolute root and would otherwise defeat the excluded workspace path. Any other byte difference in a value survives normalization, and the marker keeps path-independent and path-dependent keys in separate domains (D-030). npm and CMake stay path-dependent on purpose (npm: the build script is user code that may embed absolute paths; CMake: `CMakeCache.txt` — the declared configure output — embeds the absolute build path), documented in `docs/cli/adapters.md`. Verified by `build-digest` unit tests (multi-spelling value normalization; dev-style remap values hash equal across folders while different flag sets still differ) and end to end by `ant-cli/tests/path_independence.rs`: two clones in different folders sharing one `ANT_CACHE_HOME`, the second clone's `ant build --dev` restores the first's results and the artifacts are byte-identical. Honest limits: user code using `env!("CARGO_MANIFEST_DIR")` or `file!()` can still bake the path in; `CARGO_ENCODED_RUSTFLAGS` overrides `[build] rustflags` in the project's `.cargo/config.toml` (not merged); `CARGO_INCREMENTAL=0` overrides `build.incremental`. Measured cost of giving up incremental compilation on the local edit loop: parity, not regression — same-day A/B after the change (`docs/benchmarks/2026-11-14-local-rust.md` addendum): one-file edit 28.6 s vs cargo's warm incremental 27.6 s (0.96×), because the workspace action rebuilds the edited crate and dependents either way.
 
+### D-035: Install by QR with a minimal zero-dependency QR encoder
+**Status:** Adopted 2026-11-15 (P4). The install-by-QR flow needs a QR code of the
+download URL, and a build tool should not pull a QR crate (or its transitive
+`gltf`/`image`/`num-bigint`) into a workspace pinned to a tiny, audited
+dependency set. `crates/ant-cli/src/qr.rs` is a zero-dependency,
+`unsafe_code = "forbid"`-clean byte-mode encoder (ECC level M, versions 1–10,
+213-byte payload cap at version 10), surfaced as `ant qr [TEXT]`. It is proven
+three independent ways: unit tests against the published format/version/RS
+generator-polynomial tables, an external decoder (`scripts/qr/verify-qr.js`,
+jsQR, 12 dump matrices) and a bit-for-bit zero-module diff against the
+production `qrcode-generator` reference. Two real bugs surfaced (a doubled
+mask bit and the zig-zag column-pair ordering) and are now covered. Full ADR:
+`docs/adr/0004-install-by-qr-with-a-minimal-zero-dependency-qr-encoder.md`.
+
+### D-036: Release signing — sealed keystores, secrets by digest, never by value
+**Status:** Adopted 2026-11-15 (P4). `ant keystore import` stores one Android
+signing keystore per project in a per-user directory keyed by the project's
+canonical path; the keystore file keeps its own Java-encrypted form, and its
+passwords are sealed by AES-256-GCM under a key derived from a master
+passphrase with PBKDF2-HMAC-SHA256 (600_000 iterations, OWASP 2023), read from
+`ANT_SIGNING_PASSPHRASE` or a terminal prompt. Passwords never travel through
+argv: `keytool` reads them from the child environment, and a build hands them
+to Gradle as build-time-only environment variables in the spawned process —
+never in the plan file, the action key, the event stream, or any cache. The
+plan references the keystore only by content digest (`sha256:…`), so a
+different keystore is a different action key while revealing nothing. The
+Gradle adapter stamps the signing marker env and writes an init script so the
+release task picks up the keystore; `ant build --release` resolves the secrets
+before the run and injects them only into the matching plan, and a stale
+plan/keystore mismatch fails closed. Verified: `signing.rs` unit tests
+(seal/open round-trip, wrong-passphrase message names the cause, keystore
+digest verify, no-plaintext in entry metadata, per-project store scoping), the
+Gradle adapter sign-option tests (marker env, init script, release-only), and
+a `cache_runner` stub end-to-end test that the secrets reach only the matching
+plan and never a cache.
+
+### D-037: Install by QR — serve collected release APKs on the LAN
+**Status:** Adopted 2026-11-15 (P4). After `ant build --release` collects signed
+APKs into `dist/`, the front door binds a short-lived HTTP server
+(`crates/ant-cli/src/serve.rs`, `tiny_http`) on all interfaces at an
+OS-assigned port, prints the QR code (D-035) of `http://<lan-ip>:<port>/<file>`,
+and serves exactly the collected `.apk` files — nothing else — until Ctrl+C.
+`--no-serve` opts out; when stdout is not a terminal the QR cannot render, so
+serving is skipped. The QR carries only the URL: no token, no path traversal,
+no directory listing — a request for anything but an exact collected file name
+is a 404. Verified by `serve.rs` loopback HTTP end-to-end tests (serves the
+exact collected name, refuses everything else, routing) and the QR module
+tests; the LAN-address helper reports an address even when offline.
+
 ### D-031: Cheaper plan generation — `cargo metadata` cache
 **Status:** Adopted 2026-11-13 (P3). `cargo metadata` (the dependency-graph resolver invoked during plan generation) costs ~0.3–0.4 s per run — the dominant remaining cost on a no-change build. A per-user cache (`<user cache>/cargo-metadata.json`, `ANT_CACHE_HOME` overrides) stores the parsed JSON keyed on the canonical workspace root, adapter options, `cargo --version` output, the cargo executable's SHA-256 digest, and content digests of every `Cargo.toml` and `Cargo.lock` the project contains. On a cache hit the `cargo metadata` call is skipped entirely; the tree walk (`declare_project`) still runs on every invocation, so new, removed, or modified project files are detected. Any cache problem (missing file, stale entry, unreadable manifest, changed lock, different toolchain) falls back to a live `cargo metadata` call. The cache is best-effort write (failures are silently ignored — the next run re-runs `cargo metadata`). `cargo --version` still runs on every invocation as the toolchain-identity safety net (a binary replaced with identical size and preserved mtime is not re-hashed by the toolchain digest cache). Measured by 6 new `build-adapter` unit tests: round-trip hit, manifest-change miss, options-change miss, toolchain-change miss, lock-change miss, and same-key replacement.
 

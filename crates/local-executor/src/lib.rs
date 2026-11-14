@@ -43,6 +43,11 @@ pub enum ExecutionError {
     /// A requested resource limit could not be applied; the process was
     /// not run (fail closed).
     ResourceLimit(String),
+    /// The action declares build-time secrets (release signing) that this
+    /// run cannot resolve: no secrets were provided, or the plan references
+    /// a different keystore than the one registered. The process was not
+    /// run (fail closed).
+    Secrets(String),
 }
 
 impl fmt::Display for ExecutionError {
@@ -85,6 +90,9 @@ impl fmt::Display for ExecutionError {
             Self::Spawn(e) => write!(f, "could not start action process: {e}"),
             Self::Sandbox(message) => write!(f, "sandbox unavailable: {message}"),
             Self::ResourceLimit(message) => write!(f, "resource limit unavailable: {message}"),
+            Self::Secrets(message) => {
+                write!(f, "build-time secrets unavailable: {message}")
+            }
         }
     }
 }
