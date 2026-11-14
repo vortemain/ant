@@ -826,6 +826,34 @@ mod tests {
     }
 
     #[test]
+    fn npm_actions_stay_path_dependent_without_the_marker() {
+        // npm build scripts are user code and may embed the absolute
+        // workspace path in their outputs (bundlers write source maps and
+        // caches with absolute paths), so npm must NOT claim path
+        // independence: no PATH_INDEPENDENT_MARKER, keys keep the workspace
+        // path (documented in docs/cli/adapters.md). If someone wants the
+        // marker here, they must first prove output equality across two
+        // clones end to end, like the cargo dev profile did (D-034).
+        let adapter = NpmAdapter;
+        let dir = TempDir::new("path-dep");
+        write(
+            &dir.path().join("package.json"),
+            &package_json("path-dep-app"),
+        );
+        let plan = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        let action = &plan.actions[0].action;
+        assert!(
+            action
+                .environment
+                .iter()
+                .all(|(key, _)| key != build_digest::PATH_INDEPENDENT_MARKER),
+            "npm actions must stay path-dependent until output equality across clones is proven"
+        );
+    }
+
+    #[test]
     fn generate_minimal_inputs_without_src_or_lock() {
         let adapter = NpmAdapter;
         let dir = TempDir::new("minimal");

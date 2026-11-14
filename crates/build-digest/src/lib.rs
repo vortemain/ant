@@ -15,6 +15,34 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
+/// Environment variable name that signals path-independent outputs (D-030).
+/// When an adapter places this key in an action's `environment`, the canonical
+/// workspace path is excluded from the action key so a second clone in another
+/// folder can restore instead of rebuilding. The variable itself is hashed
+/// into the key (it is part of `action.environment`), which keeps
+/// path-independent keys from colliding with path-dependent ones. Adapters
+/// must only set it when the action's declared outputs genuinely do not embed
+/// the absolute workspace path (e.g. release builds without debug info, or
+/// remapped dev builds per D-034).
+pub const PATH_INDEPENDENT_MARKER: &str = "_ANT_PATH_INDEPENDENT";
+
+/// The Windows `\\?\` verbatim-path prefix `canonicalize` produces; kept as a
+/// constant so path normalization avoids raw-string ambiguity.
+const VERBATIM_PREFIX: &str = "\\\\?\\";
+
+/// Environment variable name that marks a daemon-keeping action. When an
+/// adapter places this key in an action's `environment`, the action starts
+/// or connects to a long-lived build daemon (for example a Gradle daemon
+/// kept warm between local builds) whose processes may legitimately outlive
+/// the action. The direct local executor skips its kill-on-close job object
+/// for such actions so the daemon survives to warm the next build, exactly
+/// as it would when a developer runs the tool directly; the sandboxed
+/// executor ignores the marker (a fresh sandbox gives a daemon nothing to
+/// reuse, so descendants are still cleaned up). The variable itself is
+/// hashed into the action key (it is part of `action.environment`), which
+/// keeps daemon-keeping and hermetic variants from sharing cache entries.
+pub const DAEMON_MARKER: &str = "_ANT_DAEMON";
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ContentDigest(pub [u8; 32]);
 
@@ -689,8 +717,6 @@ pub fn action_key_candidate(
     if executor.platform_version.is_none() {
         reasons.push(CacheabilityReason::PlatformVersionUnspecified);
     }
-    // The canonical workspace path is hashed into the key below, so outputs
-    // that embed the absolute workspace path are covered by the key itself.
     // Hard blockers until the executor truthfully declares the corresponding
     // capability. There is no CLI override for these.
     if !executor.capabilities.network_isolation {
@@ -751,12 +777,30 @@ pub fn action_key_candidate(
         None => hasher.update([0]),
     }
 
+    let path_independent = action
+        .environment
+        .iter()
+        .any(|(key, _)| key == PATH_INDEPENDENT_MARKER);
     let mut environment: Vec<_> = action.environment.iter().collect();
     environment.sort_by(|left, right| left.0.cmp(&right.0));
     hasher.update((environment.len() as u64).to_be_bytes());
     for (key, value) in environment {
         hash_text(&mut hasher, key);
-        hash_text(&mut hasher, value);
+        if path_independent {
+            // Path-independent actions carry values the adapter baked at
+            // `init` time that embed this clone's absolute workspace path —
+            // the cargo dev profile's `--remap-path-prefix` root (D-034).
+            // Hashing the raw value would give every clone a different key;
+            // hashing it with the workspace path replaced by a fixed token
+            // keeps clones identical while any other byte difference still
+            // changes the key.
+            hash_text(
+                &mut hasher,
+                &path_normalized_value(value, &executor.workspace),
+            );
+        } else {
+            hash_text(&mut hasher, value);
+        }
     }
 
     if let Some(toolchain) = &action.toolchain {
@@ -775,10 +819,21 @@ pub fn action_key_candidate(
             .as_deref()
             .unwrap_or("<unknown-platform-version>"),
     );
-    hash_bytes(
-        &mut hasher,
-        &os_string_bytes(executor.workspace.as_os_str()),
-    );
+    // The canonical workspace path is hashed into the key unless the adapter
+    // has declared path-independent outputs by placing the
+    // `PATH_INDEPENDENT_MARKER` environment variable on the action (D-030).
+    // When the marker is present the path is excluded so a second clone in
+    // another folder restores instead of rebuilding. The marker itself is
+    // already hashed into the key above (it is part of `action.environment`),
+    // which keeps path-independent keys from colliding with path-dependent ones.
+    if !path_independent {
+        hash_bytes(
+            &mut hasher,
+            &os_string_bytes(executor.workspace.as_os_str()),
+        );
+    } else {
+        hasher.update(b"path-independent\0");
+    }
     let mut inherited: Vec<_> = executor.inherited_environment.iter().collect();
     inherited.sort_by(|left, right| left.0.cmp(&right.0));
     hasher.update((inherited.len() as u64).to_be_bytes());
@@ -817,6 +872,26 @@ pub fn action_key_candidate(
 
 fn hash_text(hasher: &mut Sha256, value: &str) {
     hash_bytes(hasher, value.as_bytes());
+}
+
+/// Replace every platform spelling of the canonical workspace path inside an
+/// environment value with a fixed token: the `\\?\`-verbatim form, the plain
+/// form, and each with forward slashes, because adapters bake remap flags
+/// with all of those spellings (cargo and rustc render the path with
+/// different separators). Used only for actions carrying the
+/// path-independence marker (D-030/D-034), so clones in different folders
+/// hash the same value; any other byte difference survives normalization.
+fn path_normalized_value(value: &str, workspace: &Path) -> String {
+    let verbatim = workspace.to_string_lossy();
+    let plain = verbatim
+        .strip_prefix(VERBATIM_PREFIX)
+        .unwrap_or(verbatim.as_ref());
+    // Longest spellings first so a shorter one cannot partially overwrite a
+    // longer replacement.
+    let mut normalized = value.replace(verbatim.as_ref(), "<workspace>");
+    normalized = normalized.replace(plain, "<workspace>");
+    normalized = normalized.replace(&verbatim.replace('\\', "/"), "<workspace>");
+    normalized.replace(&plain.replace('\\', "/"), "<workspace>")
 }
 
 fn hash_bytes(hasher: &mut Sha256, value: &[u8]) {
@@ -1211,6 +1286,198 @@ mod tests {
     }
 
     #[test]
+    fn action_key_is_path_dependent_by_default() {
+        // Without the path-independence marker, the workspace path is hashed
+        // into the key, so the same action in two different folders produces
+        // different keys (D-030: the safe default).
+        let dir_a = TempDir::new("key-path-a");
+        let dir_b = TempDir::new("key-path-b");
+        let input_a = dir_a.write("in.txt", b"content");
+        let input_b = dir_b.write("in.txt", b"content");
+        let digest = digest_file(&input_a).expect("digest");
+        let digest_b = digest_file(&input_b).expect("digest");
+        assert_eq!(digest, digest_b, "same content, same digest");
+        let action = sample_action();
+        let key_a = action_key_candidate(
+            &action,
+            &[(PathBuf::from("in.txt"), digest)],
+            &local_fingerprint(dir_a.path()),
+        )
+        .expect("candidate");
+        let key_b = action_key_candidate(
+            &action,
+            &[(PathBuf::from("in.txt"), digest)],
+            &local_fingerprint(dir_b.path()),
+        )
+        .expect("candidate");
+        assert_ne!(
+            key_a.digest, key_b.digest,
+            "different workspace paths must produce different keys"
+        );
+    }
+
+    #[test]
+    fn action_key_is_path_independent_when_marker_present() {
+        // With the path-independence marker, the workspace path is excluded
+        // from the key, so the same action in two different folders produces
+        // the same key (D-030): a second clone can restore instead of rebuild.
+        let dir_a = TempDir::new("key-path-indep-a");
+        let dir_b = TempDir::new("key-path-indep-b");
+        let input_a = dir_a.write("in.txt", b"content");
+        let input_b = dir_b.write("in.txt", b"content");
+        let digest = digest_file(&input_a).expect("digest");
+        let digest_b = digest_file(&input_b).expect("digest");
+        assert_eq!(digest, digest_b, "same content, same digest");
+        let mut action = sample_action();
+        action
+            .environment
+            .push((PATH_INDEPENDENT_MARKER.to_owned(), String::new()));
+        let key_a = action_key_candidate(
+            &action,
+            &[(PathBuf::from("in.txt"), digest)],
+            &local_fingerprint(dir_a.path()),
+        )
+        .expect("candidate");
+        let key_b = action_key_candidate(
+            &action,
+            &[(PathBuf::from("in.txt"), digest)],
+            &local_fingerprint(dir_b.path()),
+        )
+        .expect("candidate");
+        assert_eq!(
+            key_a.digest, key_b.digest,
+            "path-independent marker must make keys identical across folders"
+        );
+        // The path-independent key must also differ from the path-dependent
+        // key for the same workspace, so the two domains never collide.
+        let key_dependent = action_key_candidate(
+            &sample_action(),
+            &[(PathBuf::from("in.txt"), digest)],
+            &local_fingerprint(dir_a.path()),
+        )
+        .expect("candidate");
+        assert_ne!(
+            key_a.digest, key_dependent.digest,
+            "path-independent and path-dependent keys must not collide"
+        );
+    }
+
+    #[test]
+    fn action_key_normalizes_workspace_path_inside_environment_values() {
+        // D-034: the cargo dev profile bakes its clone's absolute path into
+        // CARGO_ENCODED_RUSTFLAGS (the --remap-path-prefix root). With the
+        // path-independence marker the key hashes that value with the
+        // workspace path replaced by a fixed token, so two clones that each
+        // remap their own path still hash identically.
+        let dir_a = TempDir::new("key-remap-a");
+        let dir_b = TempDir::new("key-remap-b");
+        let input_a = dir_a.write("in.txt", b"content");
+        let input_b = dir_b.write("in.txt", b"content");
+        let digest = digest_file(&input_a).expect("digest");
+        let digest_b = digest_file(&input_b).expect("digest");
+        assert_eq!(digest, digest_b, "same content, same digest");
+
+        // The executor fingerprint carries the canonical workspace path, as
+        // the CLI builds it, and the remap value embeds every spelling of it
+        // the same way the cargo adapter's dev profile does (D-034).
+        let canonical = |dir: &TempDir| dir.path().canonicalize().expect("canonical");
+        let action_for = |dir: &TempDir| {
+            let mut action = sample_action();
+            action
+                .environment
+                .push((PATH_INDEPENDENT_MARKER.to_owned(), String::new()));
+            let verbatim = canonical(dir).to_string_lossy().into_owned();
+            let plain = verbatim
+                .strip_prefix(r"\\?\")
+                .unwrap_or(verbatim.as_str())
+                .to_owned();
+            let flags = [
+                format!("--remap-path-prefix={plain}=/ant-workspace"),
+                format!("--remap-path-prefix={verbatim}=/ant-workspace"),
+                format!(
+                    "--remap-path-prefix={}=/ant-workspace",
+                    plain.replace('\\', "/")
+                ),
+            ]
+            .join("\u{1f}");
+            action
+                .environment
+                .push(("CARGO_ENCODED_RUSTFLAGS".to_owned(), flags));
+            action
+        };
+        let candidate = |dir: &TempDir, action: &build_action::Action| {
+            action_key_candidate(
+                action,
+                &[(PathBuf::from("in.txt"), digest)],
+                &local_fingerprint(&canonical(dir)),
+            )
+            .expect("candidate")
+        };
+        let key_a = candidate(&dir_a, &action_for(&dir_a));
+        let key_b = candidate(&dir_b, &action_for(&dir_b));
+        assert_eq!(
+            key_a.digest, key_b.digest,
+            "clone-specific remap roots must normalize to one key"
+        );
+
+        // Normalization must not swallow real differences: a flag appended
+        // after the remap still changes the key.
+        let mut changed = action_for(&dir_a);
+        for (key, value) in changed.environment.iter_mut() {
+            if key == "CARGO_ENCODED_RUSTFLAGS" {
+                value.push_str("\u{1f}-Cdebug-assertions=on");
+            }
+        }
+        let key_changed = candidate(&dir_a, &changed);
+        assert_ne!(
+            key_a.digest, key_changed.digest,
+            "normalized values must still change the key on real differences"
+        );
+    }
+
+    #[test]
+    fn action_key_keeps_raw_environment_values_without_the_marker() {
+        // Without the marker the clone-specific remap value is hashed raw,
+        // so two clones produce different keys even when every input digest
+        // matches: the pre-D-034 behavior, and the reason the marker must be
+        // an explicit adapter declaration.
+        let dir_a = TempDir::new("key-raw-a");
+        let dir_b = TempDir::new("key-raw-b");
+        let input_a = dir_a.write("in.txt", b"content");
+        let input_b = dir_b.write("in.txt", b"content");
+        let digest = digest_file(&input_a).expect("digest");
+        let digest_b = digest_file(&input_b).expect("digest");
+        assert_eq!(digest, digest_b, "same content, same digest");
+        let action_for = |dir: &TempDir| {
+            let mut action = sample_action();
+            action.environment.push((
+                "CARGO_ENCODED_RUSTFLAGS".to_owned(),
+                format!(
+                    "--remap-path-prefix={}=/ant-workspace",
+                    dir.path()
+                        .canonicalize()
+                        .expect("canonical")
+                        .to_string_lossy()
+                ),
+            ));
+            action
+        };
+        let candidate = |dir: &TempDir| {
+            action_key_candidate(
+                &action_for(dir),
+                &[(PathBuf::from("in.txt"), digest)],
+                &local_fingerprint(&dir.path().canonicalize().expect("canonical")),
+            )
+            .expect("candidate")
+        };
+        assert_ne!(
+            candidate(&dir_a).digest,
+            candidate(&dir_b).digest,
+            "without the marker, clone-specific values keep keys different"
+        );
+    }
+
+    #[test]
     fn action_key_ignores_scheduling_resources() {
         // Resource requests are admission weights that cannot change outputs,
         // so they must not change the action key.
@@ -1227,6 +1494,26 @@ mod tests {
         assert_eq!(plain.digest, heavy.digest);
     }
 
+    #[test]
+    fn action_key_changes_when_the_daemon_marker_is_present() {
+        // A daemon-keeping action runs a different command line (Gradle's
+        // --no-daemon is dropped) and keeps its tool's daemon alive across
+        // builds, so the marker must keep the two variants out of each
+        // other's cache entries.
+        let dir = TempDir::new("key-daemon");
+        let executor = local_fingerprint(dir.path());
+        let action = sample_action();
+        let mut daemon = action.clone();
+        daemon
+            .environment
+            .push((DAEMON_MARKER.to_owned(), "1".to_owned()));
+        let plain = action_key_candidate(&action, &[], &executor).expect("candidate");
+        let warm = action_key_candidate(&daemon, &[], &executor).expect("candidate");
+        assert_ne!(
+            plain.digest, warm.digest,
+            "daemon-keeping and hermetic variants must not share a key"
+        );
+    }
     #[test]
     fn action_key_changes_when_arguments_change() {
         let dir = TempDir::new("key-argv");

@@ -2,6 +2,8 @@
 
 Ant computes a deterministic **action-key candidate** for every action from its full semantic content: command and arguments, working directory, timeout, sorted declared environment, declared input paths with their content digests, declared outputs, toolchain identity, OS/architecture, the canonical workspace path, and the inherited process environment. The key is a `sha256:` digest and is stable across machines for the same workspace content.
 
+When an adapter declares that an action's outputs do not embed the absolute workspace path (decision D-030), it places a `_ANT_PATH_INDEPENDENT` environment variable on the action. The key then excludes the workspace path, so a second clone of the project in another folder can restore the result instead of rebuilding. The cargo adapter does this automatically for `--release` builds (release binaries do not embed debug info). Dev builds keep the workspace path in the key because Rust embeds absolute source paths in debug info.
+
 The key is called a *candidate* because it is only a candidate for cache addressing. Whether that address may actually be used is decided by **blockers**, and Ant defaults to blocking.
 
 ## Blockers

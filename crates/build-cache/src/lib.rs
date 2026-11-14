@@ -12,7 +12,9 @@
 //!   declared outputs with per-file digests.
 //!
 //! Restores re-digest every restored file and fail on mismatch, treating a
-//! corrupted cache as a miss rather than as trusted data.
+//! corrupted cache as a miss rather than as trusted data. Restore prefers a
+//! hard link from the blob store (instant when the cache and workspace share a
+//! volume) and falls back to a copy; the re-digest still runs either way.
 
 use build_action::OutputKind;
 use build_digest::{ContentDigest, DigestError, digest_file, tree_entries};
@@ -360,11 +362,7 @@ impl Cache {
                     })?;
                 }
                 let blob = self.blob_path(&blob_digest);
-                fs::copy(&blob, &target).map_err(|source| CacheError::Io {
-                    path: target.clone(),
-                    source,
-                })?;
-                restored.push(target.clone());
+                self.materialize(&blob, &target, restored)?;
                 let actual =
                     digest_file(&target).map_err(|source| CacheError::Digest { source })?;
                 if actual != blob_digest {
@@ -372,6 +370,40 @@ impl Cache {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Place the content-addressed `blob` at `target`, preferring a hard link
+    /// (instant and deduplicating when the cache and workspace share a volume)
+    /// and falling back to a byte copy when a link is impossible — a different
+    /// volume, an unsupported filesystem, or a race. The caller already skipped
+    /// targets whose current content matches the blob, so any file present here
+    /// is stale and is removed first so the link can be created. The integrity
+    /// re-digest that follows this call catches any mismatch, so a failed or
+    /// racy link never trusts unverified content.
+    fn materialize(
+        &self,
+        blob: &Path,
+        target: &Path,
+        restored: &mut Vec<PathBuf>,
+    ) -> Result<(), CacheError> {
+        match fs::remove_file(target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(CacheError::Io {
+                    path: target.to_path_buf(),
+                    source,
+                });
+            }
+        }
+        if fs::hard_link(blob, target).is_err() {
+            fs::copy(blob, target).map_err(|source| CacheError::Io {
+                path: target.to_path_buf(),
+                source,
+            })?;
+        }
+        restored.push(target.to_path_buf());
         Ok(())
     }
 
@@ -563,6 +595,85 @@ mod tests {
             build_digest::digest_tree(&restored_ws.path().join("tree")).expect("tree digest"),
             build_digest::digest_tree(&workspace.path().join("tree")).expect("original digest"),
             "restored tree must be byte-identical, including the empty directory"
+        );
+    }
+
+    #[test]
+    fn restore_uses_hard_link_on_same_volume() {
+        let workspace = TempDir::new("hl-ws");
+        let restored = TempDir::new("hl-restore");
+        let cache_dir = TempDir::new("hl-cache");
+        workspace.write("out.txt", b"artifact");
+        let outputs = vec![(PathBuf::from("out.txt"), OutputKind::File)];
+        let cache = Cache::open(cache_dir.path()).expect("open cache");
+        let action_key = key(digest_file(&workspace.path().join("out.txt")).unwrap());
+        cache
+            .store(&action_key, workspace.path(), &outputs)
+            .expect("store");
+
+        let blob = cache.root().join("blobs");
+        let blob_path = fs::read_dir(&blob)
+            .expect("read blobs")
+            .next()
+            .expect("one blob")
+            .unwrap()
+            .path();
+
+        let entry = cache.lookup(&action_key).expect("lookup").expect("hit");
+        cache
+            .restore(&entry, restored.path(), &outputs)
+            .expect("restore");
+
+        // A hard link shares the inode with the blob: mutating the restored
+        // file in place must change the blob's bytes too. (A copy would leave
+        // the blob at "artifact".) The test cache is throwaway, so corrupting
+        // the blob here is harmless.
+        let target = restored.path().join("out.txt");
+        fs::write(&target, b"mutated").expect("mutate restored file");
+        assert_eq!(
+            fs::read(&blob_path).expect("blob after mutation"),
+            b"mutated",
+            "restore should hard-link the blob into the workspace"
+        );
+    }
+
+    #[test]
+    fn restore_replaces_stale_output() {
+        let workspace = TempDir::new("stale-ws");
+        let restored = TempDir::new("stale-restore");
+        let cache_dir = TempDir::new("stale-cache");
+        workspace.write("out.txt", b"original");
+        let outputs = vec![(PathBuf::from("out.txt"), OutputKind::File)];
+        let cache = Cache::open(cache_dir.path()).expect("open cache");
+        let action_key = key(digest_file(&workspace.path().join("out.txt")).unwrap());
+        cache
+            .store(&action_key, workspace.path(), &outputs)
+            .expect("store");
+
+        let entry = cache.lookup(&action_key).expect("lookup").expect("hit");
+        cache
+            .restore(&entry, restored.path(), &outputs)
+            .expect("first restore");
+
+        // Replace the restored output with unrelated content *without* mutating
+        // the shared inode (remove, then write), so the blob stays intact.
+        let target = restored.path().join("out.txt");
+        fs::remove_file(&target).expect("remove restored output");
+        fs::write(&target, b"stale").expect("write stale content");
+        assert_ne!(
+            digest_file(&target).unwrap(),
+            digest_file(&workspace.path().join("out.txt")).unwrap()
+        );
+
+        // Restoring again must detect the stale content and replace it with the
+        // cached artifact, re-establishing the hard link.
+        cache
+            .restore(&entry, restored.path(), &outputs)
+            .expect("second restore");
+        assert_eq!(
+            fs::read(&target).expect("restored"),
+            b"original",
+            "stale output must be replaced with the cached content"
         );
     }
 

@@ -175,6 +175,11 @@ impl AdapterOptions {
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.values.keys().map(String::as_str)
     }
+
+    /// Iterator over `(key, value)` pairs in deterministic (BTreeMap) order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
 }
 
 /// Reject any option key `adapter` does not declare in
@@ -547,7 +552,7 @@ pub fn user_cache_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = target.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let temp = dir.join(format!(".toolchains-{}.tmp", std::process::id()));
@@ -555,6 +560,14 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&temp, target).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp);
     })
+}
+
+/// Per-user cache file for `cargo metadata` output (D-031).
+/// `%LOCALAPPDATA%\Ant\cache\cargo-metadata.json` on Windows,
+/// `$XDG_CACHE_HOME/ant/cargo-metadata.json` or `~/.cache/ant/cargo-metadata.json`
+/// elsewhere. `ANT_CACHE_HOME` overrides the directory.
+pub(crate) fn metadata_cache_file() -> Option<PathBuf> {
+    Some(user_cache_dir()?.join("cargo-metadata.json"))
 }
 
 #[cfg(test)]

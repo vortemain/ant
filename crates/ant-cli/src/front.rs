@@ -86,8 +86,8 @@ fn choose_adapter(
             names[0]
         ),
         build_adapter::SelectionError::NoMatch(_) => format!(
-            "no supported project found in {} (Ant currently builds Cargo, npm, and CMake projects; \
-             see docs/vision.md for what is coming)",
+            "no supported project found in {} (Ant currently builds Cargo, npm, CMake, and \
+             Gradle projects; see docs/vision.md for what is coming)",
             shown(root)
         ),
         other => other.to_string(),
@@ -122,6 +122,14 @@ fn build_options(
     // cargo's startup once, not once per crate (D-027).
     if accepts("granularity") {
         chosen.insert("granularity".into(), "workspace".into());
+    }
+    // Local builds keep the adapter's build daemon (Gradle's) warm between
+    // invocations: the daemon changes no declared output, only the time the
+    // next build spends starting it. `ant.toml` can override this to "0" for
+    // a hermetic one-shot daemon; `ant adapt` plans (remote and sandbox runs)
+    // always default to the hermetic variant.
+    if accepts("daemon") {
+        chosen.insert("daemon".into(), "1".into());
     }
     for (key, value) in configured {
         chosen.insert(key.clone(), value.clone());
@@ -571,5 +579,19 @@ mod tests {
         let (options, flavor) = build_options(npm, &BTreeMap::new(), true).expect("options");
         assert!(options.is_empty());
         assert_eq!(flavor, "default");
+    }
+
+    #[test]
+    fn local_builds_default_to_the_gradle_daemon_and_config_can_opt_out() {
+        // The daemon is the local-build speed path (a warm Gradle daemon
+        // between invocations); `ant.toml` can restore the hermetic one-shot
+        // daemon with `daemon = "0"`.
+        let gradle = build_adapter::adapter("gradle").expect("gradle");
+        let (options, _) = build_options(gradle, &BTreeMap::new(), false).expect("options");
+        assert_eq!(options.get("daemon"), Some("1"));
+        let mut configured = BTreeMap::new();
+        configured.insert("daemon".to_owned(), "0".to_owned());
+        let (options, _) = build_options(gradle, &configured, false).expect("options");
+        assert_eq!(options.get("daemon"), Some("0"));
     }
 }

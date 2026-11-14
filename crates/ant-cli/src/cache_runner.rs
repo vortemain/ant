@@ -166,6 +166,17 @@ pub fn run_action(
         });
     }
 
+    // A previous cache hit may have restored these outputs as hard links into
+    // the blob store. Before re-running the action, drop them so the action
+    // regenerates fresh files. This both (1) lets a sandboxed action overwrite
+    // an output whose inode lives in the user-owned cache — which otherwise
+    // fails with "Access is denied" — and (2) keeps an in-place rewrite from
+    // corrupting the shared, content-addressed blob. Only the cache path hard
+    // links, so without a cache we leave outputs untouched.
+    if participant.cache.is_some() {
+        clear_declared_outputs(workspace, action);
+    }
+
     let result = execute_prepared_choice(&prepared, cancellation, sandbox, isolated)?;
     let mut store_warning = None;
     if result.success()
@@ -204,6 +215,21 @@ fn execute_prepared_choice(
         local_executor::execute_sandboxed_prepared(prepared, cancellation)
     } else {
         local_executor::execute_prepared(prepared, cancellation)
+    }
+}
+
+/// Remove the action's declared outputs from the workspace before re-running
+/// it, to break hard links restored from the cache (see `run_action`). Errors
+/// are ignored: a missing output or a busy file simply means the action
+/// regenerates or overwrites it.
+fn clear_declared_outputs(workspace: &Path, action: &Action) {
+    for output in &action.outputs {
+        let path = workspace.join(&output.path);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 

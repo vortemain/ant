@@ -121,6 +121,24 @@ sorted by package name, with:
   runnable under `ant run --sandbox`, where writes outside the workspace are
   confined. The staging directory is not a declared input or output and is
   safe to delete at any time.
+- **Path-independent keys and outputs** (D-030, D-034): every generated
+  action carries the `_ANT_PATH_INDEPENDENT` marker, and
+  `build-digest` excludes the workspace path from — and normalizes it inside
+  environment values of — the action key. Release builds embed no debug
+  info by default, so outputs are already path-independent. Dev builds get
+  there explicitly: generation sets `CARGO_INCREMENTAL=0` (incremental
+  compilation names codegen units after a session-specific id) and passes
+  `--remap-path-prefix` flags — for every spelling of the workspace root
+  (verbatim `\\?\`, plain, forward-slash) mapped to the fixed token
+  `/ant-workspace` — through `CARGO_ENCODED_RUSTFLAGS`, so two clones produce
+  byte-identical binaries and one action key. Verified end to end: two
+  clones in different folders sharing one cache, the second restores the
+  first's results (`ant build --dev`), and the artifacts are byte-identical
+  (`ant-cli/tests/path_independence.rs`). Honest limits: user code embedding
+  `env!("CARGO_MANIFEST_DIR")` or `file!()` can still bake the path in;
+  `CARGO_ENCODED_RUSTFLAGS` overrides any `[build] rustflags` in the
+  project's `.cargo/config.toml` (Ant does not merge the two); and
+  `CARGO_INCREMENTAL=0` overrides `build.incremental`.
 
 ## The `npm` adapter
 
@@ -197,6 +215,17 @@ and emits a single `npm run build` action, with:
   generated action sets `TMP`/`TEMP` (plus `TMPDIR` on non-Windows) to
   `.ant/tmp`, resolved against the action's working directory; for workspace
   actions generation prepares `.ant/tmp` inside each building package.
+- **Path dependence, honestly** (D-030/D-034): npm actions do **not** carry
+  the path-independence marker. The build script is user code — bundlers
+  write absolute source paths into source maps, transpilers resolve
+  workspace-relative config against the absolute root — so an npm action's
+  outputs may embed this clone's absolute path, and declaring them
+  path-independent would restore a wrong binary into a second clone. npm
+  keys therefore keep the workspace path, and a second clone in another
+  folder rebuilds instead of restoring. The marker exists for adapters whose
+  outputs Ant can prove path-independent (cargo: D-030/D-034); npm can get
+  there only per-project, with a build that verifiably emits no absolute
+  paths — future work, not assumed.
 
 ## The `cmake` adapter (T3.11)
 
@@ -230,6 +259,14 @@ identity is the `cmake` executable digest and version line); and CMake plans
 do not run under `--sandbox` with the Visual Studio generator (see below).
 The CMake e2e test locates `cmake` on PATH or through `vswhere`, and prints a
 skip notice on machines with neither.
+
+CMake actions are also honestly **path-dependent** (no D-030 marker):
+`CMakeCache.txt` — the one declared configure output — embeds the absolute
+build and source paths, and generator project files record absolute paths
+besides. A configured cache from one folder is wrong for another, so CMake
+keys keep the workspace path and a second clone in another folder rebuilds.
+Making configure path-independent would mean reconfiguring per folder, which
+is the work the cache exists to skip.
 
 ## The `gradle` adapter (P4, D-024)
 

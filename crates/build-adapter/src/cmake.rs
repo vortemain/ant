@@ -390,4 +390,31 @@ mod tests {
             "no staging directory on failure"
         );
     }
+
+    #[test]
+    fn cmake_actions_stay_path_dependent_without_the_marker() {
+        // The configure action's declared output is CMakeCache.txt, which
+        // embeds the absolute build path, so CMake must NOT claim path
+        // independence: no PATH_INDEPENDENT_MARKER, keys keep the workspace
+        // path (documented in docs/cli/adapters.md). Adding the marker here
+        // would silently let two clones share results whose CMakeCache.txt
+        // points at the other clone's absolute paths.
+        let dir = TempDir::new("path-dep");
+        write(&dir.path().join("CMakeLists.txt"), "\n");
+        let plan = CmakeAdapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        assert!(plan.actions.len() >= 2, "configure and build actions");
+        for entry in &plan.actions {
+            assert!(
+                entry
+                    .action
+                    .environment
+                    .iter()
+                    .all(|(key, _)| key != build_digest::PATH_INDEPENDENT_MARKER),
+                "cmake actions must stay path-dependent: {}",
+                entry.action.id
+            );
+        }
+    }
 }

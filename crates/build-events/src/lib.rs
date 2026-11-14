@@ -18,7 +18,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///   from a verified cache entry instead of a spawned process. Readers that
 ///   must accept every v1 file unchanged should treat `reused` as an
 ///   additional terminal status.
-pub const EVENT_SCHEMA_VERSION: u32 = 2;
+/// - 3: `action_finished` gained `peak_memory_bytes`, the measured peak
+///   memory of the spawned action process, `null` when no process was
+///   spawned (`reused`) or the executor cannot measure it (non-Windows local
+///   execution today). Older files simply lack the field.
+pub const EVENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Event {
@@ -70,6 +74,11 @@ pub enum EventKind {
         key_candidate: Option<String>,
         #[serde(default)]
         cache_eligible: Option<bool>,
+        /// Measured peak memory (RSS/commit) of the spawned action process in
+        /// bytes; `None` when no process was spawned (`reused`) or the executor
+        /// cannot measure it (schema v3, M1).
+        #[serde(default)]
+        peak_memory_bytes: Option<u64>,
         #[serde(default)]
         error: Option<String>,
     },
@@ -166,7 +175,7 @@ mod tests {
     #[test]
     fn event_serializes_with_tagged_kind_and_facts() {
         let value = serde_json::to_value(started_event()).expect("serialize");
-        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["schema_version"], 3);
         assert_eq!(value["run_id"], 7);
         assert!(value["timestamp_unix_ms"].as_u64().is_some());
         assert_eq!(value["kind"], "run_started");
@@ -189,6 +198,7 @@ mod tests {
                 output_digests: Vec::new(),
                 key_candidate: Some("sha256:bb".to_owned()),
                 cache_eligible: Some(false),
+                peak_memory_bytes: Some(4096),
                 error: None,
             },
         );
@@ -197,8 +207,24 @@ mod tests {
         assert!(text.contains(r#""status":"succeeded""#), "was {text}");
         assert!(text.contains(r#""path":"in.txt""#), "was {text}");
         assert!(text.contains(r#""cache_eligible":false"#), "was {text}");
+        assert!(text.contains(r#""peak_memory_bytes":4096"#), "was {text}");
         let parsed: Event = serde_json::from_str(&text).expect("deserialize");
         assert_eq!(parsed, event);
+    }
+
+    #[test]
+    fn v2_action_finished_without_peak_memory_still_parses() {
+        // Schema history: v2 files have no `peak_memory_bytes` field. The
+        // field is `#[serde(default)]`, so old files must parse unchanged.
+        let text = r#"{"schema_version":2,"run_id":1,"timestamp_unix_ms":5,"kind":"action_finished","action_id":"a","status":"reused","exit_code":null,"input_digests":[],"output_digests":[],"key_candidate":"sha256:bb","cache_eligible":true,"error":null}"#;
+        let parsed: Event = serde_json::from_str(text).expect("deserialize");
+        let EventKind::ActionFinished {
+            peak_memory_bytes, ..
+        } = parsed.kind
+        else {
+            panic!("wrong kind {parsed:?}");
+        };
+        assert_eq!(peak_memory_bytes, None, "no process was spawned");
     }
 
     #[test]

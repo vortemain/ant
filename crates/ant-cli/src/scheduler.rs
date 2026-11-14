@@ -428,6 +428,7 @@ fn run_sequential(
                         output_digests: &output_digests,
                         key_candidate: Some(candidate.digest.to_string()),
                         cache_eligible: Some(true),
+                        peak_memory_bytes: None,
                         error: None,
                     },
                 );
@@ -445,7 +446,10 @@ fn run_sequential(
                     emit_action_finished(
                         events,
                         &result.action_id,
-                        ActionFinishFacts::minimal(ActionStatus::Cancelled),
+                        ActionFinishFacts {
+                            peak_memory_bytes: result.peak_memory_bytes,
+                            ..ActionFinishFacts::minimal(ActionStatus::Cancelled)
+                        },
                     );
                     termination = termination.worst(Termination::Cancelled);
                     break;
@@ -458,6 +462,7 @@ fn run_sequential(
                         ActionFinishFacts {
                             status: ActionStatus::TimedOut,
                             exit_code: result.status.code(),
+                            peak_memory_bytes: result.peak_memory_bytes,
                             ..ActionFinishFacts::minimal(ActionStatus::TimedOut)
                         },
                     );
@@ -503,6 +508,7 @@ fn run_sequential(
                         output_digests: &result.output_digests,
                         key_candidate: Some(candidate.digest.to_string()),
                         cache_eligible: Some(candidate.cache_eligible),
+                        peak_memory_bytes: result.peak_memory_bytes,
                         error: None,
                     },
                 );
@@ -775,6 +781,7 @@ fn run_task(
                     output_digests: Vec::new(),
                     key_candidate: None,
                     cache_eligible: None,
+                    peak_memory_bytes: None,
                     error: None,
                 });
             shared.cancelled.store(true, Ordering::Relaxed);
@@ -795,6 +802,7 @@ fn run_task(
                     output_digests: Vec::new(),
                     key_candidate: None,
                     cache_eligible: None,
+                    peak_memory_bytes: None,
                     error: Some(message.clone()),
                 });
             let mut guard = shared.first_error.lock().expect("error lock");
@@ -841,6 +849,7 @@ fn run_task(
                     output_digests: named_digests(&output_digests),
                     key_candidate: Some(candidate.digest.to_string()),
                     cache_eligible: Some(true),
+                    peak_memory_bytes: None,
                     error: None,
                 });
         }
@@ -863,6 +872,7 @@ fn run_task(
                         output_digests: Vec::new(),
                         key_candidate: None,
                         cache_eligible: None,
+                        peak_memory_bytes: result.peak_memory_bytes,
                         error: None,
                     });
                 shared.cancelled.store(true, Ordering::Relaxed);
@@ -882,6 +892,7 @@ fn run_task(
                         output_digests: Vec::new(),
                         key_candidate: None,
                         cache_eligible: None,
+                        peak_memory_bytes: result.peak_memory_bytes,
                         error: None,
                     });
                 shared.timed_out.store(true, Ordering::Relaxed);
@@ -908,6 +919,7 @@ fn run_task(
                         output_digests: Vec::new(),
                         key_candidate: None,
                         cache_eligible: None,
+                        peak_memory_bytes: result.peak_memory_bytes,
                         error: None,
                     });
                 shared.failed.store(true, Ordering::Relaxed);
@@ -947,6 +959,7 @@ fn run_task(
                     output_digests: named_digests(&result.output_digests),
                     key_candidate: Some(candidate.digest.to_string()),
                     cache_eligible: Some(candidate.cache_eligible),
+                    peak_memory_bytes: result.peak_memory_bytes,
                     error: None,
                 });
         }
@@ -986,6 +999,7 @@ pub struct ActionFinishFacts<'a> {
     pub output_digests: &'a [ActionContentDigest],
     pub key_candidate: Option<String>,
     pub cache_eligible: Option<bool>,
+    pub peak_memory_bytes: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -998,6 +1012,7 @@ impl<'a> ActionFinishFacts<'a> {
             output_digests: &[],
             key_candidate: None,
             cache_eligible: None,
+            peak_memory_bytes: None,
             error: None,
         }
     }
@@ -1020,6 +1035,7 @@ pub fn emit_action_finished(
             output_digests: named_digests(facts.output_digests),
             key_candidate: facts.key_candidate,
             cache_eligible: facts.cache_eligible,
+            peak_memory_bytes: facts.peak_memory_bytes,
             error: facts.error,
         });
 }

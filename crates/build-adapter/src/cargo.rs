@@ -48,7 +48,8 @@ use std::process::Command;
 
 use crate::{
     AdapterError, AdapterOptions, BuildAdapter, Detection, OptionSpec, canonical_root,
-    check_option_keys, executable_version, locate_executable, relative_to,
+    check_option_keys, executable_version, locate_executable, metadata_cache_file, relative_to,
+    write_atomically,
 };
 
 pub struct CargoAdapter;
@@ -155,8 +156,24 @@ impl BuildAdapter for CargoAdapter {
                 cargo.display()
             ))
         })?;
-        let version = executable_version(&cargo, &root)?;
-        let toolchain_digest = crate::toolchain_digest(&cargo_digest_target)
+        // Run `cargo --version`, `toolchain_digest`, and the metadata-cache
+        // preparation (manifest/lock digesting) in parallel.  On a no-change
+        // build this overlaps the ~0.1 s `cargo --version` process spawn with
+        // file I/O, saving ~0.1 s off plan generation.  `toolchain_digest` is
+        // cached and fast but runs in parallel too for zero cost.
+        let cache_file = metadata_cache_file();
+        let (version, toolchain_digest_result, cache_prep) = std::thread::scope(|s| {
+            let version_h = s.spawn(|| executable_version(&cargo, &root));
+            let toolchain_h = s.spawn(|| crate::toolchain_digest(&cargo_digest_target));
+            let cache_h = s.spawn(|| prepare_metadata_cache(cache_file.as_deref(), &root, options));
+            (
+                version_h.join().unwrap(),
+                toolchain_h.join().unwrap(),
+                cache_h.join().unwrap(),
+            )
+        });
+        let version = version?;
+        let toolchain_digest = toolchain_digest_result
             .map_err(|error| {
                 AdapterError::Toolchain(format!(
                     "cannot digest cargo executable {}: {error}",
@@ -164,7 +181,21 @@ impl BuildAdapter for CargoAdapter {
                 ))
             })?
             .to_string();
-        let metadata = cargo_metadata(&cargo, &root)?;
+        let metadata = match verify_metadata_cache(cache_prep, &version, &toolchain_digest) {
+            Some(cached) => cached,
+            None => {
+                let metadata = cargo_metadata(&cargo, &root)?;
+                write_metadata_cache(
+                    cache_file.as_deref(),
+                    &root,
+                    options,
+                    &version,
+                    &toolchain_digest,
+                    &metadata,
+                );
+                metadata
+            }
+        };
         let packages = metadata_value(&metadata, "packages")?
             .as_array()
             .ok_or_else(|| bad_metadata("packages is not an array"))?;
@@ -284,6 +315,8 @@ impl BuildAdapter for CargoAdapter {
         std::fs::create_dir_all(root.join(".ant").join("tmp")).map_err(AdapterError::from)?;
         let mut file = PlanFile::new();
         let mut all_outputs: BTreeSet<PathBuf> = BTreeSet::new();
+        // The dev profile's remap value is the same for every member action.
+        let dev_rustflags = dev_remap_rustflags(&root);
         for (name, package) in &members {
             let inputs = workspace_inputs.clone();
 
@@ -366,6 +399,41 @@ impl BuildAdapter for CargoAdapter {
                         .to_string_lossy()
                         .into_owned(),
                 ));
+            }
+            // Path independence (D-030, extended to the dev profile by
+            // D-034). Release builds do not embed debug info by default, so
+            // their outputs do not contain the absolute workspace path; the
+            // marker tells `action_key_candidate` to exclude the workspace
+            // path from the key, enabling local reuse across clones. Dev
+            // builds embed absolute source paths in debug info, and
+            // incremental compilation names codegen units after a
+            // session-specific id, so the dev action additionally remaps
+            // every spelling of the workspace root to a fixed token through
+            // CARGO_ENCODED_RUSTFLAGS and disables incremental compilation:
+            // two clones then produce byte-identical outputs, and the marker
+            // plus the key's value normalization give them one key. Honest
+            // limits: user code using `env!("CARGO_MANIFEST_DIR")` can still
+            // embed the path; CARGO_ENCODED_RUSTFLAGS takes precedence over
+            // any `[build] rustflags` in the project's `.cargo/config.toml`;
+            // and CARGO_INCREMENTAL=0 overrides `build.incremental`.
+            match profile.directory {
+                "release" => {
+                    environment.push((
+                        build_digest::PATH_INDEPENDENT_MARKER.to_owned(),
+                        String::new(),
+                    ));
+                }
+                "debug" => {
+                    environment.push(("CARGO_INCREMENTAL".to_owned(), "0".to_owned()));
+                    environment.push(("CARGO_ENCODED_RUSTFLAGS".to_owned(), dev_rustflags.clone()));
+                    environment.push((
+                        build_digest::PATH_INDEPENDENT_MARKER.to_owned(),
+                        String::new(),
+                    ));
+                }
+                // Unreachable: the profile parser yields only debug/release,
+                // and custom profiles are rejected before generation.
+                _ => {}
             }
             environment.sort();
 
@@ -452,6 +520,28 @@ impl BuildAdapter for CargoAdapter {
 
 fn bad_metadata(detail: &str) -> AdapterError {
     AdapterError::Project(format!("cargo metadata unusable: {detail}"))
+}
+
+/// The `CARGO_ENCODED_RUSTFLAGS` value that makes dev-profile outputs
+/// path-independent: `--remap-path-prefix` flags rewriting every platform
+/// spelling of the workspace root (canonical `\\?\`-verbatim, plain, and
+/// forward-slash — cargo and rustc render the path with different separators)
+/// to the fixed token `/ant-workspace`, joined with the encoded-flags unit
+/// separator. A clone in another folder then embeds the same paths in debug
+/// info, so the outputs are byte-identical (D-034).
+fn dev_remap_rustflags(root: &Path) -> String {
+    let verbatim = root.to_string_lossy();
+    let plain = verbatim
+        .strip_prefix(r"\\?\")
+        .unwrap_or(verbatim.as_ref())
+        .to_owned();
+    let forward = plain.replace('\\', "/");
+    [
+        format!("--remap-path-prefix={plain}=/ant-workspace"),
+        format!("--remap-path-prefix={verbatim}=/ant-workspace"),
+        format!("--remap-path-prefix={forward}=/ant-workspace"),
+    ]
+    .join("\u{1f}")
 }
 
 fn metadata_value<'a>(
@@ -576,6 +666,211 @@ fn outside_packages_are_pinned(
         }
     }
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Metadata cache (D-031): `cargo metadata` takes ~0.3–0.4 s per run; on a
+// no-change build it is the dominant cost.  The cache stores the parsed JSON
+// keyed on the workspace root, adapter options, cargo version, toolchain
+// digest, and content digests of every `Cargo.toml` and `Cargo.lock` in the
+// project.  On a cache hit `cargo metadata` is skipped entirely.  The tree
+// walk (`declare_project`) still runs on every invocation, so new or removed
+// project files are detected — the cache only elides the dependency-graph
+// resolution.  Any cache problem (missing file, stale entry, unreadable
+// manifest) falls back to a live `cargo metadata` call.
+// ---------------------------------------------------------------------------
+
+/// One cached `cargo metadata` entry.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct MetadataCacheEntry {
+    /// Canonical workspace root path (cache key component).
+    workspace_root: String,
+    /// Deterministic hash of adapter options (cache key component).
+    options_hash: String,
+    /// `cargo --version` output at cache-write time.
+    cargo_version: String,
+    /// SHA-256 digest of the cargo executable at cache-write time.
+    toolchain_digest: String,
+    /// Absolute manifest paths (`Cargo.toml`) from `cargo metadata`,
+    /// re-digested on each cache hit.
+    manifest_paths: Vec<String>,
+    /// SHA-256 digests of the manifest files, parallel to `manifest_paths`.
+    manifest_digests: Vec<String>,
+    /// SHA-256 digest of `Cargo.lock`, or empty if the lock file was absent.
+    lock_digest: String,
+    /// The cached `cargo metadata` JSON.
+    metadata: serde_json::Value,
+}
+
+/// Build a deterministic hash of the adapter options for use as a cache key.
+fn options_hash(options: &AdapterOptions) -> String {
+    let mut buf = String::new();
+    for (key, value) in options.iter() {
+        buf.push_str(key);
+        buf.push('=');
+        buf.push_str(value);
+        buf.push(';');
+    }
+    build_digest::digest_bytes(buf.as_bytes()).to_string()
+}
+
+/// Compute the SHA-256 digest of a file, returning an empty string on error
+/// (so a missing manifest triggers a cache miss, not a crash).
+fn file_digest_string(path: &Path) -> String {
+    build_digest::digest_file(path)
+        .map(|d| d.to_string())
+        .unwrap_or_default()
+}
+
+/// Prepared metadata-cache data: the matching entry plus freshly-computed
+/// manifest and lock digests.  Separated from verification so that the I/O
+/// (manifest digesting) can overlap with `cargo --version` in `generate`.
+struct MetadataCachePrep {
+    entry: MetadataCacheEntry,
+    current_manifest_digests: Vec<String>,
+    current_lock_digest: String,
+}
+
+/// Phase 1 of the metadata cache check: read the cache file, find the entry
+/// matching the workspace root and options, and re-digest every manifest and
+/// the lock file.  This is the I/O-heavy part that can run in parallel with
+/// `cargo --version`.  Returns `None` on any problem (falls back to live call).
+fn prepare_metadata_cache(
+    cache_file: Option<&Path>,
+    workspace_root: &Path,
+    options: &AdapterOptions,
+) -> Option<MetadataCachePrep> {
+    let cache_file = cache_file?;
+    let entries: Vec<MetadataCacheEntry> =
+        serde_json::from_slice(&std::fs::read(cache_file).ok()?).ok()?;
+    let ws_key = workspace_root.to_string_lossy().into_owned();
+    let opt_key = options_hash(options);
+    let entry = entries
+        .iter()
+        .find(|e| e.workspace_root == ws_key && e.options_hash == opt_key)?;
+    if entry.manifest_paths.len() != entry.manifest_digests.len() {
+        return None;
+    }
+    // Re-digest every manifest file (I/O — overlaps with `cargo --version`).
+    let current_manifest_digests: Vec<String> = entry
+        .manifest_paths
+        .iter()
+        .map(|p| file_digest_string(Path::new(p)))
+        .collect();
+    let lock_path = workspace_root.join("Cargo.lock");
+    let current_lock_digest = if lock_path.is_file() {
+        file_digest_string(&lock_path)
+    } else {
+        String::new()
+    };
+    Some(MetadataCachePrep {
+        entry: entry.clone(),
+        current_manifest_digests,
+        current_lock_digest,
+    })
+}
+
+/// Phase 2 of the metadata cache check: compare toolchain identity, manifest
+/// digests, and lock digest.  Returns `Some(metadata)` on a verified hit.
+fn verify_metadata_cache(
+    prep: Option<MetadataCachePrep>,
+    cargo_version: &str,
+    toolchain_digest: &str,
+) -> Option<serde_json::Value> {
+    let prep = prep?;
+    // Toolchain identity must match — catches rustup switches.
+    if prep.entry.cargo_version != cargo_version || prep.entry.toolchain_digest != toolchain_digest
+    {
+        return None;
+    }
+    // Manifest digests must match.
+    for (expected, actual) in prep
+        .entry
+        .manifest_digests
+        .iter()
+        .zip(&prep.current_manifest_digests)
+    {
+        if expected != actual {
+            return None;
+        }
+    }
+    // Lock digest must match.
+    if prep.current_lock_digest != prep.entry.lock_digest {
+        return None;
+    }
+    Some(prep.entry.metadata.clone())
+}
+
+/// Try the metadata cache (convenience wrapper for tests).  In `generate` the
+/// prepare and verify phases are split and run in parallel with
+/// `cargo --version` + `toolchain_digest`.
+#[cfg(test)]
+fn try_metadata_cache(
+    cache_file: Option<&Path>,
+    workspace_root: &Path,
+    options: &AdapterOptions,
+    cargo_version: &str,
+    toolchain_digest: &str,
+) -> Option<serde_json::Value> {
+    let prep = prepare_metadata_cache(cache_file, workspace_root, options);
+    verify_metadata_cache(prep, cargo_version, toolchain_digest)
+}
+
+/// Write or update a metadata cache entry.  Best-effort; any failure is
+/// silently ignored (the next run simply re-runs `cargo metadata`).
+fn write_metadata_cache(
+    cache_file: Option<&Path>,
+    workspace_root: &Path,
+    options: &AdapterOptions,
+    cargo_version: &str,
+    toolchain_digest: &str,
+    metadata: &serde_json::Value,
+) {
+    let Some(cache_file) = cache_file else { return };
+    // Extract manifest paths from the metadata (all packages).
+    let manifest_paths: Vec<String> = metadata_value(metadata, "packages")
+        .ok()
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|pkg| {
+                    pkg["manifest_path"]
+                        .as_str()
+                        .map(std::string::ToString::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let manifest_digests: Vec<String> = manifest_paths
+        .iter()
+        .map(|p| file_digest_string(Path::new(p)))
+        .collect();
+    let lock_digest = if workspace_root.join("Cargo.lock").is_file() {
+        file_digest_string(&workspace_root.join("Cargo.lock"))
+    } else {
+        String::new()
+    };
+    let new_entry = MetadataCacheEntry {
+        workspace_root: workspace_root.to_string_lossy().into_owned(),
+        options_hash: options_hash(options),
+        cargo_version: cargo_version.to_owned(),
+        toolchain_digest: toolchain_digest.to_owned(),
+        manifest_paths,
+        manifest_digests,
+        lock_digest,
+        metadata: metadata.clone(),
+    };
+    // Load existing entries, replace matching key, write back.
+    let mut entries: Vec<MetadataCacheEntry> = std::fs::read(cache_file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    entries.retain(|e| {
+        !(e.workspace_root == new_entry.workspace_root && e.options_hash == new_entry.options_hash)
+    });
+    entries.push(new_entry);
+    let bytes = serde_json::to_vec_pretty(&entries).unwrap_or_default();
+    let _ = write_atomically(cache_file, &bytes);
 }
 
 fn cargo_metadata(cargo: &Path, root: &Path) -> Result<serde_json::Value, AdapterError> {
@@ -757,6 +1052,20 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         ));
+        // The dev profile is path-independent (D-034): generation disables
+        // incremental compilation, remaps every spelling of the workspace
+        // root to a fixed token through CARGO_ENCODED_RUSTFLAGS, and the
+        // marker opts the key into workspace-path normalization, so a second
+        // clone restores instead of rebuilding.
+        expected.push(("CARGO_INCREMENTAL".to_owned(), "0".to_owned()));
+        expected.push((
+            "CARGO_ENCODED_RUSTFLAGS".to_owned(),
+            dev_remap_rustflags(&dir.path().canonicalize().expect("canonical root")),
+        ));
+        expected.push((
+            build_digest::PATH_INDEPENDENT_MARKER.to_owned(),
+            String::new(),
+        ));
         expected.sort();
         assert_eq!(app.environment, expected);
         // The staging directory was prepared by generation.
@@ -779,6 +1088,82 @@ mod tests {
             vec![PathBuf::from("target/debug/libcore_lib.rlib")]
         );
         assert!(first.actions[1].dependencies.is_empty());
+    }
+
+    #[test]
+    fn dev_and_release_actions_are_path_independent() {
+        // D-030/D-034: both shipped profiles declare path-independent
+        // outputs. The dev action additionally remaps the workspace root out
+        // of rustc debug info and disables incremental compilation (whose
+        // codegen-unit names embed a session id), so two clones produce
+        // byte-identical outputs and one normalized key.
+        let adapter = CargoAdapter;
+        let dir = single_bin("path-indep");
+        let dev = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("dev plan");
+        let dev_action = &dev.actions[0].action;
+        fn env_of<'a>(action: &'a Action, key: &'a str) -> Option<&'a str> {
+            action
+                .environment
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, value)| value.as_str())
+        }
+        assert_eq!(env_of(dev_action, "CARGO_INCREMENTAL"), Some("0"));
+        let flags = env_of(dev_action, "CARGO_ENCODED_RUSTFLAGS").expect("remap flags");
+        let plain = dir
+            .path()
+            .canonicalize()
+            .expect("canonical root")
+            .to_string_lossy()
+            .replace(r"\\?\", "");
+        assert!(
+            flags.contains(&format!("--remap-path-prefix={plain}=/ant-workspace")),
+            "expected the plain spelling {plain} in {flags}"
+        );
+        assert_eq!(
+            env_of(dev_action, build_digest::PATH_INDEPENDENT_MARKER),
+            Some(""),
+            "the marker must be present for key-side normalization"
+        );
+
+        let release = adapter
+            .generate(dir.path(), &options(&[("profile", "release")]))
+            .expect("release plan");
+        let release_action = &release.actions[0].action;
+        assert_eq!(
+            env_of(release_action, build_digest::PATH_INDEPENDENT_MARKER),
+            Some(""),
+        );
+        assert_eq!(
+            env_of(release_action, "CARGO_INCREMENTAL"),
+            None,
+            "release keeps incremental cargo default"
+        );
+        assert_eq!(
+            env_of(release_action, "CARGO_ENCODED_RUSTFLAGS"),
+            None,
+            "release embeds no debug info by default, so no remap is needed"
+        );
+    }
+
+    #[test]
+    fn dev_remap_rustflags_covers_every_path_spelling() {
+        // The unit separator joins the encoded flags, and every spelling of
+        // the root (plain, `\\?\`-verbatim, forward-slash) is remapped to the
+        // same fixed token, because cargo and rustc render the path with
+        // different separators (D-034).
+        let flags = dev_remap_rustflags(Path::new(r"\\?\C:\ws"));
+        let joined: Vec<&str> = flags.split('\u{1f}').collect();
+        assert_eq!(
+            joined,
+            vec![
+                r"--remap-path-prefix=C:\ws=/ant-workspace",
+                r"--remap-path-prefix=\\?\C:\ws=/ant-workspace",
+                "--remap-path-prefix=C:/ws=/ant-workspace",
+            ]
+        );
     }
 
     #[test]
@@ -1217,5 +1602,208 @@ mod tests {
             &root.join(".cargo/config.toml"),
             "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
         );
+    }
+
+    // ---- Metadata cache tests (D-031) -------------------------------------
+
+    fn sample_metadata(manifest_paths: &[&str]) -> serde_json::Value {
+        let packages: Vec<serde_json::Value> = manifest_paths
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": format!("id-{p}"),
+                    "name": p,
+                    "manifest_path": p,
+                    "targets": [],
+                    "dependencies": [],
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "packages": packages,
+            "workspace_members": [],
+            "workspace_root": "/",
+            "target_directory": "/target",
+        })
+    }
+
+    #[test]
+    fn metadata_cache_round_trips_and_hits() {
+        let dir = TempDir::new("md-cache-hit");
+        let manifest = dir.path().join("Cargo.toml");
+        write(&manifest, "[package]\nname = \"x\"\nversion = \"0.1.0\"\n");
+        let cache_path = dir.path().join("metadata.json");
+        let ws = dir.path();
+        let opts = AdapterOptions::new();
+        let manifest_str = manifest.to_string_lossy().into_owned();
+        let metadata = sample_metadata(&[&manifest_str]);
+        write_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts,
+            "cargo 1.95.0",
+            "sha256:abc",
+            &metadata,
+        );
+        let hit = try_metadata_cache(Some(&cache_path), ws, &opts, "cargo 1.95.0", "sha256:abc");
+        assert!(hit.is_some(), "cache hit after write");
+        let hit = hit.unwrap();
+        assert_eq!(hit["packages"][0]["name"], manifest_str);
+    }
+
+    #[test]
+    fn metadata_cache_misses_when_manifest_changes() {
+        let dir = TempDir::new("md-cache-stale");
+        let manifest = dir.path().join("Cargo.toml");
+        write(&manifest, "[package]\nname = \"x\"\nversion = \"0.1.0\"\n");
+        let cache_path = dir.path().join("metadata.json");
+        let ws = dir.path();
+        let opts = AdapterOptions::new();
+        let manifest_str = manifest.to_string_lossy().into_owned();
+        let metadata = sample_metadata(&[&manifest_str]);
+        write_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts,
+            "cargo 1.95.0",
+            "sha256:abc",
+            &metadata,
+        );
+        // Rewrite the manifest with different content.
+        write(&manifest, "[package]\nname = \"y\"\nversion = \"0.1.0\"\n");
+        let miss = try_metadata_cache(Some(&cache_path), ws, &opts, "cargo 1.95.0", "sha256:abc");
+        assert!(miss.is_none(), "stale manifest must miss");
+    }
+
+    #[test]
+    fn metadata_cache_misses_when_options_differ() {
+        let dir = TempDir::new("md-cache-opts");
+        let manifest = dir.path().join("Cargo.toml");
+        write(&manifest, "[package]\nname = \"x\"\nversion = \"0.1.0\"\n");
+        let cache_path = dir.path().join("metadata.json");
+        let ws = dir.path();
+        let opts_dev = AdapterOptions::new();
+        let opts_release = options(&[("profile", "release")]);
+        let manifest_str = manifest.to_string_lossy().into_owned();
+        let metadata = sample_metadata(&[&manifest_str]);
+        write_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts_dev,
+            "cargo 1.95.0",
+            "sha256:abc",
+            &metadata,
+        );
+        let hit = try_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts_dev,
+            "cargo 1.95.0",
+            "sha256:abc",
+        );
+        assert!(hit.is_some(), "same options hit");
+        let miss = try_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts_release,
+            "cargo 1.95.0",
+            "sha256:abc",
+        );
+        assert!(miss.is_none(), "different options must miss");
+    }
+
+    #[test]
+    fn metadata_cache_misses_when_toolchain_changes() {
+        let dir = TempDir::new("md-cache-toolchain");
+        let manifest = dir.path().join("Cargo.toml");
+        write(&manifest, "[package]\nname = \"x\"\nversion = \"0.1.0\"\n");
+        let cache_path = dir.path().join("metadata.json");
+        let ws = dir.path();
+        let opts = AdapterOptions::new();
+        let manifest_str = manifest.to_string_lossy().into_owned();
+        let metadata = sample_metadata(&[&manifest_str]);
+        write_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts,
+            "cargo 1.95.0",
+            "sha256:abc",
+            &metadata,
+        );
+        let miss_version =
+            try_metadata_cache(Some(&cache_path), ws, &opts, "cargo 1.96.0", "sha256:abc");
+        assert!(miss_version.is_none(), "changed version must miss");
+        let miss_digest =
+            try_metadata_cache(Some(&cache_path), ws, &opts, "cargo 1.95.0", "sha256:xyz");
+        assert!(miss_digest.is_none(), "changed digest must miss");
+    }
+
+    #[test]
+    fn metadata_cache_misses_when_lock_changes() {
+        let dir = TempDir::new("md-cache-lock");
+        let manifest = dir.path().join("Cargo.toml");
+        write(&manifest, "[package]\nname = \"x\"\nversion = \"0.1.0\"\n");
+        let lock = dir.path().join("Cargo.lock");
+        write(&lock, "version = 3\n");
+        let cache_path = dir.path().join("metadata.json");
+        let ws = dir.path();
+        let opts = AdapterOptions::new();
+        let manifest_str = manifest.to_string_lossy().into_owned();
+        let metadata = sample_metadata(&[&manifest_str]);
+        write_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts,
+            "cargo 1.95.0",
+            "sha256:abc",
+            &metadata,
+        );
+        // Rewrite Cargo.lock — must invalidate.
+        write(&lock, "version = 4\n");
+        let miss = try_metadata_cache(Some(&cache_path), ws, &opts, "cargo 1.95.0", "sha256:abc");
+        assert!(miss.is_none(), "changed lock file must miss");
+    }
+
+    #[test]
+    fn metadata_cache_replaces_entry_for_same_key() {
+        let dir = TempDir::new("md-cache-replace");
+        let manifest = dir.path().join("Cargo.toml");
+        write(&manifest, "[package]\nname = \"x\"\nversion = \"0.1.0\"\n");
+        let cache_path = dir.path().join("metadata.json");
+        let ws = dir.path();
+        let opts = AdapterOptions::new();
+        let manifest_str = manifest.to_string_lossy().into_owned();
+        let m1 = sample_metadata(&[&manifest_str]);
+        write_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts,
+            "cargo 1.95.0",
+            "sha256:abc",
+            &m1,
+        );
+        // Write again with different metadata (same key) — must replace, not
+        // duplicate.
+        let m2 = serde_json::json!({
+            "packages": [{"id":"y","name":"y","manifest_path":manifest_str,"targets":[],"dependencies":[]}],
+            "workspace_members": [],
+            "workspace_root": "/",
+            "target_directory": "/target",
+        });
+        write_metadata_cache(
+            Some(&cache_path),
+            ws,
+            &opts,
+            "cargo 1.95.0",
+            "sha256:abc",
+            &m2,
+        );
+        let hit = try_metadata_cache(Some(&cache_path), ws, &opts, "cargo 1.95.0", "sha256:abc")
+            .expect("hit");
+        assert_eq!(hit["packages"][0]["name"], "y", "replaced entry");
+        // Only one entry in the file.
+        let entries: Vec<MetadataCacheEntry> =
+            serde_json::from_slice(&std::fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(entries.len(), 1);
     }
 }

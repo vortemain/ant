@@ -290,8 +290,10 @@ fn prepare_with_mode(
 /// are re-verified in the digest mode chosen at preparation time. Declared
 /// outputs are digested by content only, so a cache can verify a restored
 /// output without reproducing timestamps. On Windows, descendants are also
-/// terminated through a kill-on-close job object; on other platforms
-/// descendant cleanup remains platform-dependent and is not guaranteed.
+/// terminated through a kill-on-close job object — except for daemon-keeping
+/// actions (the `_ANT_DAEMON` environment marker), whose build daemon must
+/// outlive the action; on other platforms descendant cleanup remains
+/// platform-dependent and is not guaranteed.
 pub fn execute_prepared(
     prepared: &PreparedAction,
     cancellation: &CancellationToken,
@@ -330,9 +332,24 @@ pub fn execute_prepared(
     let mut child = command.spawn().map_err(ExecutionError::Spawn)?;
     // Windows only: descendants are placed in a kill-on-close job object so a
     // cancelled or timed-out action cannot leave orphaned grandchildren. The
-    // guard must stay alive until the child has exited.
+    // guard must stay alive until the child has exited. Daemon-keeping
+    // actions (the `_ANT_DAEMON` marker) are exempt: their build daemon must
+    // survive the action to warm the next local build, so the job would
+    // defeat the point of keeping it. Cancellation still terminates the
+    // direct child; the daemon notices its disconnected client on its own.
     #[cfg(windows)]
     let job_guard = match prepared.memory_limit_bytes {
+        // A memory-capped action keeps the cap (and with it the
+        // kill-on-close job): the limit cannot be enforced without the job,
+        // so a daemon that also requests memory trades the warm daemon for
+        // the enforced cap.
+        None if action
+            .environment
+            .iter()
+            .any(|(key, _)| key == build_digest::DAEMON_MARKER) =>
+        {
+            None
+        }
         None => attach_child_to_job(&child),
         Some(limit) => match attach_capped_and_resume(&child, limit) {
             Ok(job) => Some(job),
@@ -1296,6 +1313,77 @@ mod tests {
             .peak_memory_bytes
             .expect("peak measured through the job");
         assert!(peak > 0 && peak < 256 * 1024 * 1024, "peak {peak}");
+    }
+
+    /// A grandchild that must outlive the action: the direct child runs a
+    /// small launcher batch (quotes nest normally in a file, unlike an
+    /// argument), which starts a detached process that sleeps about a
+    /// second and then writes `marker` into the action's working directory.
+    #[cfg(windows)]
+    fn grandchild_command(dir: &TempDir, marker: &str) -> Vec<String> {
+        dir.write(
+            "spawn-grandchild.bat",
+            format!(
+                "@echo off\r\nstart \"\" /b cmd /C \"ping -n 2 127.0.0.1 >nul & echo alive> {marker}\"\r\n"
+            )
+            .as_bytes(),
+        );
+        vec![
+            "cmd".to_owned(),
+            "/C".to_owned(),
+            "spawn-grandchild.bat".to_owned(),
+        ]
+    }
+
+    /// Poll for `marker` for about three seconds — several times longer than
+    /// the grandchild needs when it is allowed to survive.
+    #[cfg(windows)]
+    fn grandchild_marker_appears(dir: &Path, marker: &str) -> bool {
+        let path = dir.join(marker);
+        for _ in 0..12 {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        false
+    }
+
+    /// The documented default: the kill-on-close job object terminates a
+    /// detached grandchild when the action ends. This is the control for
+    /// `daemon_marked_actions_keep_their_grandchildren_alive`.
+    #[cfg(windows)]
+    #[test]
+    fn descendants_are_terminated_when_the_action_ends() {
+        let dir = TempDir::new("grandchild-killed");
+        let plain = action("with-grandchild", grandchild_command(&dir, "killed.txt"));
+        let prepared = prepare(dir.path(), &plain).expect("prepare");
+        let result = execute_prepared(&prepared, &CancellationToken::new()).expect("execute");
+        assert!(result.success(), "status {:?}", result.status);
+        assert!(
+            !grandchild_marker_appears(dir.path(), "killed.txt"),
+            "the kill-on-close job must terminate the detached grandchild"
+        );
+    }
+
+    /// A daemon-keeping action (the `_ANT_DAEMON` environment marker) skips
+    /// the kill-on-close job so the build daemon it started survives to warm
+    /// the next local build.
+    #[cfg(windows)]
+    #[test]
+    fn daemon_marked_actions_keep_their_grandchildren_alive() {
+        let dir = TempDir::new("daemon-survives");
+        let mut daemon = action("gradle-daemon", grandchild_command(&dir, "alive.txt"));
+        daemon
+            .environment
+            .push((build_digest::DAEMON_MARKER.to_owned(), "1".to_owned()));
+        let prepared = prepare(dir.path(), &daemon).expect("prepare");
+        let result = execute_prepared(&prepared, &CancellationToken::new()).expect("execute");
+        assert!(result.success(), "status {:?}", result.status);
+        assert!(
+            grandchild_marker_appears(dir.path(), "alive.txt"),
+            "the grandchild daemon must survive the action"
+        );
     }
 
     #[test]

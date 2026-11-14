@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Android benchmark (P4): Gradle vs `ant remote run` on a real Android app
-# (JetNews from android/compose-samples, pinned). Gradle is measured at its
-# best: a warm dependency cache, its daemon, and its build cache on. Ant runs
-# through a sandboxed Linux worker (bubblewrap, no network) with the shared
-# remote cache (D-019, D-024). Dependencies and the Gradle distribution are
+# Android benchmark (P4): Gradle vs Ant on a real Android app (JetNews from
+# android/compose-samples, pinned). Gradle is measured at its best: a warm
+# dependency cache, its daemon, and its build cache on. Ant is measured both
+# through its local front door (`ant build`: Gradle in the project with its
+# daemon warm, D-033; no-change rebuilds served by local reuse, D-028) and
+# through a sandboxed Linux worker
+# (bubblewrap, no network) with the shared remote cache (D-019, D-024). Dependencies and the Gradle distribution are
 # made project inputs first (`.gradle-deps`, a local wrapper zip), because a
 # worker without network cannot download them. Every observation is written
 # to results.csv. Requires: Java 17+, the Android SDK (ANDROID_HOME),
@@ -25,6 +27,7 @@ echo "scenario,rep,seconds,executed,reused,notes" > "$CSV"
 now() { date +%s.%N; }
 elapsed() { awk -v s="$1" -v e="$2" 'BEGIN { printf "%.2f", e - s }'; }
 record() { echo "$1,$2,$3,$4,$5,$6" >> "$CSV"; echo "  $1 rep $2: $3 s (executed=$4 reused=$5) $6"; }
+counts() { echo "$(grep -c 'status=succeeded' "$1" || true) $(grep -c 'status=reused' "$1" || true)"; }
 
 {
   echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -111,6 +114,41 @@ for rep in $(seq 1 "$REPS"); do
 done
 (cd "$WORK/gradle-a" && GRADLE_USER_HOME="$WORK/gradle-home" ./gradlew --stop -q) || true
 
+# --- Ant's local front door (`ant build`) on the same subject ----------------
+# The product front door: Gradle runs in the real project (its daemon kept
+# warm between builds, D-033; its homes under .ant/), the debug APK is
+# collected into dist/ flat, and
+# no-change rebuilds are served by Ant's local reuse (D-028). The front
+# door's per-user cache is scoped to this run so "cold" does not depend on
+# the runner's home directory.
+checkout "$WORK/antbuild-a"
+ant_build() {
+  ANT_CACHE_HOME="$WORK/antbuild-cache" "$ANT" build --project "$WORK/antbuild-a" \
+    --verbose > "$1" 2>&1 || { cat "$1"; exit 1; }
+}
+s=$(now); ant_build "$OUT/antbuild-cold.log"; e=$(now)
+read -r ex re < <(counts "$OUT/antbuild-cold.log")
+record ant-build-cold 1 "$(elapsed "$s" "$e")" "$ex" "$re" "front door; Gradle in place; empty local cache"
+test -f "$WORK/antbuild-a/dist/app-debug.apk" || { echo "ant build did not collect the APK"; exit 1; }
+for rep in $(seq 1 "$REPS"); do
+  s=$(now); ant_build "$OUT/antbuild-nochange-$rep.log"; e=$(now)
+  read -r ex re < <(counts "$OUT/antbuild-nochange-$rep.log")
+  record ant-build-no-change "$rep" "$(elapsed "$s" "$e")" "$ex" "$re" "local reuse (D-028); Gradle daemon warm (D-033)"
+done
+# One edited Kotlin file through the front door (the Gradle baseline's
+# counterpart): local reuse misses on the changed input, Gradle re-runs in
+# the real checkout with its daemon already warm from the cold and no-change
+# builds (D-033) and compiles incrementally.
+for rep in $(seq 1 "$REPS"); do
+  edit "$WORK/antbuild-a" "$rep"
+  s=$(now); ant_build "$OUT/antbuild-edit-$rep.log"; e=$(now)
+  read -r ex re < <(counts "$OUT/antbuild-edit-$rep.log")
+  record ant-build-one-file-change "$rep" "$(elapsed "$s" "$e")" "$ex" "$re" "front door; warm Gradle daemon (D-033); local reuse misses"
+done
+unzip -l "$WORK/antbuild-a/dist/app-debug.apk" | grep -q AndroidManifest.xml \
+  || { echo "the APK collected by ant build is not an Android package"; exit 1; }
+ls -l "$WORK/antbuild-a/dist/app-debug.apk" | sed 's/^/apk collected by ant build: /'
+
 # --- coordinator + one sandboxed worker on loopback --------------------------
 head -c 48 /dev/urandom | base64 | tr -d '/+=' > "$WORK/client.token"
 head -c 48 /dev/urandom | base64 | tr -d '/+=' > "$WORK/worker.token"
@@ -128,7 +166,6 @@ remote() {
   "$ANT" remote run --coordinator "$URL" --token-file "$WORK/client.token" \
     --workspace "$1" --plan "$WORK/plan.json" > "$2" 2>&1
 }
-counts() { echo "$(grep -c 'status=succeeded' "$1" || true) $(grep -c 'status=reused' "$1" || true)"; }
 
 checkout "$WORK/ant-a"
 s=$(now); "$ANT" adapt --adapter gradle --project "$WORK/ant-a" --out "$WORK/plan.json" > /dev/null; e=$(now)

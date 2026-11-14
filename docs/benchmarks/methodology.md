@@ -1,6 +1,6 @@
 # Benchmark plan (baseline)
 
-**Status:** Method defined. First synthetic results: [2026-11-13 cold vs. warm cache under network isolation](2026-11-13-cache-cold-warm.md) (single machine; characterizes overheads; no speedup claims); [2026-11-13 shared remote cache vs. plain cargo on Ant itself](2026-11-13-remote-cache.md) (first real-project numbers, Linux).
+**Status:** Method defined. First synthetic results: [2026-11-13 cold vs. warm cache under network isolation](2026-11-13-cache-cold-warm.md) (single machine; characterizes overheads; no speedup claims); [2026-11-13 shared remote cache vs. plain cargo on Ant itself](2026-11-13-remote-cache.md) (first real-project numbers, Linux); [2026-11-14 Ant vs. plain cargo on Ant itself, local build states](2026-11-14-local-rust.md) (single machine; no-change 3.6×, switchback 103×, real-edit +11%, cold +3%).
 
 ## Workload selection
 

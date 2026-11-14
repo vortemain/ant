@@ -41,11 +41,18 @@ use std::path::{Path, PathBuf};
 
 pub struct GradleAdapter;
 
-const OPTIONS: &[OptionSpec] = &[OptionSpec {
-    key: "task",
-    values: "assembleDebug|assembleRelease",
-    description: "Gradle task to run; assembleDebug declares each application module's debug APK as an output",
-}];
+const OPTIONS: &[OptionSpec] = &[
+    OptionSpec {
+        key: "task",
+        values: "assembleDebug|assembleRelease",
+        description: "Gradle task to run; assembleDebug declares each application module's debug APK as an output",
+    },
+    OptionSpec {
+        key: "daemon",
+        values: "0|1",
+        description: "1 keeps the Gradle daemon between local builds (drops --no-daemon and marks the action daemon-keeping); 0 runs the hermetic default",
+    },
+];
 
 /// The in-project read-only dependency cache directory (Gradle
 /// `GRADLE_RO_DEP_CACHE` layout).
@@ -118,6 +125,19 @@ impl BuildAdapter for GradleAdapter {
             Some(other) => {
                 return Err(AdapterError::Option(format!(
                     "gradle task '{other}' is not supported (supported: assembleDebug, assembleRelease)"
+                )));
+            }
+        };
+        // The daemon option trades hermetic one-shot Gradle processes for a
+        // warm daemon that survives the action. It is off by default so
+        // `ant adapt` plans (remote and sandbox runs) stay hermetic; the
+        // local front door turns it on and `ant.toml` can turn it back off.
+        let daemon = match options.get("daemon") {
+            None | Some("0") => false,
+            Some("1") => true,
+            Some(other) => {
+                return Err(AdapterError::Option(format!(
+                    "gradle daemon '{other}' is not supported (supported: 0, 1)"
                 )));
             }
         };
@@ -234,6 +254,13 @@ impl BuildAdapter for GradleAdapter {
         if fully_declared {
             environment.push(("ANT_GRADLE_TASK_CACHE".to_owned(), "1".to_owned()));
         }
+        if daemon {
+            // Marks the action daemon-keeping for executors (see
+            // `build_digest::DAEMON_MARKER`); hashed into the action key as
+            // part of the environment, so daemon and hermetic variants never
+            // share a cache entry.
+            environment.push((build_digest::DAEMON_MARKER.to_owned(), "1".to_owned()));
+        }
         environment.sort();
 
         let mut argv: Vec<String> = if cfg!(windows) {
@@ -249,7 +276,10 @@ impl BuildAdapter for GradleAdapter {
                 "gradlew".into(),
             ]
         };
-        argv.extend(["--no-daemon".to_owned(), "--console=plain".to_owned()]);
+        if !daemon {
+            argv.push("--no-daemon".to_owned());
+        }
+        argv.push("--console=plain".to_owned());
         if fully_declared {
             // Not `--offline`: Gradle disables its remote build cache in
             // offline mode, and the sandbox already has no network, so a
@@ -500,6 +530,60 @@ mod tests {
                 .expect("toolchain")
                 .version
                 .contains("gradle-9.5.0")
+        );
+    }
+
+    #[test]
+    fn daemon_option_drops_no_daemon_and_marks_the_action() {
+        let dir = android_project(true);
+        let mut options = AdapterOptions::new();
+        options.insert("daemon", "1").expect("option");
+        let plan = GradleAdapter
+            .generate(dir.path(), &options)
+            .expect("generate");
+        let action = &plan.actions[0].action;
+        assert!(
+            !action.argv.contains(&"--no-daemon".to_owned()),
+            "the daemon variant must let Gradle start or reuse its daemon"
+        );
+        assert!(
+            action
+                .environment
+                .contains(&(build_digest::DAEMON_MARKER.to_owned(), "1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn daemon_defaults_to_hermetic_and_validates_its_value() {
+        let dir = android_project(true);
+        let plan = GradleAdapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        let action = &plan.actions[0].action;
+        assert!(action.argv.contains(&"--no-daemon".to_owned()));
+        assert!(
+            !action
+                .environment
+                .iter()
+                .any(|(key, _)| key == build_digest::DAEMON_MARKER),
+            "the hermetic default must not carry the marker"
+        );
+
+        let mut off = AdapterOptions::new();
+        off.insert("daemon", "0").expect("option");
+        let plan = GradleAdapter.generate(dir.path(), &off).expect("generate");
+        assert!(
+            plan.actions[0]
+                .action
+                .argv
+                .contains(&"--no-daemon".to_owned())
+        );
+
+        let mut bad = AdapterOptions::new();
+        bad.insert("daemon", "yes").expect("option");
+        assert!(
+            GradleAdapter.generate(dir.path(), &bad).is_err(),
+            "only 0 and 1 are valid daemon values"
         );
     }
 
