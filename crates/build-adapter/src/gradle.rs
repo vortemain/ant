@@ -44,8 +44,8 @@ pub struct GradleAdapter;
 const OPTIONS: &[OptionSpec] = &[
     OptionSpec {
         key: "task",
-        values: "assembleDebug|assembleRelease",
-        description: "Gradle task to run; assembleDebug declares each application module's debug APK as an output",
+        values: "assembleDebug|assembleRelease|release",
+        description: "Gradle task to run; assembleDebug declares each application module's debug APK; release runs assembleRelease bundleRelease and declares the signed release APK and AAB (signing is injected by `ant build --release`, D-033)",
     },
     OptionSpec {
         key: "home",
@@ -160,9 +160,10 @@ impl BuildAdapter for GradleAdapter {
         let task = match options.get("task") {
             None | Some("assembleDebug") => "assembleDebug",
             Some("assembleRelease") => "assembleRelease",
+            Some("release") => "release",
             Some(other) => {
                 return Err(AdapterError::Option(format!(
-                    "gradle task '{other}' is not supported (supported: assembleDebug, assembleRelease)"
+                    "gradle task '{other}' is not supported (supported: assembleDebug, assembleRelease, release)"
                 )));
             }
         };
@@ -238,7 +239,7 @@ impl BuildAdapter for GradleAdapter {
         let fully_declared = fully_declared && !has_symlink;
 
         let mut outputs: Vec<PathBuf> = Vec::new();
-        if task == "assembleDebug" {
+        if task == "assembleDebug" || task == "release" {
             for module in application_modules(&root, Path::new(""))? {
                 let name = module
                     .file_name()
@@ -248,14 +249,31 @@ impl BuildAdapter for GradleAdapter {
                             .map(|name| name.to_string_lossy().into_owned())
                             .unwrap_or_default()
                     });
-                outputs.push(
-                    module
-                        .join("build")
-                        .join("outputs")
-                        .join("apk")
-                        .join("debug")
-                        .join(format!("{name}-debug.apk")),
-                );
+                let build_outputs = module.join("build").join("outputs");
+                if task == "assembleDebug" {
+                    outputs.push(
+                        build_outputs
+                            .join("apk")
+                            .join("debug")
+                            .join(format!("{name}-debug.apk")),
+                    );
+                } else {
+                    // Signed outputs only: without an injected signing
+                    // config AGP writes `<name>-release-unsigned.apk`, and
+                    // the run fails with "declared output was not created".
+                    outputs.push(
+                        build_outputs
+                            .join("apk")
+                            .join("release")
+                            .join(format!("{name}-release.apk")),
+                    );
+                    outputs.push(
+                        build_outputs
+                            .join("bundle")
+                            .join("release")
+                            .join(format!("{name}-release.aab")),
+                    );
+                }
             }
         }
 
@@ -330,7 +348,11 @@ impl BuildAdapter for GradleAdapter {
             // task cache when a worker serves it (D-025).
             argv.push("--build-cache".to_owned());
         }
-        argv.push(task.to_owned());
+        if task == "release" {
+            argv.extend(["assembleRelease".to_owned(), "bundleRelease".to_owned()]);
+        } else {
+            argv.push(task.to_owned());
+        }
 
         let action = Action {
             schema_version: 1,

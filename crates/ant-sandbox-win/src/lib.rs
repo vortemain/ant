@@ -67,6 +67,9 @@ mod logon;
 pub use logon::{Secret, unprotect_secure_string_hex};
 #[cfg(windows)]
 mod process;
+/// Current-user secret storage (DPAPI) and CSPRNG helpers (Windows only).
+#[cfg(windows)]
+pub mod secrets;
 #[cfg(windows)]
 mod sid;
 #[cfg(windows)]

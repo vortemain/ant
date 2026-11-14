@@ -27,4 +27,17 @@ Every Ant warm run executed nothing: the plan came from the plan cache (D-029) a
 - **Nothing changed: 0.14–0.21 s vs 0.39–0.42 s (~2–3× faster than cargo's own no-change check).** Before this work it was 0.55 s (D-028); the plan cache removed ≈0.4 s of `cargo --version` + `cargo metadata`.
 - **Where the remaining switch time goes** (`ANT_PROFILE=1`): ≈0.33 s is Windows Defender scanning the 13 freshly checked-out files on first read (plain `cat` of the same files takes the same time; cargo pays it too). Restore is ≈0.014 s; the rest is process start and change detection.
 - **The cold numbers are not a fair comparison.** Cargo ran first, so Ant's cold build found registry sources and the OS file cache warm. Ant does not speed up a cold build: it runs the same `cargo build`. In an earlier cold run on this machine, cargo reported 78 s inside an 82 s `ant build`: about 4 s of overhead for planning, hashing, and copying outputs into the local store. Treat cold as "cargo plus a few seconds".
-- **Not measured here:** a one-file edit loop (Ant runs cargo, and after a restore cargo's incremental state belongs to the other commit, so the first edit can recompile more than plain cargo would; see next actions), npm/CMake/Android projects, Linux laptops, and a second clone in another folder (rebuilds by decision D-031).
+- **Not measured here:** a one-file edit loop (Ant runs cargo, and after a restore cargo's incremental state belongs to the other commit, so the first edit can recompile more than plain cargo would; see next actions), npm/CMake/Android projects, Linux laptops (the Linux numbers below are from a CI server), and a second clone in another folder (rebuilds by decision D-031).
+
+## Linux (GitHub runner, same script and commits)
+
+Run 43638138942 of [`bench-local.yml`](../../.github/workflows/bench-local.yml) on a 4-core Intel Xeon 6973P-C, 15.6 GiB RAM, Ubuntu 26.04 (raw data: [`results.csv`](../../benchmarks/local/results/2026-11-14-linux-ci/results.csv)). Not a laptop: a fast server CPU with a warm page cache, so absolute times are much lower than on the i5.
+
+| Scenario | cargo | **ant build** |
+|---|---|---|
+| Cold, fresh clone | 13.27 | 13.88 |
+| No change (x3) | 0.062 0.060 0.059 | **0.036 0.037 0.036** |
+| Switch to old (x3) | 2.54 2.50 2.47 | **0.16 0.16 0.16** |
+| Switch back (x3) | 2.42 2.50 2.55 | **0.16 0.16 0.16** |
+
+Same shape as on Windows: switching between built code is ~15x faster than cargo, a no-change build is faster than cargo's own check, and a cold build costs cargo plus ~0.6 s. Linux has no antivirus first-read cost, which is why a switch is 0.16 s flat.

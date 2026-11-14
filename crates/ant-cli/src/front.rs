@@ -108,6 +108,7 @@ fn build_options(
     adapter: &dyn BuildAdapter,
     configured: &BTreeMap<String, String>,
     dev: bool,
+    release: bool,
 ) -> Result<(AdapterOptions, &'static str), String> {
     let accepts = |key: &str| adapter.options().iter().any(|spec| spec.key == key);
     let mut chosen: BTreeMap<String, String> = BTreeMap::new();
@@ -138,6 +139,25 @@ fn build_options(
         if accepts("config") {
             chosen.insert("config".into(), "Debug".into());
         }
+    }
+    // Android: debug APKs by default (installable with no setup); release
+    // only on request, because release builds are signed (D-033).
+    if accepts("home") && accepts("task") {
+        if release {
+            chosen.insert("task".into(), "release".into());
+        }
+        let flavor = match chosen.get("task").map(String::as_str) {
+            Some("release") => "release (signed)",
+            Some("assembleRelease") => "release",
+            _ => "debug",
+        };
+        let mut options = AdapterOptions::new();
+        for (key, value) in &chosen {
+            options
+                .insert(key, value)
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok((options, flavor));
     }
     let flavor = match (chosen.get("profile"), chosen.get("config")) {
         (Some(profile), _) if profile == "dev" => "debug",
@@ -173,12 +193,13 @@ fn safe_relative_dir(value: &str) -> Result<PathBuf, String> {
 // ant build
 // ---------------------------------------------------------------------------
 
-const BUILD_USAGE: &str =
-    "usage: ant build [--dev] [--fresh] [--project PATH] [--jobs N] [--verbose]";
+const BUILD_USAGE: &str = "usage: ant build [android] [--dev|--release] [--fresh] [--project PATH] [--jobs N] [--verbose]";
 
 pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let mut project = None;
     let mut dev = false;
+    let mut release = false;
+    let mut target: Option<String> = None;
     let mut verbose = false;
     let mut fresh = false;
     let mut jobs = None;
@@ -186,6 +207,7 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dev" => dev = true,
+            "--release" => release = true,
             "--verbose" => verbose = true,
             "--fresh" => fresh = true,
             "--project" => project = Some(args.next().ok_or("--project requires a path")?),
@@ -197,11 +219,12 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
                         .ok_or("--jobs requires a positive integer")?,
                 )
             }
-            target if !target.starts_with('-') => {
+            "android" if target.is_none() => target = Some("android".to_owned()),
+            other if !other.starts_with('-') => {
                 return Err(format!(
-                    "build targets such as '{target}' are not supported yet: `ant build` builds the \
-                     detected project. Android and iOS targets arrive in roadmap phases P4/P5 \
-                     (docs/plan.md)."
+                    "build target '{other}' is not supported yet: `ant build` builds the detected \
+                     project, and `ant build android` an Android one. iOS arrives in roadmap phase \
+                     P5 (docs/plan.md)."
                 ));
             }
             other => return Err(format!("unexpected argument '{other}'\n{BUILD_USAGE}")),
@@ -212,7 +235,17 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
     let config = load_config(&root)?.unwrap_or_default();
     let adapter = choose_adapter(&root, config.adapter.as_deref())?;
     build_digest::profile::mark("detect project");
-    let (options, flavor) = build_options(adapter, &config.options, dev)?;
+    if dev && release {
+        return Err("choose one of --dev and --release".to_owned());
+    }
+    let android = adapter.name() == "gradle";
+    if target.is_some() && !android {
+        return Err(format!(
+            "`ant build android` needs an Android (Gradle wrapper) project; this one builds with {}",
+            adapter.name()
+        ));
+    }
+    let (options, flavor) = build_options(adapter, &config.options, dev, release)?;
     let out_dir = safe_relative_dir(config.out_dir.as_deref().unwrap_or(DEFAULT_OUT_DIR))?;
     let jobs = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -231,7 +264,7 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
         .filter(|_| !fresh)
         .and_then(|cache| cache.lookup());
     let plan_reused = cached.is_some();
-    let plan = match cached {
+    let mut plan = match cached {
         Some(plan) => {
             crate::plan_cache::ensure_scratch_dirs(&root, &plan);
             plan
@@ -247,6 +280,39 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
         }
     };
     build_digest::profile::mark("generate plan");
+    // Signed Android release: the key's public fingerprint becomes key
+    // material; its secrets go to the executor only (D-033).
+    let mut secrets = None;
+    if android && release {
+        let outputs = build_adapter::declared_file_outputs(&plan);
+        let app_id = crate::signing::android_app_id(&root, &outputs)?;
+        let (key, created) = crate::signing::AndroidKey::load_or_create(&app_id)?;
+        if created {
+            println!(
+                "Created an upload key for {app_id} (certificate SHA-256 {}).\n\
+                 It lives in {} and its password is {}.\n\
+                 Back it up now: ant signing export --out <a folder outside this project>",
+                key.cert_sha256,
+                key.dir.display(),
+                crate::signing::protection_description()
+            );
+        }
+        for planned in &mut plan.actions {
+            let environment = &mut planned.action.environment;
+            environment.retain(|(name, _)| name != crate::signing::FINGERPRINT_VARIABLE);
+            environment.push((
+                crate::signing::FINGERPRINT_VARIABLE.to_owned(),
+                key.cert_sha256.clone(),
+            ));
+            environment.sort();
+        }
+        let signing = key.gradle_secrets()?;
+        secrets = Some(&*Box::leak(Box::new(signing)));
+        println!(
+            "Signing with the {app_id} upload key ({}...)",
+            key.short_fingerprint()
+        );
+    }
     let graph = plan.to_graph().map_err(|error| error.to_string())?;
     let plan_json = serde_json::to_string_pretty(&plan).map_err(|error| error.to_string())?;
     let ant_dir = root.join(".ant");
@@ -289,6 +355,7 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             // rebuilds and refreshes them.
             local_reuse: true,
             fresh,
+            secrets,
         },
     };
     let results = build_adapter::user_cache_dir().map(|dir| dir.join("local-results"));
@@ -473,7 +540,7 @@ pub fn init_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> 
             ));
         }
     }
-    let (_, flavor) = build_options(adapter, &BTreeMap::new(), false)?;
+    let (_, flavor) = build_options(adapter, &BTreeMap::new(), false, false)?;
     std::fs::write(&config_path, render_config(adapter))
         .map_err(|error| format!("cannot write {}: {error}", config_path.display()))?;
     println!(
@@ -592,18 +659,20 @@ mod tests {
     #[test]
     fn release_is_default_and_dev_overrides() {
         let cargo = build_adapter::adapter("cargo").expect("cargo");
-        let (options, flavor) = build_options(cargo, &BTreeMap::new(), false).expect("options");
+        let (options, flavor) =
+            build_options(cargo, &BTreeMap::new(), false, false).expect("options");
         assert_eq!(
             (options.get("profile"), flavor),
             (Some("release"), "release")
         );
-        let (options, flavor) = build_options(cargo, &BTreeMap::new(), true).expect("options");
+        let (options, flavor) =
+            build_options(cargo, &BTreeMap::new(), true, false).expect("options");
         assert_eq!((options.get("profile"), flavor), (Some("dev"), "debug"));
         let cmake = build_adapter::adapter("cmake").expect("cmake");
-        let (options, _) = build_options(cmake, &BTreeMap::new(), false).expect("options");
+        let (options, _) = build_options(cmake, &BTreeMap::new(), false, false).expect("options");
         assert_eq!(options.get("config"), Some("Release"));
         let npm = build_adapter::adapter("npm").expect("npm");
-        let (options, flavor) = build_options(npm, &BTreeMap::new(), true).expect("options");
+        let (options, flavor) = build_options(npm, &BTreeMap::new(), true, false).expect("options");
         assert!(options.is_empty());
         assert_eq!(flavor, "default");
     }

@@ -159,6 +159,67 @@ pub fn execute(workspace: &Path, action: &Action) -> Result<ExecutionResult, Exe
     execute_cancellable(workspace, action, &CancellationToken::new())
 }
 
+/// Secret environment values injected by a trusted caller at spawn time
+/// (decision D-033; architecture: "secrets are references injected by a
+/// trusted executor"). They are never part of the [`Action`], so they never
+/// reach plan files, action keys, cache entries, events, or logs: `Debug`
+/// prints names only, and the values are wiped on drop. Only the direct,
+/// unsandboxed local executor injects them; every sandboxed or
+/// network-isolated path refuses a prepared action that carries secrets.
+#[derive(Clone, Default)]
+pub struct SecretEnvironment(Vec<(String, String)>);
+
+impl SecretEnvironment {
+    pub fn new(values: Vec<(String, String)>) -> Self {
+        Self(values)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Variable names (never values), for diagnostics.
+    pub fn names(&self) -> Vec<&str> {
+        self.0.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    fn pairs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+}
+
+impl std::fmt::Debug for SecretEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SecretEnvironment")
+            .field(&self.names())
+            .finish()
+    }
+}
+
+impl Drop for SecretEnvironment {
+    fn drop(&mut self) {
+        for (_, value) in &mut self.0 {
+            // Overwrite in place; `String` exposes no safe volatile write,
+            // so this is best effort against later reuse of the buffer.
+            let wiped = "\0".repeat(value.len());
+            value.replace_range(.., &wiped);
+        }
+    }
+}
+
+/// Refuse to run secrets anywhere but the direct local executor (D-033).
+fn refuse_secrets(prepared: &PreparedAction, path: &str) -> Result<(), ExecutionError> {
+    if prepared.secret_environment.is_empty() {
+        return Ok(());
+    }
+    Err(ExecutionError::Sandbox(format!(
+        "secrets ({}) are only injected into direct local runs, not {path}",
+        prepared.secret_environment.names().join(", ")
+    )))
+}
+
 /// The verified pre-execution state of one action: the canonicalized
 /// workspace, plus digests of every declared input. Produced by `prepare` or
 /// `prepare_with_metadata`; `execute_prepared` consumes it so input digesting
@@ -184,6 +245,9 @@ pub struct PreparedAction {
     /// sandbox as `(host, inside)`, after the workspace. Remote workers use
     /// it for the task-cache bridge socket (D-025); nothing else is exposed.
     pub sandbox_binds: Vec<(PathBuf, PathBuf)>,
+    /// Secret environment injected at spawn by the direct local executor
+    /// only (see [`SecretEnvironment`]). Empty by default.
+    pub secret_environment: SecretEnvironment,
 }
 
 impl PreparedAction {
@@ -282,6 +346,7 @@ fn prepare_with_mode(
         memory_limit_bytes: None,
         sandbox_mount: None,
         sandbox_binds: Vec::new(),
+        secret_environment: SecretEnvironment::default(),
     })
 }
 
@@ -326,6 +391,10 @@ pub fn execute_prepared(
         // CREATE_SUSPENDED: the cap is applied before the first instruction.
         const CREATE_SUSPENDED: u32 = 0x0000_0004;
         command.creation_flags(CREATE_SUSPENDED);
+    }
+    // Secrets last, at spawn only (D-033).
+    for (name, value) in prepared.secret_environment.pairs() {
+        command.env(name, value);
     }
     let mut child = command.spawn().map_err(ExecutionError::Spawn)?;
     // Windows only: descendants are placed in a kill-on-close job object so a
@@ -475,6 +544,7 @@ pub fn execute_sandboxed_prepared(
     use std::os::windows::process::ExitStatusExt as _;
 
     let action = &prepared.action;
+    refuse_secrets(prepared, "sandboxed runs")?;
     if cancellation.is_cancelled() {
         return Err(ExecutionError::Cancelled);
     }
@@ -627,6 +697,7 @@ pub fn execute_network_isolated_prepared(
     use std::os::windows::process::ExitStatusExt as _;
 
     let action = &prepared.action;
+    refuse_secrets(prepared, "network-isolated runs")?;
     if cancellation.is_cancelled() {
         return Err(ExecutionError::Cancelled);
     }
@@ -771,6 +842,7 @@ pub fn execute_sandboxed_prepared(
     cancellation: &CancellationToken,
 ) -> Result<ExecutionResult, ExecutionError> {
     let action = &prepared.action;
+    refuse_secrets(prepared, "sandboxed runs")?;
     if cancellation.is_cancelled() {
         return Err(ExecutionError::Cancelled);
     }
@@ -1242,6 +1314,52 @@ mod tests {
             survived > killed && survived >= 6,
             "helper output lines: killed={killed} survived={survived}"
         );
+    }
+
+    /// D-033: secret environment reaches the direct child at spawn, is not
+    /// part of the action, and is refused by sandboxed execution.
+    #[test]
+    fn secret_environment_reaches_direct_children_only() {
+        let workspace = TempDir::new("secrets");
+        let argv: Vec<String> = if cfg!(windows) {
+            vec![
+                "cmd".into(),
+                "/C".into(),
+                "echo %ANT_TEST_SECRET%> secret.txt".into(),
+            ]
+        } else {
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "printf %s \"$ANT_TEST_SECRET\" > secret.txt".into(),
+            ]
+        };
+        let planned = action("secret", argv);
+        let mut prepared = prepare(workspace.path(), &planned).expect("prepare");
+        prepared.secret_environment = SecretEnvironment::new(vec![(
+            "ANT_TEST_SECRET".to_owned(),
+            "s3cret-value".to_owned(),
+        )]);
+        assert!(!format!("{prepared:?}").contains("s3cret-value"));
+        let result = execute_prepared(&prepared, &CancellationToken::new()).expect("execute");
+        assert!(result.success());
+        let written = fs::read_to_string(workspace.path().join("secret.txt")).expect("written");
+        assert_eq!(written.trim(), "s3cret-value");
+        assert!(
+            !format!("{:?}", prepared.action).contains("s3cret-value"),
+            "secrets are never part of the action"
+        );
+
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            let error = execute_sandboxed_prepared(&prepared, &CancellationToken::new())
+                .expect_err("sandboxed runs refuse secrets");
+            assert!(
+                error.to_string().contains("ANT_TEST_SECRET")
+                    && !error.to_string().contains("s3cret-value"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

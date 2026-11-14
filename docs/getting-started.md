@@ -20,6 +20,7 @@ Built in 2.0s →
 ```
 
 - `ant build --dev` builds in debug mode.
+- `ant build --release` in an Android project builds the signed release APK and the AAB for Google Play (see below).
 - `ant build --fresh` ignores results and plans Ant saved earlier and builds everything again.
 - `ant build --verbose` also prints the engine's detailed status lines.
 - The build tool's own output (compiler messages, warnings, errors) appears as usual.
@@ -53,6 +54,22 @@ All fields are optional. Unknown keys are rejected, so typos fail loudly instead
 | Android (Gradle wrapper) | `settings.gradle(.kts)` + `gradlew` | each app module's debug APK, signed with your usual debug key; Ant finds the Android SDK in its default location if `ANDROID_HOME` is not set, uses your own Gradle cache, and keeps Gradle's daemon warm between builds |
 
 iOS, web bundlers, desktop installers, containers, and more languages are on the roadmap ([vision](vision.md), [plan](plan.md)).
+
+## Signed Android releases
+
+`ant build` in an Android project makes a debug APK you can install right away. For the Play Store:
+
+```
+ant build --release
+```
+
+The first time, Ant creates an upload key for your app and tells you where it lives; after that every release is signed with it. Back the key up once (keep the folder in a password manager, never in git):
+
+```
+ant signing export --out D:\backups\my-app-key
+```
+
+Already have a key? Bring it before your first release: set `ANT_SIGNING_STORE_PASSWORD` (and `ANT_SIGNING_KEY_PASSWORD` if it differs), then run `ant signing import --keystore my.jks --alias my-alias`. `ant signing status` shows which key a project uses. Passwords never appear in Ant's output, plan files, or caches; on Windows they are encrypted for your user account.
 
 ## Good to know
 

@@ -235,8 +235,10 @@ skip notice on machines with neither.
 
 Detects a Gradle **wrapper** project (`settings.gradle[.kts]` plus `gradlew`
 / `gradlew.bat` at the project root) and emits one action that runs the
-wrapper task (`--option task=assembleDebug|assembleRelease`, default
-`assembleDebug`) with `--console=plain`, plus `--no-daemon` unless
+wrapper task (`--option task=assembleDebug|assembleRelease|release`, default
+`assembleDebug`; `release` runs `assembleRelease bundleRelease` and declares the
+signed `<module>-release.apk` and `.aab`, so it succeeds only when signing is
+injected, as `ant build --release` does, D-033) with `--console=plain`, plus `--no-daemon` unless
 `--option home=user`.
 
 - **Homes (`--option home=project|user`):** `project` (the default for

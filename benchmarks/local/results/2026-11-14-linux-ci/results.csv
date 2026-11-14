@@ -1,0 +1,21 @@
+tool,scenario,rep,seconds,notes
+cargo,cold,1,13.273,fresh clone at ec1d845
+cargo,no-change,1,0.062,same checkout
+cargo,no-change,2,0.060,same checkout
+cargo,no-change,3,0.059,same checkout
+cargo,switch-to-old,1,2.540,ec1d845 -> 6e4d1fc
+cargo,switch-back,1,2.415,6e4d1fc -> ec1d845
+cargo,switch-to-old,2,2.502,ec1d845 -> 6e4d1fc
+cargo,switch-back,2,2.495,6e4d1fc -> ec1d845
+cargo,switch-to-old,3,2.473,ec1d845 -> 6e4d1fc
+cargo,switch-back,3,2.545,6e4d1fc -> ec1d845
+ant,cold,1,13.882,fresh clone at ec1d845
+ant,no-change,1,0.036,same checkout
+ant,no-change,2,0.037,same checkout
+ant,no-change,3,0.036,same checkout
+ant,switch-to-old,1,0.160,ec1d845 -> 6e4d1fc
+ant,switch-back,1,0.160,6e4d1fc -> ec1d845
+ant,switch-to-old,2,0.161,ec1d845 -> 6e4d1fc
+ant,switch-back,2,0.160,6e4d1fc -> ec1d845
+ant,switch-to-old,3,0.161,ec1d845 -> 6e4d1fc
+ant,switch-back,3,0.160,6e4d1fc -> ec1d845

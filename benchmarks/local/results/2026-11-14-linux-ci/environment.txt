@@ -1,0 +1,10 @@
+date_utc=2026-11-14T20:34:31Z
+subject=https://github.com/vortemain/ant old=6e4d1fc new=ec1d845
+cpu=Intel(R) Xeon(R) 6973P-C
+cores=4
+ram_gib=15.6
+os=Ubuntu 26.04.1 LTS kernel 7.0.0-1019-azure
+rustc=rustc 1.95.0 (59807616e 2026-04-14)
+ant=Ant 0.1.0
+reps=3
+ci_run=43638138942 (bench-local workflow, commit eb1ccf8)

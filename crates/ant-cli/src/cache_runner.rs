@@ -112,6 +112,10 @@ pub struct ExecConfig {
     pub local_reuse: bool,
     /// Skip lookups (results are still stored): `ant build --fresh`.
     pub fresh: bool,
+    /// Secret environment for every action of the run, injected at spawn by
+    /// the direct local executor only (D-033); sandboxed and isolated runs
+    /// refuse it. `None` for plumbing commands.
+    pub secrets: Option<&'static local_executor::SecretEnvironment>,
 }
 
 pub fn run_action(
@@ -127,6 +131,7 @@ pub fn run_action(
         isolated,
         local_reuse,
         fresh,
+        secrets,
     } = exec;
     let local_reuse = local_reuse && !sandbox && isolated.is_none();
     // Local reuse keys by content only, so a branch switch or re-checkout
@@ -136,6 +141,9 @@ pub fn run_action(
     } else {
         local_executor::prepare_with_metadata(workspace, action)?
     };
+    if let Some(secrets) = secrets {
+        prepared.secret_environment = secrets.clone();
+    }
     build_digest::profile::mark("digest inputs");
     if enforce_memory {
         prepared.enforce_memory_limit();
