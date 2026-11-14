@@ -26,6 +26,9 @@ passes adapter-specific settings:
 | gradle | `task` | `assembleDebug` (default), `assembleRelease`, `bundleRelease` | the wrapper task to run |
 | flutter | `target` | `web` (default) | the Flutter build target; `web` is the only supported target in this phase |
 | flutter | `mode` | `release` (default), `debug`, `profile` | Flutter build mode, always shown in the summary |
+| xcode | `scheme` | any scheme name | the Xcode scheme to build; omitted uses the project default |
+| xcode | `configuration` | `Release` (default), `Debug` | the Xcode build configuration |
+| xcode | `sdk` | `iphoneos` (default), `iphonesimulator` | the target SDK; `iphonesimulator` needs no signing identity |
 
 Options are adapter-defined strings, so new options never change the CLI
 grammar or the adapter contract. An unknown key (naming the adapter's
@@ -368,6 +371,47 @@ the plan through the build graph before any side effect.
   declared web files flow from `lib/main.dart` to `dist/`, and a no-change
   rebuild reuses the local result without running Flutter again
   (`ant-cli/tests/flutter_build.rs`).
+
+### Xcode (iOS) — `ant build ios`
+
+Detects an iOS app by a root-level `*.xcodeproj` or `*.xcworkspace` (a pure iOS
+app keeps one at the project root; a Flutter/React Native project keeps its iOS
+project in an `ios/` subfolder, so there is no collision with the Flutter
+adapter's `pubspec.yaml` detection). The single build action runs
+`xcodebuild -scheme <scheme> -configuration <config> -sdk <sdk>
+-derivedDataPath .ant/build build` — `-scheme` is omitted when unspecified
+(xcodebuild uses the project default), `-configuration` is `Release` by
+default (`--dev` for `Debug`), and `-sdk` is `iphoneos` (the device, the
+deliverable) by default (`iphonesimulator` for a credential-free simulator
+build).
+
+The declared inputs are the project package, `Package.swift`, `Podfile`,
+`Podfile.lock`, and `Sources`/`App` trees when present; the declared output is
+the `.ant/build` derived-data directory. The `.app` product name is not known
+without parsing the project, so — like the CMake adapter — no deliverable is
+claimed and the build directory is the only declared output.
+
+- **Honest limits:** only the **build** verb is supported in this phase. A
+  signed `.ipa` export (the full P5 success criterion) needs an Apple Developer
+  identity and a provisioning profile the owner must supply, so a signed export
+  is a later step; unsigned simulator and development builds need no
+  credentials. Mac workers and certificate/provisioning-profile management are
+  not yet implemented.
+- **Cache policy `Local`:** SPM clone sources and the Pods cache live outside
+  the workspace and are undeclared inputs, so these actions never claim shared
+  cache eligibility. Local reuse is allowed: `Package.resolved` / `Podfile.lock`
+  pin versions and this machine may reuse its own result (D-028).
+- **Truthful toolchain identity** from the real Xcode: the version from
+  `xcodebuild -version` and the SHA-256 digest of the resolved `xcodebuild`
+  executable. `xcodebuild` is a real executable (an `xcrun` shim on macOS), so
+  no `cmd /C` wrapper is needed; on a non-Mac it is simply absent and
+  `generate` fails closed with a toolchain error.
+- **Verified:** the adapter unit tests skip honestly where `xcodebuild` is
+  absent (no Xcode on Linux/Windows) so the main CI matrix stays green, and run
+  for real on a macOS CI runner (`verify-ios.yml`, `macos-latest`) where real
+  Xcode is present — exercising the genuine toolchain capture and plan
+  assembly on Apple hardware without needing an Apple Developer identity or a
+  sample app (the adapter builds a plan; it does not run `xcodebuild build`).
 
 ## Sandbox compatibility
 

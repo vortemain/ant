@@ -40,6 +40,7 @@ pub mod cmake;
 pub mod flutter;
 pub mod gradle;
 pub mod npm;
+pub mod xcode;
 
 use build_graph::{GraphError, PlanFile};
 use std::collections::BTreeMap;
@@ -263,6 +264,7 @@ pub fn available() -> Vec<&'static dyn BuildAdapter> {
         &cmake::CmakeAdapter,
         &gradle::GradleAdapter,
         &flutter::FlutterAdapter,
+        &xcode::XcodeAdapter,
     ]
 }
 
@@ -674,7 +676,7 @@ mod tests {
         let names: Vec<_> = reasons.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            vec!["cargo", "npm", "cmake", "gradle", "flutter"],
+            vec!["cargo", "npm", "cmake", "gradle", "flutter", "xcode"],
             "one reason per registered adapter"
         );
         let text = error.to_string();
@@ -683,7 +685,8 @@ mod tests {
                 && text.contains("no package.json")
                 && text.contains("no CMakeLists.txt")
                 && text.contains("no settings.gradle")
-                && text.contains("no pubspec.yaml"),
+                && text.contains("no pubspec.yaml")
+                && text.contains("no *.xcodeproj"),
             "{text}"
         );
     }

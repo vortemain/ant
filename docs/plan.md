@@ -204,6 +204,45 @@ implemented); the actions stay path-dependent (the generated `main.dart.js`
 can embed absolute paths, so no path-independence marker, matching npm/CMake);
 a real Flutter SDK run and Linux e2e are not yet measured.
 
+### D-039: Xcode (iOS) adapter — plan + toolchain, verified on macOS CI
+**Status:** Adopted 2026-11-15 (P5). An iOS app is detected by a root-level
+`*.xcodeproj` or `*.xcworkspace` (a pure iOS app keeps one at the root; a
+Flutter/React Native project keeps its iOS project in an `ios/` subfolder, so
+there is no collision with the Flutter adapter's `pubspec.yaml` detection). The
+single build action runs `xcodebuild -scheme <scheme> -configuration <config>
+-sdk <sdk> -derivedDataPath .ant/build build` — `-scheme` is omitted when
+unspecified (xcodebuild uses the project default), `-configuration` is `Release`
+by default (`--dev` for `Debug`), and `-sdk` is `iphoneos` (the device, the
+deliverable) by default (`iphonesimulator` for a credential-free simulator
+build). The declared inputs are the project package, `Package.swift`,
+`Podfile`, `Podfile.lock`, and `Sources`/`App` trees when present; the declared
+output is the `.ant/build` derived-data directory. The `.app` product name is
+not known without parsing the project, so — like the CMake adapter — no
+deliverable is claimed and the build directory is the only declared output.
+The cache policy is `Local` (not shared-remote-cacheable) because SPM clone
+sources and the Pods cache live outside the workspace and are undeclared inputs
+(the same stance as the Flutter and Gradle adapters). The toolchain identity is
+the version from `xcodebuild -version` and the SHA-256 digest of the resolved
+`xcodebuild` executable. `xcodebuild` is a real executable (an `xcrun` shim on
+macOS), so no `cmd /C` wrapper is needed; on a non-Mac it is simply absent and
+`generate` fails closed with a toolchain error. The front door routes
+`ant build ios` to the Xcode adapter (ios is Xcode-specific, like `android` is
+Gradle-specific) and rejects `ios` on a non-Xcode project before adapter
+selection with an honest reason. Verified by 10 `build-adapter` unit tests
+(detect recognizes/rejects, prefers xcworkspace, configuration/sdk validation,
+non-Xcode rejection, argv assembly with and without scheme, declared inputs,
+staging environment, cache policy) and 2 `front.rs` unit tests (configuration
+default/dev/flavor, ios target rejects non-Xcode). The toolchain-capture tests
+skip honestly where `xcodebuild` is absent (no Xcode on Linux/Windows) so the
+main CI matrix stays green, and run for real on a macOS CI runner
+(`verify-ios.yml`, `macos-latest`) where real Xcode is present. Honest limits:
+only the **build** verb is supported in this phase — a signed `.ipa` export (the
+full P5 success criterion) needs an Apple Developer identity and a
+provisioning profile the owner must supply, so a signed export is a later step;
+unsigned simulator and development builds need no credentials. Mac workers
+(`ant worker add` on a Mac) and certificate/provisioning-profile management are
+not yet implemented.
+
 ### D-031: Cheaper plan generation — `cargo metadata` cache
 **Status:** Adopted 2026-11-13 (P3). `cargo metadata` (the dependency-graph resolver invoked during plan generation) costs ~0.3–0.4 s per run — the dominant remaining cost on a no-change build. A per-user cache (`<user cache>/cargo-metadata.json`, `ANT_CACHE_HOME` overrides) stores the parsed JSON keyed on the canonical workspace root, adapter options, `cargo --version` output, the cargo executable's SHA-256 digest, and content digests of every `Cargo.toml` and `Cargo.lock` the project contains. On a cache hit the `cargo metadata` call is skipped entirely; the tree walk (`declare_project`) still runs on every invocation, so new, removed, or modified project files are detected. Any cache problem (missing file, stale entry, unreadable manifest, changed lock, different toolchain) falls back to a live `cargo metadata` call. The cache is best-effort write (failures are silently ignored — the next run re-runs `cargo metadata`). `cargo --version` still runs on every invocation as the toolchain-identity safety net (a binary replaced with identical size and preserved mtime is not re-hashed by the toolchain digest cache). Measured by 6 new `build-adapter` unit tests: round-trip hit, manifest-change miss, options-change miss, toolchain-change miss, lock-change miss, and same-key replacement.
 

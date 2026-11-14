@@ -31,7 +31,7 @@ const ARTIFACT_MARKER: &str = ".ant-artifacts";
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
-    /// Adapter name (`cargo`, `npm`, `cmake`, `gradle`, `flutter`); auto-detected when omitted.
+    /// Adapter name (`cargo`, `npm`, `cmake`, `gradle`, `flutter`, `xcode`); auto-detected when omitted.
     pub adapter: Option<String>,
     /// Where `ant build` collects deliverables (workspace-relative).
     pub out_dir: Option<String>,
@@ -90,7 +90,7 @@ fn choose_adapter(
         ),
         build_adapter::SelectionError::NoMatch(_) => format!(
             "no supported project found in {} (Ant currently builds Cargo, npm, CMake, \
-             Gradle, and Flutter projects; see docs/vision.md for what is coming)",
+             Gradle, Flutter, and Xcode projects; see docs/vision.md for what is coming)",
             shown(root)
         ),
         other => other.to_string(),
@@ -145,6 +145,11 @@ fn build_options(
     if accepts("mode") {
         chosen.insert("mode".into(), "release".into());
     }
+    // Xcode (iOS): Release by default (like cargo/cmake); --dev selects Debug,
+    // --release restores Release, ant.toml's `configuration` sits between.
+    if accepts("configuration") {
+        chosen.insert("configuration".into(), "Release".into());
+    }
     for (key, value) in configured {
         chosen.insert(key.clone(), value.clone());
     }
@@ -161,6 +166,9 @@ fn build_options(
         if accepts("mode") {
             chosen.insert("mode".into(), "debug".into());
         }
+        if accepts("configuration") {
+            chosen.insert("configuration".into(), "Debug".into());
+        }
     }
     if release {
         if accepts("profile") {
@@ -175,27 +183,35 @@ fn build_options(
         if accepts("mode") {
             chosen.insert("mode".into(), "release".into());
         }
+        if accepts("configuration") {
+            chosen.insert("configuration".into(), "Release".into());
+        }
     }
     let flavor = match (
         chosen.get("profile"),
         chosen.get("config"),
         chosen.get("task"),
         chosen.get("mode"),
+        chosen.get("configuration"),
     ) {
-        (Some(profile), _, _, _) if profile == "dev" => "debug",
-        (_, Some(config), _, _) if config == "Debug" => "debug",
-        (_, _, Some(task), _) if build_adapter::gradle::release_task(task) => "release",
+        (Some(profile), _, _, _, _) if profile == "dev" => "debug",
+        (_, Some(config), _, _, _) if config == "Debug" => "debug",
+        (_, _, Some(task), _, _) if build_adapter::gradle::release_task(task) => "release",
         // `assembleDebug` is Gradle's default build; like the plain npm build it
         // shows no flavor label, so the summary stays `ant build · gradle ·
         // 1 step`. Only the release task (assembleRelease/bundleRelease) labels
         // the build, so a release run is obvious at a glance.
-        (_, _, Some(task), _) if task == "assembleDebug" => "default",
+        (_, _, Some(task), _, _) if task == "assembleDebug" => "default",
         // Flutter's build mode is a real choice (like cargo's profile), so it is
         // always labeled: release (the default), debug, or profile.
-        (_, _, _, Some(mode)) if mode == "debug" => "debug",
-        (_, _, _, Some(mode)) if mode == "profile" => "profile",
-        (_, _, _, Some(mode)) if mode == "release" => "release",
-        (Some(_), _, _, _) | (_, Some(_), _, _) => "release",
+        (_, _, _, Some(mode), _) if mode == "debug" => "debug",
+        (_, _, _, Some(mode), _) if mode == "profile" => "profile",
+        (_, _, _, Some(mode), _) if mode == "release" => "release",
+        // Xcode's configuration is a real choice (Debug/Release), labeled like
+        // the others; Release is the default.
+        (_, _, _, _, Some(config)) if config == "Debug" => "debug",
+        (_, _, _, _, Some(config)) if config == "Release" => "release",
+        (Some(_), _, _, _, _) | (_, Some(_), _, _, _) => "release",
         _ => "default",
     };
     let mut options = AdapterOptions::new();
@@ -227,7 +243,7 @@ fn safe_relative_dir(value: &str) -> Result<PathBuf, String> {
 // ---------------------------------------------------------------------------
 
 const BUILD_USAGE: &str = "usage: ant build [--dev|--release] [--fresh] [--no-serve] \
-    [android] [--project PATH] [--jobs N] [--verbose]";
+    [android] [ios] [--project PATH] [--jobs N] [--verbose]";
 
 pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let mut project = None;
@@ -237,6 +253,7 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
     let mut fresh = false;
     let mut no_serve = false;
     let mut android = false;
+    let mut ios = false;
     let mut jobs = None;
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = args.next() {
@@ -247,6 +264,7 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             "--verbose" => verbose = true,
             "--fresh" => fresh = true,
             "android" => android = true,
+            "ios" => ios = true,
             "--project" => project = Some(args.next().ok_or("--project requires a path")?),
             "--jobs" => {
                 jobs = Some(
@@ -258,8 +276,8 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             }
             target if !target.starts_with('-') => {
                 return Err(format!(
-                    "build target '{target}' is not supported yet: today 'android' is the only \
-                     named target; iOS arrives in roadmap phase P5 (docs/plan.md)"
+                    "build target '{target}' is not supported yet: today 'android' and 'ios' are the \
+                     named targets (ios needs Xcode on a Mac, docs/plan.md)"
                 ));
             }
             other => return Err(format!("unexpected argument '{other}'\n{BUILD_USAGE}")),
@@ -289,10 +307,34 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             );
         }
     }
+    // The `ios` target is Xcode-only and ships in roadmap phase P5
+    // (docs/plan.md). Like `android`, asking for it on a project Xcode did not
+    // detect says so before adapter selection, so the user learns where iOS
+    // lives instead of a misleading adapter prompt.
+    if ios {
+        let xcode_match = build_adapter::detect_all(&root).into_iter().any(|report| {
+            report.adapter == "xcode" && report.outcome.as_ref().is_ok_and(|d| d.supported)
+        });
+        if !xcode_match {
+            return Err(
+                "build target 'ios' needs an Xcode project (a *.xcodeproj or *.xcworkspace); \
+                 Ant's iOS support shipped in roadmap phase P5 (docs/plan.md), but Xcode did not \
+                 detect this project. iOS builds also need Xcode on a Mac. Run `ant build` for the \
+                 detected project, or `ant init --adapter xcode` only on an iOS project."
+                    .to_owned(),
+            );
+        }
+    }
     let adapter = choose_adapter(&root, config.adapter.as_deref())?;
     if android && adapter.name() != "gradle" {
         return Err(format!(
             "build target 'android': {} detected this project, and it is not an Android one",
+            adapter.name()
+        ));
+    }
+    if ios && adapter.name() != "xcode" {
+        return Err(format!(
+            "build target 'ios': {} detected this project, and it is not an iOS (Xcode) one",
             adapter.name()
         ));
     }
@@ -763,5 +805,58 @@ mod tests {
         configured.insert("mode".to_owned(), "profile".to_owned());
         let (options, flavor) = build_options(flutter, &configured, false, false).expect("options");
         assert_eq!((options.get("mode"), flavor), (Some("profile"), "profile"));
+    }
+
+    #[test]
+    fn xcode_configuration_default_release_and_dev_overrides() {
+        // Xcode builds Release by default (like cargo/cmake); --dev selects
+        // Debug, --release restores Release, and the configuration is labeled.
+        let xcode = build_adapter::adapter("xcode").expect("xcode");
+        let (options, flavor) =
+            build_options(xcode, &BTreeMap::new(), false, false).expect("options");
+        assert_eq!(
+            (options.get("configuration"), flavor),
+            (Some("Release"), "release")
+        );
+        let (options, flavor) =
+            build_options(xcode, &BTreeMap::new(), true, false).expect("options");
+        assert_eq!(
+            (options.get("configuration"), flavor),
+            (Some("Debug"), "debug")
+        );
+        let mut configured = BTreeMap::new();
+        configured.insert("configuration".to_owned(), "Debug".to_owned());
+        let (options, flavor) = build_options(xcode, &configured, false, false).expect("options");
+        assert_eq!(
+            (options.get("configuration"), flavor),
+            (Some("Debug"), "debug")
+        );
+    }
+
+    #[test]
+    fn ios_target_rejects_non_xcode_project() {
+        // The `ios` target is Xcode-specific: requesting it on a project Xcode
+        // did not detect fails before adapter selection with an honest reason.
+        use std::ffi::OsString;
+        let dir = std::env::temp_dir().join(format!(
+            "ant-ios-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = ["ios", "--project"]
+            .iter()
+            .map(|s| OsString::from(*s))
+            .chain(std::iter::once(OsString::from(dir.clone())));
+        // ios on a non-Xcode project (and not any other adapter's) is refused
+        // before adapter selection.
+        let result = build_command(args);
+        assert!(result.is_err(), "ios on a non-Xcode project must fail");
+        let message = result.err().unwrap();
+        assert!(message.contains("needs an Xcode project"), "{message}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
