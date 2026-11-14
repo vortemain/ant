@@ -37,6 +37,7 @@
 
 pub mod cargo;
 pub mod cmake;
+pub mod flutter;
 pub mod gradle;
 pub mod npm;
 
@@ -261,6 +262,7 @@ pub fn available() -> Vec<&'static dyn BuildAdapter> {
         &npm::NpmAdapter,
         &cmake::CmakeAdapter,
         &gradle::GradleAdapter,
+        &flutter::FlutterAdapter,
     ]
 }
 
@@ -672,7 +674,7 @@ mod tests {
         let names: Vec<_> = reasons.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            vec!["cargo", "npm", "cmake", "gradle"],
+            vec!["cargo", "npm", "cmake", "gradle", "flutter"],
             "one reason per registered adapter"
         );
         let text = error.to_string();
@@ -680,7 +682,8 @@ mod tests {
             text.contains("no Cargo.toml")
                 && text.contains("no package.json")
                 && text.contains("no CMakeLists.txt")
-                && text.contains("no settings.gradle"),
+                && text.contains("no settings.gradle")
+                && text.contains("no pubspec.yaml"),
             "{text}"
         );
     }

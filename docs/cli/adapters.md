@@ -23,6 +23,9 @@ passes adapter-specific settings:
 | cargo | `profile` | `dev` (default), `release` | `release` adds `--release`; outputs map to `<target-dir>/release` |
 | npm | `outputs` | `none` (default), `entry-points` | declare each package's `main`/`types`/`bin` entries as outputs |
 | cmake | `config` | `Debug` (default), `Release` | `CMAKE_BUILD_TYPE` at configure, `--config` at build |
+| gradle | `task` | `assembleDebug` (default), `assembleRelease`, `bundleRelease` | the wrapper task to run |
+| flutter | `target` | `web` (default) | the Flutter build target; `web` is the only supported target in this phase |
+| flutter | `mode` | `release` (default), `debug`, `profile` | Flutter build mode, always shown in the summary |
 
 Options are adapter-defined strings, so new options never change the CLI
 grammar or the adapter contract. An unknown key (naming the adapter's
@@ -56,7 +59,8 @@ adapter. No plan file is written on any selection failure.
 does not create the `.ant/tmp` staging directory), cannot be combined with
 `--adapter` or `--out`, and exits 0 when at least one adapter recognizes the
 project, 1 otherwise. Detection is a marker-file check (`Cargo.toml`, `CMakeLists.txt`,
-`package.json`); a positive detection does not guarantee generation succeeds
+`package.json`, `settings.gradle` + wrapper, `pubspec.yaml` with a Flutter
+SDK reference); a positive detection does not guarantee generation succeeds
 (for example an npm project without a `build` script is detected but rejected
 at generation).
 
@@ -307,6 +311,63 @@ wrapper task (`--option task=assembleDebug|assembleRelease`, default
   identified only by the environment values above (not digested); the
   toolchain identity is the wrapper jar digest, the distribution, and
   `java --version`. Only the single-root wrapper layout is supported.
+
+## The `flutter` adapter (P6, D-038)
+
+Detects a Flutter app or plugin: a `pubspec.yaml` whose dependencies reference
+the Flutter SDK (`sdk: flutter`). A plain Dart package (CLI, server) has no
+such reference and is not recognized — Ant does not yet build non-Flutter
+Dart. Generation emits one `flutter build web --<mode>` action and re-validates
+the plan through the build graph before any side effect.
+
+- **Target (T3.13):** only `web` is supported in this phase (`--option
+  target=web`, the default). Its output layout (`build/web/index.html`,
+  `build/web/main.dart.js`) is deterministic and portable, so the declared
+  outputs are real. Other targets (`apk`, `ios`, desktop) have
+  platform-SDK-dependent layouts and arrive in a later roadmap phase;
+  `--option target=` anything but `web` fails closed.
+- **Mode:** `release` (default), `debug`, or `profile` (`--option mode=...`).
+  Flutter's build mode is a real choice (like cargo's profile), so the summary
+  always labels it: `ant build · flutter · release · 1 step` (or `debug`/`profile`).
+  `--dev` selects debug, `--release` restores release.
+- **Inputs declared:** `pubspec.yaml`, `pubspec.lock` when present, and the
+  `lib` (Dart sources), `web` (web template) and `assets` trees when present.
+  Pub package sources live in the pub cache (`~/.pub-cache` / `PUB_CACHE`)
+  outside the workspace and are intentionally not declared — they are the
+  derived product of `flutter pub get` against the registry, not source.
+- **Outputs declared:** the deterministic web files `build/web/index.html` and
+  `build/web/main.dart.js`, **verified, not trusted** (the executor fails the
+  action when one is not created).
+- **Caching:** because pub package sources and the bundled Dart VM are
+  undeclared inputs, generated actions are `cache_policy: Local` (D-028): this
+  machine may reuse its own result (pubspec pins versions locally) but it is
+  never shared — the same honest stance the Gradle adapter takes when its
+  dependencies are not locally declared.
+- **Truthful toolchain identity** from the real Flutter SDK: `flutter
+  --version` for the version, and the SHA-256 digest of the bundled Dart
+  executable the build actually runs (`<flutter_bin>/cache/dart-sdk/bin/
+  dart<EXE_SUFFIX>`). `flutter` itself is a launcher script (`flutter.bat` on
+  Windows), not a standalone executable; the bundled Dart VM is the truthful
+  runtime identity, the way `node` is for npm.
+- **Windows invocation:** `flutter` is `flutter.bat` and `CreateProcess`
+  cannot launch batch scripts directly, so the argv is
+  `cmd /C flutter build ...` on Windows and `flutter build ...` elsewhere.
+- **Workspace-relative scratch environment:** like the other adapters, every
+  generated action sets `TMP`/`TEMP` (plus `TMPDIR` on non-Windows) to `.ant/tmp`,
+  resolved against the action's working directory.
+- **Honest limits:** Flutter actions are honestly **path-dependent** (no
+  D-030 marker): the Dart compiler and bundler write absolute source paths
+  into source maps and the generated `main.dart.js`, so outputs may embed this
+  clone's path and a shared cache could restore a wrong binary into a second
+  clone. Keys therefore keep the workspace path and a second clone in another
+  folder rebuilds; the marker exists only for adapters whose outputs Ant can
+  prove path-independent. The Flutter SDK itself is a host installation,
+  identified by its launcher location and the bundled Dart digest, not a
+  workspace input. Verified end to end: adapt → run builds a Flutter web project
+  through a stub SDK (no Flutter install, Dart SDK, or network needed), the
+  declared web files flow from `lib/main.dart` to `dist/`, and a no-change
+  rebuild reuses the local result without running Flutter again
+  (`ant-cli/tests/flutter_build.rs`).
 
 ## Sandbox compatibility
 

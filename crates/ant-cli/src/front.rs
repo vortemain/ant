@@ -31,7 +31,7 @@ const ARTIFACT_MARKER: &str = ".ant-artifacts";
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
-    /// Adapter name (`cargo`, `npm`, `cmake`); auto-detected when omitted.
+    /// Adapter name (`cargo`, `npm`, `cmake`, `gradle`, `flutter`); auto-detected when omitted.
     pub adapter: Option<String>,
     /// Where `ant build` collects deliverables (workspace-relative).
     pub out_dir: Option<String>,
@@ -89,8 +89,8 @@ fn choose_adapter(
             names[0]
         ),
         build_adapter::SelectionError::NoMatch(_) => format!(
-            "no supported project found in {} (Ant currently builds Cargo, npm, CMake, and \
-             Gradle projects; see docs/vision.md for what is coming)",
+            "no supported project found in {} (Ant currently builds Cargo, npm, CMake, \
+             Gradle, and Flutter projects; see docs/vision.md for what is coming)",
             shown(root)
         ),
         other => other.to_string(),
@@ -140,6 +140,11 @@ fn build_options(
     if accepts("task") {
         chosen.insert("task".into(), "assembleDebug".into());
     }
+    // Flutter: release by default; --dev selects debug, --release restores
+    // release, and ant.toml's `mode` sits between (same precedence as task).
+    if accepts("mode") {
+        chosen.insert("mode".into(), "release".into());
+    }
     for (key, value) in configured {
         chosen.insert(key.clone(), value.clone());
     }
@@ -153,6 +158,9 @@ fn build_options(
         if accepts("task") {
             chosen.insert("task".into(), "assembleDebug".into());
         }
+        if accepts("mode") {
+            chosen.insert("mode".into(), "debug".into());
+        }
     }
     if release {
         if accepts("profile") {
@@ -164,21 +172,30 @@ fn build_options(
         if accepts("task") {
             chosen.insert("task".into(), "assembleRelease".into());
         }
+        if accepts("mode") {
+            chosen.insert("mode".into(), "release".into());
+        }
     }
     let flavor = match (
         chosen.get("profile"),
         chosen.get("config"),
         chosen.get("task"),
+        chosen.get("mode"),
     ) {
-        (Some(profile), _, _) if profile == "dev" => "debug",
-        (_, Some(config), _) if config == "Debug" => "debug",
-        (_, _, Some(task)) if build_adapter::gradle::release_task(task) => "release",
+        (Some(profile), _, _, _) if profile == "dev" => "debug",
+        (_, Some(config), _, _) if config == "Debug" => "debug",
+        (_, _, Some(task), _) if build_adapter::gradle::release_task(task) => "release",
         // `assembleDebug` is Gradle's default build; like the plain npm build it
         // shows no flavor label, so the summary stays `ant build · gradle ·
         // 1 step`. Only the release task (assembleRelease/bundleRelease) labels
         // the build, so a release run is obvious at a glance.
-        (_, _, Some(task)) if task == "assembleDebug" => "default",
-        (Some(_), _, _) | (_, Some(_), _) => "release",
+        (_, _, Some(task), _) if task == "assembleDebug" => "default",
+        // Flutter's build mode is a real choice (like cargo's profile), so it is
+        // always labeled: release (the default), debug, or profile.
+        (_, _, _, Some(mode)) if mode == "debug" => "debug",
+        (_, _, _, Some(mode)) if mode == "profile" => "profile",
+        (_, _, _, Some(mode)) if mode == "release" => "release",
+        (Some(_), _, _, _) | (_, Some(_), _, _) => "release",
         _ => "default",
     };
     let mut options = AdapterOptions::new();
@@ -729,5 +746,22 @@ mod tests {
         );
         let (options, _) = build_options(gradle, &configured, false, true).expect("options");
         assert_eq!(options.get("task"), Some("assembleRelease"));
+    }
+
+    #[test]
+    fn flutter_release_default_and_dev_overrides() {
+        // Flutter builds release by default; --dev selects debug, --release
+        // restores release, and the mode is always shown in the summary.
+        let flutter = build_adapter::adapter("flutter").expect("flutter");
+        let (options, flavor) =
+            build_options(flutter, &BTreeMap::new(), false, false).expect("options");
+        assert_eq!((options.get("mode"), flavor), (Some("release"), "release"));
+        let (options, flavor) =
+            build_options(flutter, &BTreeMap::new(), true, false).expect("options");
+        assert_eq!((options.get("mode"), flavor), (Some("debug"), "debug"));
+        let mut configured = BTreeMap::new();
+        configured.insert("mode".to_owned(), "profile".to_owned());
+        let (options, flavor) = build_options(flutter, &configured, false, false).expect("options");
+        assert_eq!((options.get("mode"), flavor), (Some("profile"), "profile"));
     }
 }
