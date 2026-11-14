@@ -47,6 +47,12 @@
 //!   rejected (a source cannot be an output), and asking for entry points on a
 //!   package that declares none fails rather than silently declaring nothing.
 //!   `files` and `exports` are never used.
+//! - Framework-aware outputs: Vite (and Vite-based meta-frameworks) write to
+//!   `dist/` and Next.js writes to `.next/`. These are deterministic output
+//!   layouts, so the adapter declares them automatically as `Tree` outputs
+//!   when the framework is detected in `dependencies`/`devDependencies`, no
+//!   option needed. Entry-point outputs (above) are declared on top of the
+//!   framework output when requested.
 //! - Toolchain identity is captured from the real `node` runtime: the resolved
 //!   PATH executable's SHA-256 digest and `node --version`. `npm` is a script
 //!   (`npm.cmd` on Windows, a JS file elsewhere), not a standalone
@@ -280,7 +286,21 @@ fn build_action(
     working_directory: PathBuf,
     inputs: BTreeMap<PathBuf, InputKind>,
     outputs: BTreeSet<PathBuf>,
+    framework: Option<PathBuf>,
 ) -> Action {
+    // Framework outputs (Vite's `dist`, Next.js's `.next`) are declared
+    // automatically as Tree outputs; entry-point outputs are File outputs.
+    let mut action_outputs: Vec<Output> = Vec::new();
+    if let Some(path) = framework {
+        action_outputs.push(Output {
+            path,
+            kind: OutputKind::Tree,
+        });
+    }
+    action_outputs.extend(outputs.into_iter().map(|path| Output {
+        path,
+        kind: OutputKind::File,
+    }));
     Action {
         schema_version: 1,
         id,
@@ -290,14 +310,8 @@ fn build_action(
             .into_iter()
             .map(|(path, kind)| Input { path, kind })
             .collect(),
-        // Outputs only when the user asserted entry points (see module docs).
-        outputs: outputs
-            .into_iter()
-            .map(|path| Output {
-                path,
-                kind: OutputKind::File,
-            })
-            .collect(),
+        // Outputs: framework outputs (Tree) + entry-point outputs (File).
+        outputs: action_outputs,
         environment: staging_environment(),
         // node_modules content is an undeclared input, so these actions must
         // never claim cache eligibility.
@@ -307,6 +321,28 @@ fn build_action(
         timeout_ms: None,
         resources: None,
     }
+}
+
+/// Detect a known framework's output directory from `package.json`.
+///
+/// Vite (and Vite-based meta-frameworks) write to `dist`; Next.js writes to
+/// `.next`. Only `dependencies`/`devDependencies` are checked
+/// (`peerDependencies` are advisory, not installed). Returns `None` for
+/// unknown frameworks so the caller falls back to the npm adapter's default
+/// (no outputs, or entry-points on request).
+fn detect_framework(package: &serde_json::Value) -> Option<PathBuf> {
+    let has = |field: &str, name: &str| -> bool {
+        package.get(field).and_then(|deps| deps.get(name)).is_some()
+    };
+    // Vite: usually a devDependency; some templates list it as a dependency.
+    if has("dependencies", "vite") || has("devDependencies", "vite") {
+        return Some(PathBuf::from("dist"));
+    }
+    // Next.js: always a dependency (it provides the server runtime).
+    if has("dependencies", "next") {
+        return Some(PathBuf::from(".next"));
+    }
+    None
 }
 
 fn single_package_plan(
@@ -333,6 +369,7 @@ fn single_package_plan(
             entry_point_outputs(package, Path::new(""), "package.json", &inputs)?
         }
     };
+    let framework = detect_framework(package);
     let id = package
         .get("name")
         .and_then(|name| name.as_str())
@@ -340,7 +377,7 @@ fn single_package_plan(
         .unwrap_or_else(|| "build".to_owned());
     let mut file = PlanFile::new();
     file.actions.push(PlanAction {
-        action: build_action(id, PathBuf::from("."), inputs, outputs),
+        action: build_action(id, PathBuf::from("."), inputs, outputs, framework),
         dependencies: Vec::new(),
     });
     Ok((file, vec![PathBuf::from(".ant").join("tmp")]))
@@ -464,9 +501,16 @@ fn workspace_plan(
                 &inputs,
             )?,
         };
+        let framework = detect_framework(&package.manifest).map(|d| package.dir.join(d));
         staging_dirs.push(package.dir.join(".ant").join("tmp"));
         file.actions.push(PlanAction {
-            action: build_action(name.clone(), package.dir.clone(), inputs, outputs),
+            action: build_action(
+                name.clone(),
+                package.dir.clone(),
+                inputs,
+                outputs,
+                framework,
+            ),
             dependencies: edges.into_iter().collect(),
         });
     }
@@ -1258,5 +1302,101 @@ mod tests {
             ],
         );
         assert!(error.contains("generated plan is invalid"), "{error}");
+    }
+
+    #[test]
+    fn vite_project_declares_dist_as_tree_output() {
+        let adapter = NpmAdapter;
+        let dir = TempDir::new("vite");
+        write(
+            &dir.path().join("package.json"),
+            "{\"name\":\"vite-app\",\"scripts\":{\"build\":\"vite build\"},\"devDependencies\":{\"vite\":\"^5\"}}",
+        );
+        let plan = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        assert_eq!(plan.actions.len(), 1);
+        let action = &plan.actions[0].action;
+        assert_eq!(action.id, "vite-app");
+        // Vite's `dist` is declared automatically as a Tree output.
+        assert_eq!(action.outputs.len(), 1);
+        assert_eq!(action.outputs[0].path, PathBuf::from("dist"));
+        assert_eq!(action.outputs[0].kind, OutputKind::Tree);
+    }
+
+    #[test]
+    fn next_project_declares_next_as_tree_output() {
+        let adapter = NpmAdapter;
+        let dir = TempDir::new("next");
+        write(
+            &dir.path().join("package.json"),
+            "{\"name\":\"next-app\",\"scripts\":{\"build\":\"next build\"},\"dependencies\":{\"next\":\"^14\"}}",
+        );
+        let plan = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        assert_eq!(plan.actions.len(), 1);
+        let action = &plan.actions[0].action;
+        assert_eq!(action.id, "next-app");
+        // Next.js's `.next` is declared automatically as a Tree output.
+        assert_eq!(action.outputs.len(), 1);
+        assert_eq!(action.outputs[0].path, PathBuf::from(".next"));
+        assert_eq!(action.outputs[0].kind, OutputKind::Tree);
+    }
+
+    #[test]
+    fn framework_output_combines_with_entry_points() {
+        let adapter = NpmAdapter;
+        let dir = TempDir::new("vite-ep");
+        write(
+            &dir.path().join("package.json"),
+            "{\"name\":\"vite-lib\",\"main\":\"dist/index.js\",\"scripts\":{\"build\":\"vite build\"},\"devDependencies\":{\"vite\":\"^5\"}}",
+        );
+        let plan = adapter
+            .generate(dir.path(), &options(&[("outputs", "entry-points")]))
+            .expect("generate");
+        let action = &plan.actions[0].action;
+        // Framework output (Tree) + entry-point output (File) coexist.
+        assert_eq!(action.outputs.len(), 2);
+        let tree = action
+            .outputs
+            .iter()
+            .find(|o| o.kind == OutputKind::Tree)
+            .expect("framework Tree output");
+        assert_eq!(tree.path, PathBuf::from("dist"));
+        let file = action
+            .outputs
+            .iter()
+            .find(|o| o.kind == OutputKind::File)
+            .expect("entry-point File output");
+        assert_eq!(file.path, PathBuf::from("dist").join("index.js"));
+    }
+
+    #[test]
+    fn vite_workspace_package_declares_dist() {
+        let adapter = NpmAdapter;
+        let dir = TempDir::new("vite-ws");
+        write(
+            &dir.path().join("package.json"),
+            "{\"name\":\"root\",\"private\":true,\"workspaces\":[\"packages/*\"],\"scripts\":{\"build\":\"npm run build --workspaces\"}}",
+        );
+        write(
+            &dir.path().join("packages/web/package.json"),
+            "{\"name\":\"@demo/web\",\"scripts\":{\"build\":\"vite build\"},\"devDependencies\":{\"vite\":\"^5\"}}",
+        );
+        write(&dir.path().join("packages/web/src/index.ts"), "\n");
+        let plan = adapter
+            .generate(dir.path(), &AdapterOptions::new())
+            .expect("generate");
+        assert_eq!(plan.actions.len(), 1);
+        let action = &plan.actions[0].action;
+        assert_eq!(action.id, "@demo/web");
+        // Workspace package's `dist` is workspace-relative.
+        assert_eq!(action.outputs.len(), 1);
+        assert_eq!(
+            action.outputs[0].path,
+            PathBuf::from("packages").join("web").join("dist")
+        );
+        assert_eq!(action.outputs[0].kind, OutputKind::Tree);
     }
 }

@@ -29,6 +29,8 @@ passes adapter-specific settings:
 | xcode | `scheme` | any scheme name | the Xcode scheme to build; omitted uses the project default |
 | xcode | `configuration` | `Release` (default), `Debug` | the Xcode build configuration |
 | xcode | `sdk` | `iphoneos` (default), `iphonesimulator` | the target SDK; `iphonesimulator` needs no signing identity |
+| go | `goal` | `build` (default), `vet` | `build` compiles the root main package into `dist/<name>`, `vet` runs `go vet ./...` (checks all packages, no binary) |
+| python | `format` | `wheel` (default), `sdist`, `all` | the build artifact format; `wheel` builds only the wheel, `sdist` only the source distribution, `all` both |
 
 Options are adapter-defined strings, so new options never change the CLI
 grammar or the adapter contract. An unknown key (naming the adapter's
@@ -210,6 +212,12 @@ and emits a single `npm run build` action, with:
   package that declares none fails rather than silently declaring nothing.
   An implicit default `main` (`index.js` when absent) is never declared.
   `files` and `exports` are never used.
+- **Framework-aware outputs:** Vite (and Vite-based meta-frameworks) write
+  to `dist/` and Next.js writes to `.next/`. These are deterministic output
+  layouts, so the adapter declares them automatically as `Tree` outputs when
+  the framework is detected in `dependencies`/`devDependencies` — no option
+  needed. Entry-point outputs (above) are declared on top of the framework
+  output when requested.
 - **Truthful toolchain identity** from the real `node` runtime: the resolved
   PATH `node` executable's SHA-256 digest and `node --version`. The build is
   driven by `npm`, but `npm` is a script (`npm.cmd` on Windows, a JS file
@@ -412,6 +420,76 @@ claimed and the build directory is the only declared output.
   Xcode is present — exercising the genuine toolchain capture and plan
   assembly on Apple hardware without needing an Apple Developer identity or a
   sample app (the adapter builds a plan; it does not run `xcodebuild build`).
+
+## The `go` adapter (P6)
+
+A Go module is a directory with a `go.mod` (the module manifest). The adapter
+reads the module path from `go.mod`, derives the binary name from its last path
+segment, and generates one action.
+
+- **Build:** `go build -o dist/<name><EXE_SUFFIX> .` — compiles the root main
+  package. The output binary path is deterministic: `dist/<name><EXE_SUFFIX>`,
+  where `<name>` is the last segment of the module path (e.g.
+  `github.com/user/myapp` → `myapp` → `dist/myapp` on Linux, `dist/myapp.exe`
+  on Windows). It is declared as a `File` output and verified to exist by the
+  executor after the run.
+- **Vet:** `go vet ./...` — checks all packages, produces no binary. No outputs
+  are declared. Selected with `--option goal=vet`.
+- **Declared inputs:** `go.mod` (the module manifest), `go.sum` (pinned
+  hashes) when present, `vendor/` (vendored deps) when present, and `*.go`
+  source files at the root. The Go module cache (`~/go/pkg/mod`) is outside
+  the workspace and intentionally not declared.
+- **Honest limits:** only the root main package is built. A library module
+  (`package foo`, no `func main`) compiles but produces no deliverable; `go
+  build` with `-o` still writes a file, but the action fails at execution time
+  when the package has no `main` — the adapter produces a valid plan
+  regardless. A `cmd/` subdirectory layout arrives in a later phase.
+- **Cache policy `Never`:** the Go module proxy and cache are undeclared
+  inputs (they live outside the workspace), so generated actions never claim
+  cache eligibility (D-003, D-010) — the same stance as cargo and npm for
+  registry dependency sources.
+- **Truthful toolchain identity** from the real `go`: the version from
+  `go version` and the SHA-256 digest of the resolved `go` executable. `go` is
+  a standalone executable (`go.exe` on Windows), not a batch shim, so no
+  `cmd /C` wrapper is needed.
+- **Workspace-relative scratch:** `TMP`/`TEMP` (plus `TMPDIR` off Windows)
+  point at `.ant/tmp`, the staging pattern shared with the other adapters.
+
+## The `python` adapter (P6)
+
+A Python project has a `pyproject.toml` (PEP 518/621, with a `[build-system]`
+table) or a legacy `setup.py`. The adapter generates one action that runs
+`python -m build`, declaring the workspace inputs it can honestly cover and
+the `dist/` tree it produces.
+
+- **Build:** `python -m build [--wheel | --sdist]` — calls the PEP 517 backend
+declared in `pyproject.toml`'s `[build-system]` (or the legacy
+  `setup.py`/`setup.cfg` metadata) and writes a wheel and an sdist into
+  `dist/`. `--option format=wheel` (default) builds only the wheel,
+  `--option format=sdist` only the source distribution, `--option format=all`
+  both (no flag).
+- **Detection:** a `pyproject.toml` with a `[build-system]` table is a
+  buildable package (PEP 518). One without it may be tooling-only config
+  (ruff, black, etc.) and is not recognized unless `setup.py` is also present.
+  A bare `setup.py` is recognized (legacy).
+- **Declared inputs:** `pyproject.toml`, `setup.py`, `setup.cfg`, and
+  `requirements.txt` when present, and the `src/` source tree when present.
+  PEP 517 build dependencies and the pip registry are outside the workspace
+  and intentionally not declared.
+- **Declared output:** `dist/` (`OutputKind::Tree`). A wheel's filename
+  encodes the version, platform, and Python tag — all deterministic for a given
+  project, but not a fixed name the adapter can hardcode. The tree output
+  covers the wheel (`dist/*.whl`) and the sdist (`dist/*.tar.gz`) without
+  guessing either name.
+- **Cache policy `Never`:** PEP 517 build dependencies and the pip registry are
+  undeclared inputs (they live outside the workspace), so generated actions
+  never claim cache eligibility (D-003, D-010).
+- **Truthful toolchain identity** from the real `python` runtime: the resolved
+  PATH executable's SHA-256 digest and `python --version`. `python` is a
+  standalone executable (`python3` on Linux, `python.exe` on Windows), not a
+  batch shim, so no `cmd /C` wrapper is needed on Windows.
+- **Workspace-relative scratch:** `TMP`/`TEMP` (plus `TMPDIR` off Windows)
+  point at `.ant/tmp`, the staging pattern shared with the other adapters.
 
 ## Sandbox compatibility
 

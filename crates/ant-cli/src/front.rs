@@ -31,7 +31,7 @@ const ARTIFACT_MARKER: &str = ".ant-artifacts";
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
-    /// Adapter name (`cargo`, `npm`, `cmake`, `gradle`, `flutter`, `xcode`); auto-detected when omitted.
+    /// Adapter name (`cargo`, `npm`, `cmake`, `gradle`, `flutter`, `xcode`, `go`, `python`); auto-detected when omitted.
     pub adapter: Option<String>,
     /// Where `ant build` collects deliverables (workspace-relative).
     pub out_dir: Option<String>,
@@ -90,7 +90,7 @@ fn choose_adapter(
         ),
         build_adapter::SelectionError::NoMatch(_) => format!(
             "no supported project found in {} (Ant currently builds Cargo, npm, CMake, \
-             Gradle, Flutter, and Xcode projects; see docs/vision.md for what is coming)",
+             Gradle, Flutter, Xcode, Go, and Python projects; see docs/vision.md for what is coming)",
             shown(root)
         ),
         other => other.to_string(),

@@ -38,8 +38,10 @@
 pub mod cargo;
 pub mod cmake;
 pub mod flutter;
+pub mod go;
 pub mod gradle;
 pub mod npm;
+pub mod python;
 pub mod xcode;
 
 use build_graph::{GraphError, PlanFile};
@@ -265,6 +267,8 @@ pub fn available() -> Vec<&'static dyn BuildAdapter> {
         &gradle::GradleAdapter,
         &flutter::FlutterAdapter,
         &xcode::XcodeAdapter,
+        &go::GoAdapter,
+        &python::PythonAdapter,
     ]
 }
 
@@ -676,7 +680,9 @@ mod tests {
         let names: Vec<_> = reasons.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            vec!["cargo", "npm", "cmake", "gradle", "flutter", "xcode"],
+            vec![
+                "cargo", "npm", "cmake", "gradle", "flutter", "xcode", "go", "python"
+            ],
             "one reason per registered adapter"
         );
         let text = error.to_string();
@@ -686,7 +692,9 @@ mod tests {
                 && text.contains("no CMakeLists.txt")
                 && text.contains("no settings.gradle")
                 && text.contains("no pubspec.yaml")
-                && text.contains("no *.xcodeproj"),
+                && text.contains("no *.xcodeproj")
+                && text.contains("no go.mod")
+                && text.contains("no pyproject.toml"),
             "{text}"
         );
     }
