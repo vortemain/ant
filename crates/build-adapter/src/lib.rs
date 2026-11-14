@@ -438,8 +438,19 @@ pub(crate) fn is_executable(path: &Path) -> bool {
 /// Run `executable --version` in `root` and return its trimmed stdout, for
 /// truthful toolchain identity capture.
 pub(crate) fn executable_version(executable: &Path, root: &Path) -> Result<String, AdapterError> {
+    executable_version_with_args(executable, root, &["--version"])
+}
+
+/// Run `executable <args...>` in `root` and return its trimmed stdout, for
+/// toolchain identity capture. Most tools accept `--version`; Go uses
+/// `version` as a subcommand, so the args are passed explicitly.
+pub(crate) fn executable_version_with_args(
+    executable: &Path,
+    root: &Path,
+    args: &[&str],
+) -> Result<String, AdapterError> {
     let output = std::process::Command::new(executable)
-        .arg("--version")
+        .args(args)
         .current_dir(root)
         .output()
         .map_err(|error| {
@@ -450,16 +461,18 @@ pub(crate) fn executable_version(executable: &Path, root: &Path) -> Result<Strin
         })?;
     if !output.status.success() {
         return Err(AdapterError::Toolchain(format!(
-            "{exe} --version failed: {stderr}",
+            "{exe} {args} failed: {stderr}",
             exe = executable.display(),
+            args = args.join(" "),
             stderr = String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
     let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if version.is_empty() {
         return Err(AdapterError::Toolchain(format!(
-            "{exe} --version produced no output",
-            exe = executable.display()
+            "{exe} {args} produced no output",
+            exe = executable.display(),
+            args = args.join(" ")
         )));
     }
     Ok(version)

@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     AdapterError, AdapterOptions, BuildAdapter, Detection, OptionSpec, canonical_root,
-    check_option_keys, executable_version, locate_executable,
+    check_option_keys, executable_version_with_args, locate_executable,
 };
 
 pub struct GoAdapter;
@@ -286,7 +286,7 @@ fn go_toolchain(root: &Path) -> Result<ToolchainIdentity, AdapterError> {
             go.display()
         ))
     })?;
-    let version = executable_version(&go, root)?;
+    let version = executable_version_with_args(&go, root, &["version"])?;
     // `go version` prints e.g. `go version go1.22.2 windows/amd64`; the full
     // line is the version.
     let version = version.lines().next().unwrap_or_default().trim().to_owned();
@@ -532,9 +532,11 @@ mod tests {
         assert!(argv.contains(&"-o"));
         assert!(argv.contains(&"."));
         assert!(action.outputs.iter().any(|out| {
-            out.path
-                .to_str()
-                .is_some_and(|s| s.starts_with("dist/myapp"))
+            out.path.starts_with("dist")
+                && out
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name.to_str().is_some_and(|s| s.starts_with("myapp")))
         }));
         assert_eq!(action.toolchain.as_ref().expect("toolchain").name, "go");
     }
