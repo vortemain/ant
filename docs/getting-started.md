@@ -71,6 +71,14 @@ ant signing export --out D:\backups\my-app-key
 
 Already have a key? Bring it before your first release: set `ANT_SIGNING_STORE_PASSWORD` (and `ANT_SIGNING_KEY_PASSWORD` if it differs), then run `ant signing import --keystore my.jks --alias my-alias`. `ant signing status` shows which key a project uses. Passwords never appear in Ant's output, plan files, or caches; on Windows they are encrypted for your user account.
 
+## Put the app on your phone
+
+```
+ant install
+```
+
+Ant builds (instantly if nothing changed) and installs the APK on every phone connected over USB with USB debugging on. With no phone plugged in, it shares the app over your Wi-Fi instead and prints a QR code: scan it with the phone's camera, tap the link, and allow your browser to install apps when Android asks. Press Ctrl+C to stop sharing (or pass `--once`). `ant install --release` installs the signed release build; `--qr` shares over Wi-Fi even when a phone is plugged in. The link is only for your local network, and only someone who has the link can download the app.
+
 ## Good to know
 
 - Ant never overwrites a `dist/` directory it did not create. If your project already uses `dist/`, set `out_dir` in `ant.toml`.

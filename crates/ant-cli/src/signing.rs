@@ -157,7 +157,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn random_password() -> Result<Password, String> {
-    let mut bytes = [0u8; 24];
+    random_hex(24).map(Password)
+}
+
+/// `count` bytes from the OS CSPRNG, hex-encoded (used for passwords and
+/// for `ant install`'s unguessable download URL).
+pub fn random_hex(count: usize) -> Result<String, String> {
+    let mut bytes = vec![0u8; count];
     #[cfg(windows)]
     ant_sandbox_win::secrets::fill_random(&mut bytes).map_err(|error| error.to_string())?;
     #[cfg(not(windows))]
@@ -169,7 +175,7 @@ fn random_password() -> Result<Password, String> {
     }
     let text: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     bytes.iter_mut().for_each(|byte| *byte = 0);
-    Ok(Password(text))
+    Ok(text)
 }
 
 fn keytool() -> OsString {

@@ -196,6 +196,15 @@ fn safe_relative_dir(value: &str) -> Result<PathBuf, String> {
 const BUILD_USAGE: &str = "usage: ant build [android] [--dev|--release] [--fresh] [--project PATH] [--jobs N] [--verbose]";
 
 pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
+    build_and_collect(args).map(|(code, _)| code)
+}
+
+/// `ant build`, returning the exit code and the absolute paths of the
+/// deliverables it collected (empty on failure). `ant install` builds
+/// through this.
+pub fn build_and_collect(
+    args: impl Iterator<Item = OsString>,
+) -> Result<(u8, Vec<PathBuf>), String> {
     let mut project = None;
     let mut dev = false;
     let mut release = false;
@@ -371,7 +380,7 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
     let elapsed = started.elapsed().as_secs_f64();
     if code != 0 {
         println!("\nBuild failed after {elapsed:.1}s. Re-run with --verbose for engine details.");
-        return Ok(code);
+        return Ok((code, Vec::new()));
     }
     let installed = install_artifacts(&root, &out_dir, &adapter.artifacts(&plan))?;
     build_digest::profile::mark("collect deliverables");
@@ -393,7 +402,7 @@ pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
         }
         println!("\nBuilt in {elapsed:.1}s →{list}");
     }
-    Ok(0)
+    Ok((0, installed.iter().map(|path| root.join(path)).collect()))
 }
 
 /// Copy deliverables into `out_dir` (flat), replacing what the previous
