@@ -68,13 +68,19 @@ A "fresh checkout" is a new clone or branch folder, or a teammate's copy. Native
 
 ## Quick start
 
-Ant is in early preview. Build it from source (Rust 1.95, pinned in `rust-toolchain.toml`):
+Ant is a single executable. Install it with one command:
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/vortemain/ant/main/scripts/install/install.ps1 | iex
+```
 
 ```bash
-git clone https://github.com/vortemain/ant.git
-cd ant
-cargo install --path crates/ant-cli
+# macOS and Linux
+curl -fsSL https://raw.githubusercontent.com/vortemain/ant/main/scripts/install/install.sh | sh
 ```
+
+The installer picks the right build for your machine, verifies its checksum, and adds it to your PATH; `ant upgrade` keeps it current. Prebuilt binaries cover Windows (x64, Arm64), macOS (Apple Silicon, Intel), and Linux (x64, Arm64, static). Ant is in early preview, and the first release has not been published yet: until it is, build from source (Rust 1.95, pinned in `rust-toolchain.toml`) with `git clone https://github.com/vortemain/ant.git && cd ant && cargo install --path crates/ant-cli`.
 
 Then, in any supported project:
 

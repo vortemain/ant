@@ -1,0 +1,151 @@
+# Release pipeline (D-043). Builds the `ant` binary for every supported
+# platform, writes SHA256SUMS and VERSION, tests the one-line installers and
+# `ant upgrade` against the freshly built files, and — only for a pushed
+# `v*` tag — publishes them as a GitHub Release. A manual run
+# (workflow_dispatch) or a push to `release-dry-run` builds and tests
+# without publishing anything.
+#
+# Asset names are the contract the installers and `ant upgrade` rely on:
+#   ant-<target-triple>[.exe], SHA256SUMS, VERSION
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+    # Full build + installer tests without publishing.
+    branches: [release-dry-run]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, exe: .exe }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest, exe: .exe }
+          - { target: aarch64-apple-darwin, os: macos-latest, exe: "" }
+          - { target: x86_64-apple-darwin, os: macos-latest, exe: "" }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, exe: "" }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, exe: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain and target
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p ant-cli --target ${{ matrix.target }}
+      - name: Stage the binary under its release name
+        shell: bash
+        run: |
+          mkdir -p out
+          cp target/${{ matrix.target }}/release/ant${{ matrix.exe }} out/ant-${{ matrix.target }}${{ matrix.exe }}
+      - name: Smoke test (native targets)
+        if: matrix.target == 'x86_64-pc-windows-msvc' || matrix.target == 'aarch64-apple-darwin' || contains(matrix.target, 'linux')
+        shell: bash
+        run: out/ant-${{ matrix.target }}${{ matrix.exe }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ant-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  assemble:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - name: Collect assets, VERSION, and SHA256SUMS
+        shell: bash
+        run: |
+          mkdir -p release
+          find dl -type f -name 'ant-*' -exec cp {} release/ \;
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+          echo "${version}" > release/VERSION
+          (cd release && sha256sum ant-* VERSION > SHA256SUMS)
+          ls -l release && cat release/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release/*
+
+  # The installers and `ant upgrade` run against the just-built files served
+  # from a local mirror laid out like GitHub's releases/latest/download/.
+  test-install:
+    needs: assemble
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: mirror/latest/download
+      - name: Serve the mirror
+        shell: bash
+        run: |
+          (cd mirror && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 2
+      - name: install.sh (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export ANT_DOWNLOAD_BASE=http://127.0.0.1:8765 ANT_INSTALL_DIR="$RUNNER_TEMP/ant-bin" ANT_NO_MODIFY_PATH=1
+          sh scripts/install/install.sh
+          "$RUNNER_TEMP/ant-bin/ant" --version
+          # A tampered checksum must stop the install.
+          sed -i.bak 's/^\([0-9a-f]\{8\}\)/00000000/' mirror/latest/download/SHA256SUMS
+          if sh scripts/install/install.sh; then echo "tampered download was accepted" >&2; exit 1; fi
+          mv mirror/latest/download/SHA256SUMS.bak mirror/latest/download/SHA256SUMS
+          ANT_DOWNLOAD_BASE=http://127.0.0.1:8765 "$RUNNER_TEMP/ant-bin/ant" upgrade --check
+      - name: install.ps1 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:ANT_DOWNLOAD_BASE = 'http://127.0.0.1:8765'
+          $env:ANT_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'ant-bin'
+          $env:ANT_NO_MODIFY_PATH = '1'
+          ./scripts/install/install.ps1
+          & (Join-Path $env:ANT_INSTALL_DIR 'ant.exe') --version
+          & (Join-Path $env:ANT_INSTALL_DIR 'ant.exe') upgrade --check
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [assemble, test-install]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Ant ${GITHUB_REF_NAME}" \
+            --generate-notes

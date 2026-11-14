@@ -2,6 +2,24 @@
 
 Ant builds your project with one command. No configuration file is required.
 
+## Install
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/vortemain/ant/main/scripts/install/install.ps1 | iex
+```
+
+**macOS and Linux**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vortemain/ant/main/scripts/install/install.sh | sh
+```
+
+The installer downloads the `ant` binary for your machine from GitHub Releases, checks its SHA-256 checksum, puts it in `%LOCALAPPDATA%\Ant\bin` (Windows) or `~/.ant/bin`, and adds that folder to your PATH. No administrator rights, no runtime to install: Ant is a single executable. Open a new terminal afterwards and check with `ant --version`.
+
+Update later with `ant upgrade` (`ant upgrade --check` only tells you whether a newer version exists). To pin a version, set `ANT_VERSION=0.2.0` before running the installer, or run `ant upgrade --version 0.2.0`.
+
 ## Build
 
 ```bash
