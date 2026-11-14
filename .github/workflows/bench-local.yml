@@ -1,0 +1,46 @@
+# Local-first benchmark (P3) on Linux: plain `ant build` vs plain `cargo
+# build` on Ant itself, no server. Same script and commits as the Windows
+# laptop run (docs/benchmarks/2026-11-14-local-windows.md). Manual, plus
+# pushes to the measurement branch. Raw results are uploaded and summarized.
+name: bench-local
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [p3-measure-linux]
+
+jobs:
+  local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The script checks out two older commits.
+          fetch-depth: 0
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build ant (release)
+        run: cargo build --release -p ant-cli
+      - name: Run the benchmark
+        env:
+          ANT: ${{ github.workspace }}/target/release/ant
+          OLD: 6e4d1fc
+          NEW: ec1d845
+        run: bash benchmarks/local/run.sh
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '## Local benchmark (raw)'
+            echo '```'
+            cat benchmarks/local/out/environment.txt || true
+            echo
+            column -s, -t benchmarks/local/out/results.csv || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-benchmark
+          path: benchmarks/local/out
