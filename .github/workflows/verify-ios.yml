@@ -1,0 +1,21 @@
+# P5 iOS verification: the quality gate on macOS, where `xcodebuild`
+# exists. The Xcode adapter tests skip honestly on Linux/Windows (no
+# Xcode); this workflow runs them for real on Apple hardware via
+# GitHub CI. A signed `.ipa` export still needs an Apple Developer
+# identity the owner must supply (a later step).
+name: verify-ios
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [p5-ios]
+
+jobs:
+  quality-gate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Quality gate (macOS)
+        run: sh ./scripts/check.sh
