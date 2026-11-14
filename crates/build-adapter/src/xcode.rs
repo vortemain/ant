@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     AdapterError, AdapterOptions, BuildAdapter, Detection, OptionSpec, canonical_root,
-    check_option_keys, executable_version, locate_executable,
+    check_option_keys, executable_version_with_args, locate_executable,
 };
 
 pub struct XcodeAdapter;
@@ -329,9 +329,9 @@ fn xcode_toolchain(root: &Path) -> Result<ToolchainIdentity, AdapterError> {
             xcodebuild.display()
         ))
     })?;
-    // `xcodebuild -version` prints two lines; the first is the Xcode version
-    // (e.g. `Xcode 15.2`).
-    let version = executable_version(&xcodebuild, root)?
+    // `xcodebuild -version` (single dash, not `--version`) prints two lines; the
+    // first is the Xcode version (e.g. `Xcode 15.2`).
+    let version = executable_version_with_args(&xcodebuild, root, &["-version"])?
         .lines()
         .next()
         .unwrap_or_default()
