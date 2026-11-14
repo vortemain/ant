@@ -34,10 +34,10 @@ For each work item, record: owner; files/contracts owned; dependencies; acceptan
 - **No `Co-Authored-By` trailers** in commit messages and no generated-by footers in PR bodies (owner's request; history was rewritten to remove them). The owner's Claude Code settings already set `attribution` to empty.
 - Work on a branch, keep CI green on both OSes, and merge to `main` only when the owner says so (they usually answer "Yes, merge to main"). Fast-forward merges keep history linear; rebase first if `main` moved.
 
-### State of `main` (f49c224)
+### State of `main`
 - Phases done: P1 front door, P2 speed engine (shared remote cache measured), P4.1 Gradle/Android adapter + benchmark, P4.2 shared Gradle task cache, P3.1 local no-change speed (change detection, one cargo call, absolute temp dirs), P3.2 local result reuse (`cache_policy: local`, `ant build --fresh`). Decisions through **D-028** in `docs/plan.md`; the ledger rows P3.1/P3.2/P4.1/P4.2 hold the measured numbers.
-- **Branch `claude/roadmap-benchmarks-8b4ceb` (P3.3–P3.4, not yet merged or pushed):** linked restores (D-030), plan cache (D-029), cargo local keys stay path-specific (D-031), Android through `ant build` with a warm Gradle daemon (D-032, new action field `background_services`), `ANT_PROFILE=1`, `benchmarks/local/run.sh` + laptop reports. 251 tests pass locally on Windows; CI has not run on it yet.
-- 244 tests pass locally on Windows on `main`; CI (`.github/workflows/ci.yml`) is green on Linux and Windows for the merged P3 branch. Branches on `origin`: only `main` plus the stale `p4-task-cache` (already merged; delete it on GitHub when convenient).
+- **P3.3–P3.4 (merged to `main` 2026-11-14 from `claude/roadmap-benchmarks-8b4ceb`):** linked restores (D-030), plan cache (D-029), cargo local keys stay path-specific (D-031), Android through `ant build` with a warm Gradle daemon (D-032, new action field `background_services`), `ANT_PROFILE=1`, `benchmarks/local/run.sh` + laptop reports. 251 tests pass locally on Windows; CI green on Linux and Windows (run 43636777000).
+- Before P3.3: 244 tests; CI (`.github/workflows/ci.yml`) is green on Linux and Windows for the merged P3 branch. Branches on `origin`: only `main` plus the stale `p4-task-cache` (already merged; delete it on GitHub when convenient).
 - Branding: logo/banners in `docs/assets/` (SVG; tagline "Build everything. Fast. Right on your machine."), README pitch "Stop waiting on builds.", GitHub description and topics updated. No LICENSE yet: the owner has not chosen one, so do not add one or claim one.
 
 ### Measured today (all single 4-core machine; raw data in `benchmarks/*/results/`)
