@@ -1,5 +1,7 @@
 # Operating a self-hosted Ant coordinator and workers
 
+> **The easy way:** `ant server deploy USER@HOST` does everything below for a Linux server with systemd (binary, service account, tokens, hardened coordinator and worker services) and keeps the coordinator off the network, reached through SSH. It is verified end to end on a real Linux host in CI (decision D-047). Use the manual steps below when you want a public HTTPS endpoint for a team, several workers, or a non-systemd host.
+
 **Status:** the procedures below follow from the implemented behavior (protocol v1, D-014), but **have not yet been exercised on a real VPS** — only on one Windows machine over loopback. Treat this as the deployment plan to verify, not as proven operations.
 
 ## Topology

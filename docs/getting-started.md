@@ -123,4 +123,4 @@ Opens a dashboard of this computer's builds in your browser: success rate, how m
 - Ant also remembers the build plan it worked out for your project and reuses it while nothing that shapes it has changed (project files, the toolchain rustup selects, cargo configuration, or `CARGO_*`/`RUSTUP_*` environment), so it does not ask cargo about your workspace on every build.
 - Set `ANT_PROFILE=1` to see where an `ant build` spends its time.
 - Ant's working files live in `.ant/` (for example `.ant/plan.json`, the exact plan it ran); you can delete them at any time.
-- Building on your own servers, caching across machines, and the dashboard are described in [remote operations](remote/operations.md); a one-command setup (`ant server deploy`) is the next phase of the roadmap.
+- Have a Linux server? `ant server deploy you@your-server` installs Ant there over SSH in one step (nothing is exposed to the internet; Ant talks to it through SSH), `ant server status` checks it, and `ant remote run --server NAME --plan .ant/plan.json` builds there. Details: [remote operations](remote/operations.md).
