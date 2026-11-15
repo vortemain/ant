@@ -80,7 +80,13 @@ jobs:
           if curl -s --max-time 3 "http://$addr:8742/v1/health"; then echo "coordinator reachable on $addr" >&2; exit 1; fi
           curl -fsS http://127.0.0.1:8742/v1/health
           systemctl show ant-coordinator -p User -p NoNewPrivileges -p ProtectSystem
-          stat -c '%a %U:%G %n' /etc/ant /etc/ant/client.token /etc/ant/worker.token /var/lib/ant
+          # Tokens: readable by root and the ant group only (this test user
+          # cannot even list them without sudo).
+          if stat /etc/ant/client.token 2>/dev/null; then echo "token visible to other users" >&2; exit 1; fi
+          sudo stat -c '%a %U:%G %n' /etc/ant /etc/ant/client.token /etc/ant/worker.token /var/lib/ant | tee perms.txt
+          grep -q '^750 root:ant /etc/ant$' perms.txt
+          grep -q '^640 root:ant /etc/ant/client.token$' perms.txt
+          grep -q '^640 root:ant /etc/ant/worker.token$' perms.txt
       - name: Service logs
         if: always()
         run: sudo journalctl -u ant-coordinator -u ant-worker --no-pager | tail -60
