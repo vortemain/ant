@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
 
+mod build_log;
 mod cache_runner;
 mod dashboard;
 mod front;
@@ -308,6 +309,7 @@ fn run() -> Result<u8, String> {
                 local_reuse: false,
                 fresh: false,
                 secrets: None,
+                capture: None,
             },
         };
         return execute_plan(

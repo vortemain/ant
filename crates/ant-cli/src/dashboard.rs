@@ -97,7 +97,14 @@ fn serve(
         match listener.accept() {
             Ok((stream, _)) => {
                 // One request per connection; a bad client only hurts itself.
-                let _ = handle(stream, address, token, &history::recent, &history::running);
+                let _ = handle(
+                    stream,
+                    address,
+                    token,
+                    &history::recent,
+                    &history::running,
+                    &|id, from| crate::build_log::read(id, from, LOG_CHUNK),
+                );
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(50));
@@ -161,6 +168,7 @@ fn handle(
     token: &str,
     builds: &dyn Fn(usize) -> Vec<BuildRecord>,
     running: &dyn Fn() -> Vec<history::RunningBuild>,
+    logs: &LogReader,
 ) -> std::io::Result<()> {
     let request = read_request(&stream)?;
     let allowed_hosts = [
@@ -219,6 +227,28 @@ fn handle(
                 body.as_bytes(),
             )
         }
+        _ if route.starts_with("api/log/") => {
+            let rest = &route["api/log/".len()..];
+            let (id, query) = rest.split_once('?').unwrap_or((rest, ""));
+            let from = query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("from="))
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            match logs(id, from) {
+                Some((bytes, size)) => {
+                    let body = log_json(&bytes, from.min(size), size);
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        body.as_bytes(),
+                    )
+                }
+                None => respond(&mut stream, "404 Not Found", "text/plain", "", b""),
+            }
+        }
         _ => match route
             .strip_prefix("files/")
             .and_then(|rest| file_for(rest, &builds(SHOWN)))
@@ -240,6 +270,30 @@ fn handle(
             None => respond(&mut stream, "404 Not Found", "text/plain", "", b""),
         },
     }
+}
+
+/// Reads a build's log from an offset: `(bytes, current size)`.
+type LogReader = dyn Fn(&str, u64) -> Option<(Vec<u8>, u64)>;
+
+/// Bytes per log request; the page asks again from `next` for more.
+const LOG_CHUNK: usize = 256 * 1024;
+
+/// A log chunk as JSON: the text (never cut inside a UTF-8 character: an
+/// incomplete trailing sequence waits for the next request), the offset to
+/// ask from next, and the log's current size.
+fn log_json(bytes: &[u8], start: u64, size: u64) -> String {
+    let usable = match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => bytes.len(),
+    };
+    let text = String::from_utf8_lossy(&bytes[..usable]);
+    serde_json::json!({
+        "text": text,
+        "next": start + usable as u64,
+        "size": size,
+    })
+    .to_string()
 }
 
 /// The JSON the page renders: builds newest first, each deliverable with
@@ -331,6 +385,17 @@ mod tests {
     }
 
     #[test]
+    fn log_chunks_never_split_a_character() {
+        let text = "café";
+        let bytes = text.as_bytes();
+        // Cut inside the two-byte "é": the partial byte waits for later.
+        let cut = &bytes[..bytes.len() - 1];
+        let json: serde_json::Value = serde_json::from_str(&log_json(cut, 10, 99)).expect("json");
+        assert_eq!(json["text"], "caf");
+        assert_eq!(json["next"], 13);
+    }
+
+    #[test]
     fn serves_the_app_history_and_only_recorded_files() {
         let project = std::env::temp_dir().join(format!("ant-dashboard-{}", std::process::id()));
         std::fs::create_dir_all(project.join("dist")).expect("dist");
@@ -363,7 +428,7 @@ mod tests {
             older.id = "100-9".to_owned();
             older.started_ms = 100;
             older.deliverables = vec![PathBuf::from("dist/app.exe")];
-            for _ in 0..10 {
+            for _ in 0..12 {
                 let (stream, _) = listener.accept().expect("accept");
                 let records = vec![record.clone(), older.clone()];
                 let live = vec![history::RunningBuild {
@@ -379,6 +444,14 @@ mod tests {
                     token,
                     &move |_| records.clone(),
                     &move || live.clone(),
+                    &|id, from| {
+                        let log =
+                            "Compiling app\n\u{1b}[32mFinished\u{1b}[0m caf\u{e9}\n".as_bytes();
+                        (id == "123-9").then(|| {
+                            let start = (from as usize).min(log.len());
+                            (log[start..].to_vec(), log.len() as u64)
+                        })
+                    },
                 )
                 .expect("handle");
             }
@@ -425,6 +498,16 @@ mod tests {
         assert!(head.starts_with("HTTP/1.1 404"), "{head}");
         let (head, _) = get(address, &format!("/{token}/files/100-9/0"), &host);
         assert!(head.starts_with("HTTP/1.1 404"), "replaced: {head}");
+        let (head, body) = get(address, &format!("/{token}/api/log/123-9?from=0"), &host);
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let chunk: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            chunk["text"].as_str().unwrap().contains("Finished"),
+            "{chunk}"
+        );
+        assert_eq!(chunk["next"], chunk["size"]);
+        let (head, _) = get(address, &format!("/{token}/api/log/nope"), &host);
+        assert!(head.starts_with("HTTP/1.1 404"), "{head}");
         let (head, _) = get(address, &format!("/{token}/files/nope/0"), &host);
         assert!(head.starts_with("HTTP/1.1 404"), "{head}");
         server.join().expect("server");

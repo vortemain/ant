@@ -179,6 +179,11 @@ impl SecretEnvironment {
     }
 
     /// Variable names (never values), for diagnostics.
+    /// The secret values, for masking them out of captured output (D-045).
+    pub fn values(&self) -> Vec<String> {
+        self.0.iter().map(|(_, value)| value.clone()).collect()
+    }
+
     pub fn names(&self) -> Vec<&str> {
         self.0.iter().map(|(name, _)| name.as_str()).collect()
     }
@@ -207,6 +212,66 @@ impl Drop for SecretEnvironment {
             value.replace_range(.., &wiped);
         }
     }
+}
+
+/// Receives a copy of an action's output (D-045). Implementations must be
+/// cheap and must not fail the build; they are called from pump threads.
+pub trait OutputSink: Send + Sync {
+    fn write(&self, bytes: &[u8]);
+}
+
+/// Tee an action's output into an [`OutputSink`] while still showing it on
+/// this process's stdout/stderr (D-045). Only the direct local executor
+/// honors it; when absent (the default) children inherit the terminal.
+/// `display_environment` holds spawn-time variables that only change how a
+/// tool *displays* output (for example `CARGO_TERM_COLOR=always`, which
+/// cargo needs once its output is a pipe); like secrets they are not part
+/// of the action, so they never reach keys or plan files.
+#[derive(Clone)]
+pub struct OutputCapture {
+    pub sink: std::sync::Arc<dyn OutputSink>,
+    pub display_environment: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for OutputCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutputCapture")
+            .field("display_environment", &self.display_environment)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Copy everything `reader` yields to this process's stdout or stderr and
+/// into `sink`; reports completion on `done`.
+fn pump_output<R: std::io::Read + Send + 'static>(
+    mut reader: R,
+    to_stderr: bool,
+    sink: std::sync::Arc<dyn OutputSink>,
+    done: std::sync::mpsc::Sender<()>,
+) {
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        let mut buffer = [0u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let chunk = &buffer[..n];
+                    if to_stderr {
+                        let mut out = std::io::stderr().lock();
+                        let _ = out.write_all(chunk);
+                        let _ = out.flush();
+                    } else {
+                        let mut out = std::io::stdout().lock();
+                        let _ = out.write_all(chunk);
+                        let _ = out.flush();
+                    }
+                    sink.write(chunk);
+                }
+            }
+        }
+        let _ = done.send(());
+    });
 }
 
 /// Refuse to run secrets anywhere but the direct local executor (D-033).
@@ -248,6 +313,9 @@ pub struct PreparedAction {
     /// Secret environment injected at spawn by the direct local executor
     /// only (see [`SecretEnvironment`]). Empty by default.
     pub secret_environment: SecretEnvironment,
+    /// Tee output into a sink (direct local executor only; see
+    /// [`OutputCapture`]). `None` (the default) inherits the terminal.
+    pub output_capture: Option<OutputCapture>,
 }
 
 impl PreparedAction {
@@ -347,6 +415,7 @@ fn prepare_with_mode(
         sandbox_mount: None,
         sandbox_binds: Vec::new(),
         secret_environment: SecretEnvironment::default(),
+        output_capture: None,
     })
 }
 
@@ -392,11 +461,35 @@ pub fn execute_prepared(
         const CREATE_SUSPENDED: u32 = 0x0000_0004;
         command.creation_flags(CREATE_SUSPENDED);
     }
+    if let Some(capture) = &prepared.output_capture {
+        command.envs(capture.display_environment.iter().map(|(k, v)| (k, v)));
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+    }
     // Secrets last, at spawn only (D-033).
     for (name, value) in prepared.secret_environment.pairs() {
         command.env(name, value);
     }
     let mut child = command.spawn().map_err(ExecutionError::Spawn)?;
+    // Output tee (D-045): forward to our terminal and into the sink.
+    let pumps = prepared.output_capture.as_ref().map(|capture| {
+        let (done, finished) = std::sync::mpsc::channel();
+        let mut count = 0;
+        if let Some(stdout) = child.stdout.take() {
+            pump_output(
+                stdout,
+                false,
+                std::sync::Arc::clone(&capture.sink),
+                done.clone(),
+            );
+            count += 1;
+        }
+        if let Some(stderr) = child.stderr.take() {
+            pump_output(stderr, true, std::sync::Arc::clone(&capture.sink), done);
+            count += 1;
+        }
+        (finished, count)
+    });
     // Windows only: descendants are placed in a kill-on-close job object so a
     // cancelled or timed-out action cannot leave orphaned grandchildren. The
     // guard must stay alive until the child has exited.
@@ -415,6 +508,18 @@ pub fn execute_prepared(
     };
     let timeout = action.timeout_ms.map(Duration::from_millis);
     let (status, cancelled, timed_out) = wait_for_child(&mut child, cancellation, timeout)?;
+    // Let the pumps drain. A helper the action left running (a build
+    // daemon) may hold the pipe open forever, so wait briefly, then move on;
+    // the pump threads end when that helper closes the pipe.
+    if let Some((finished, count)) = pumps {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        for _ in 0..count {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if finished.recv_timeout(left).is_err() {
+                break;
+            }
+        }
+    }
     #[cfg(windows)]
     let peak_memory_bytes = job_guard
         .as_ref()
@@ -1313,6 +1418,48 @@ mod tests {
         assert!(
             survived > killed && survived >= 6,
             "helper output lines: killed={killed} survived={survived}"
+        );
+    }
+
+    /// D-045: with capture on, both output streams reach the sink (and the
+    /// display environment reaches the child), without changing the result.
+    #[test]
+    fn output_capture_tees_both_streams_into_the_sink() {
+        struct Collect(std::sync::Mutex<Vec<u8>>);
+        impl OutputSink for Collect {
+            fn write(&self, bytes: &[u8]) {
+                self.0.lock().expect("sink").extend_from_slice(bytes);
+            }
+        }
+        let workspace = TempDir::new("capture");
+        let argv: Vec<String> = if cfg!(windows) {
+            vec![
+                "cmd".into(),
+                "/C".into(),
+                "echo to-stdout %ANT_TEST_DISPLAY% & echo to-stderr 1>&2".into(),
+            ]
+        } else {
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "echo to-stdout $ANT_TEST_DISPLAY; echo to-stderr 1>&2".into(),
+            ]
+        };
+        let planned = action("capture", argv);
+        let mut prepared = prepare(workspace.path(), &planned).expect("prepare");
+        let sink = std::sync::Arc::new(Collect(std::sync::Mutex::new(Vec::new())));
+        prepared.output_capture = Some(OutputCapture {
+            sink: sink.clone(),
+            display_environment: vec![("ANT_TEST_DISPLAY".to_owned(), "colors-on".to_owned())],
+        });
+        let result = execute_prepared(&prepared, &CancellationToken::new()).expect("execute");
+        assert!(result.success());
+        let text = String::from_utf8_lossy(&sink.0.lock().expect("sink")).into_owned();
+        assert!(text.contains("to-stdout colors-on"), "{text:?}");
+        assert!(text.contains("to-stderr"), "{text:?}");
+        assert!(
+            !format!("{:?}", prepared.action).contains("colors-on"),
+            "display variables are not part of the action"
         );
     }
 

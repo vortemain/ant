@@ -406,6 +406,18 @@ pub fn build_and_collect(
         Box::new(reporter),
         crate::new_run_id(),
     ));
+    // Tee tool output into this build's log for the dashboard (D-045),
+    // masking any injected secret; keep cargo's colors and progress bar in
+    // a real terminal even though its output is now a pipe.
+    let build_log = std::sync::Arc::new(crate::build_log::BuildLog::create(
+        &build_id,
+        secrets.map(|secrets| secrets.values()).unwrap_or_default(),
+    ));
+    let capture: &'static local_executor::OutputCapture =
+        Box::leak(Box::new(local_executor::OutputCapture {
+            sink: build_log.clone(),
+            display_environment: display_environment(adapter.name()),
+        }));
     let run_options = RunOptions {
         capacity: Capacity {
             cpu: jobs as u64,
@@ -421,6 +433,7 @@ pub fn build_and_collect(
             local_reuse: true,
             fresh,
             secrets,
+            capture: Some(capture),
         },
     };
     let results = build_adapter::user_cache_dir().map(|dir| dir.join("local-results"));
@@ -432,6 +445,7 @@ pub fn build_and_collect(
         results.as_deref(),
         &events,
     )?;
+    build_log.finish();
     build_digest::profile::mark("run plan");
     let elapsed = started.elapsed().as_secs_f64();
     // History (D-042): what this build did, recorded whatever the outcome.
@@ -490,6 +504,38 @@ pub fn build_and_collect(
     }
     history(true, installed.clone());
     Ok((0, installed.iter().map(|path| root.join(path)).collect()))
+}
+
+/// Spawn-time variables that keep a tool's terminal display when its output
+/// is teed through a pipe (D-045). Only display settings: they cannot change
+/// what a build produces, so they stay out of actions and keys.
+fn display_environment(adapter: &str) -> Vec<(String, String)> {
+    use std::io::IsTerminal as _;
+    let mut environment = Vec::new();
+    if !std::io::stderr().is_terminal() {
+        return environment;
+    }
+    if matches!(adapter, "cargo" | "tauri") {
+        environment.push(("CARGO_TERM_COLOR".to_owned(), "always".to_owned()));
+        if let Some(width) = terminal_width() {
+            environment.push(("CARGO_TERM_PROGRESS_WHEN".to_owned(), "always".to_owned()));
+            environment.push(("CARGO_TERM_PROGRESS_WIDTH".to_owned(), width.to_string()));
+        }
+    }
+    environment
+}
+
+fn terminal_width() -> Option<u16> {
+    #[cfg(windows)]
+    {
+        ant_sandbox_win::console::stderr_width()
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("COLUMNS")
+            .ok()
+            .and_then(|columns| columns.parse().ok())
+    }
 }
 
 /// Copy deliverables into `out_dir` (flat), replacing what the previous

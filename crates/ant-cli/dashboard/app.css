@@ -282,6 +282,25 @@ main { padding: 20px clamp(16px, 3vw, 32px) 40px; display: flex; flex-direction:
 @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(290%); } }
 @media (prefers-reduced-motion: reduce) { .meter.indeterminate span { animation: none; width: 100%; opacity: 0.5; } }
 
+/* ---------- build output (D-045) ---------- */
+.output { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.detail-output { margin-top: 14px; }
+.log {
+  margin: 0; width: 100%; max-height: 420px; overflow: auto; padding: 12px 14px;
+  background: #0d1117; color: #e6edf3; border: 1px solid #262c36; border-radius: 8px;
+  font: 12.5px/1.5 ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.log:focus-visible { outline-offset: 0; }
+.log-line { min-height: 1.5em; }
+.log-status { color: #9da7b3; font-style: italic; }
+.log-status[hidden] { display: none; }
+/* ANSI colors tuned for the dark log panel (all >= 4.5:1 on #0d1117). */
+.a30, .a90 { color: #9da7b3; } .a31 { color: #ff7b72; } .a32 { color: #3fb950; } .a33 { color: #d29922; }
+.a34 { color: #58a6ff; } .a35 { color: #bc8cff; } .a36 { color: #39c5cf; } .a37, .a97 { color: #f0f3f6; }
+.a91 { color: #ffa198; } .a92 { color: #56d364; } .a93 { color: #e3b341; } .a94 { color: #79c0ff; }
+.a95 { color: #d2a8ff; } .a96 { color: #56d4dd; } .ab { font-weight: 700; } .ad { opacity: 0.75; }
+
 /* ---------- badges ---------- */
 .status {
   display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600;

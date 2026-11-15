@@ -337,6 +337,9 @@ function detailRow(build, span, id) {
   stepsBox.append(where);
   grid.append(stepsBox, filesBox);
   cell.append(grid);
+  const output = outputSection(build.id);
+  output.classList.add("detail-output");
+  cell.append(output);
   row.append(cell);
   return row;
 }
@@ -478,6 +481,7 @@ function renderRunning() {
         build.steps.map((s) => `${s.id} ${s.status === "reused" ? "reused" : s.status === "succeeded" ? duration(s.millis) : s.status}`).join(" · "));
       item.append(steps);
     }
+    item.append(outputSection(build.id, { live: true }));
     list.append(item);
   }
 }
@@ -488,6 +492,165 @@ setInterval(() => {
     timer.textContent = duration(Math.max(0, serverNow() - Number(timer.dataset.since)));
   }
 }, 1000);
+
+// ---------- build output (D-045) ----------
+
+const ESC = String.fromCharCode(27);
+const BEL = String.fromCharCode(7);
+// Control sequences other than colors (cursor moves, erase, titles).
+const OTHER_ESCAPES = new RegExp(
+  `${ESC}\\[[0-9;?]*[A-Za-ln-z]|${ESC}\\][^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)|${ESC}[()][0-9A-Za-z]|${ESC}[=>78]`, "g");
+const SGR = new RegExp(`${ESC}\\[([0-9;]*)m`, "g");
+
+// Apply one SGR parameter list to a style state {fg, bold, dim}.
+function applySgr(style, params) {
+  const codes = params === "" ? [0] : params.split(";").map(Number);
+  for (let i = 0; i < codes.length; i += 1) {
+    const code = codes[i];
+    if (code === 0) { style.fg = null; style.bold = false; style.dim = false; }
+    else if (code === 1) style.bold = true;
+    else if (code === 2) style.dim = true;
+    else if (code === 22) { style.bold = false; style.dim = false; }
+    else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) style.fg = code;
+    else if (code === 39) style.fg = null;
+    else if (code === 38 || code === 48) i += codes[i + 1] === 5 ? 2 : codes[i + 1] === 2 ? 4 : 0;
+  }
+}
+
+// Render one line of terminal output into `target` (text nodes and spans
+// with classes only; never HTML). Returns the style state after the line.
+function renderTerminalLine(target, raw, style) {
+  target.replaceChildren();
+  let text = raw.replace(/\r+$/, "");
+  const lastReturn = text.lastIndexOf("\r");
+  if (lastReturn >= 0) text = text.slice(lastReturn + 1); // progress redraws
+  text = text.replace(OTHER_ESCAPES, "");
+  const current = { ...style };
+  let last = 0;
+  const push = (chunk) => {
+    if (!chunk) return;
+    if (current.fg === null && !current.bold && !current.dim) {
+      target.append(document.createTextNode(chunk));
+    } else {
+      const classes = [];
+      if (current.fg !== null) classes.push(`a${current.fg}`);
+      if (current.bold) classes.push("ab");
+      if (current.dim) classes.push("ad");
+      target.append(el("span", classes.join(" "), chunk));
+    }
+  };
+  for (const match of text.matchAll(SGR)) {
+    push(text.slice(last, match.index));
+    applySgr(current, match[1]);
+    last = match.index + match[0].length;
+  }
+  push(text.slice(last));
+  if (!target.childNodes.length) target.append(document.createTextNode(" "));
+  return current;
+}
+
+class LogView {
+  constructor(id) {
+    this.id = id;
+    this.next = 0;
+    this.carry = "";
+    this.style = { fg: null, bold: false, dim: false };
+    this.lines = 0;
+    this.loading = false;
+    this.missing = false;
+    this.pre = el("pre", "log");
+    this.pre.tabIndex = 0;
+    this.pre.setAttribute("aria-label", "Build output");
+    this.body = el("div");
+    this.partial = el("div", "log-line");
+    this.status = el("div", "log-status", "Loading output…");
+    this.pre.append(this.status, this.body, this.partial);
+  }
+
+  append(text) {
+    const pre = this.pre;
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 12;
+    this.carry += text;
+    const parts = this.carry.split("\n");
+    this.carry = parts.pop();
+    for (const part of parts) {
+      const line = el("div", "log-line");
+      this.style = renderTerminalLine(line, part, this.style);
+      this.body.append(line);
+      this.lines += 1;
+      if (this.lines > 5000) {
+        this.body.firstChild.remove();
+        this.lines -= 1;
+      }
+    }
+    renderTerminalLine(this.partial, this.carry, this.style);
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  }
+
+  // Fetch everything new (in chunks), then stop until asked again.
+  async load() {
+    if (this.loading) return;
+    this.loading = true;
+    try {
+      for (let round = 0; round < 40; round += 1) {
+        const response = await fetch(`api/log/${encodeURIComponent(this.id)}?from=${this.next}`, { cache: "no-store" });
+        if (!response.ok) {
+          if (this.next === 0) {
+            this.missing = true;
+            this.status.textContent = "No output was recorded for this build (it ran before output capture, or its log was pruned).";
+          }
+          break;
+        }
+        const data = await response.json();
+        if (data.text) this.append(data.text);
+        this.next = data.next;
+        this.status.textContent = this.next === 0 ? "No output yet." : "";
+        this.status.hidden = this.next > 0;
+        if (this.next >= data.size) break;
+      }
+    } catch {
+      this.status.textContent = "Could not load the output.";
+    } finally {
+      this.loading = false;
+    }
+  }
+}
+
+const logViews = new Map();
+const openLogs = new Set();
+
+function logView(id) {
+  if (!logViews.has(id)) logViews.set(id, new LogView(id));
+  return logViews.get(id);
+}
+
+// A "Show output" toggle plus the viewer; the viewer element is reused
+// across re-renders so scroll position and content survive.
+function outputSection(id, { live = false } = {}) {
+  const box = el("div", "output");
+  const toggle = el("button", "btn", openLogs.has(id) ? "Hide output" : live ? "Show live output" : "Show output");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", String(openLogs.has(id)));
+  toggle.dataset.log = id;
+  toggle.addEventListener("click", () => {
+    if (openLogs.has(id)) openLogs.delete(id);
+    else {
+      openLogs.add(id);
+      logView(id).load();
+    }
+    render();
+  });
+  box.append(toggle);
+  if (openLogs.has(id)) box.append(logView(id).pre);
+  return box;
+}
+
+// Refresh open viewers of running builds (called by the poll loop).
+function followLiveLogs() {
+  for (const build of state.running) {
+    if (openLogs.has(build.id)) logView(build.id).load();
+  }
+}
 
 function renderBuilds(builds) {
   const scoped = state.project ? builds.filter((b) => b.project === state.project) : builds;
@@ -589,6 +752,7 @@ function focusKey(node) {
   if (!node || node === document.body) return null;
   return node.id ? `#${node.id}`
     : node.dataset.build ? `[data-build="${CSS.escape(node.dataset.build)}"]`
+    : node.dataset.log ? `[data-log="${CSS.escape(node.dataset.log)}"]`
     : node.getAttribute("aria-label") ? `[aria-label="${CSS.escape(node.getAttribute("aria-label"))}"]`
       : node.dataset.filter ? `[data-filter="${node.dataset.filter}"]`
         : null;
@@ -722,6 +886,7 @@ window.addEventListener("hashchange", route);
 // Poll every 3 s, every second while something is building.
 async function poll() {
   await refresh();
+  followLiveLogs();
   setTimeout(poll, state.running.length ? 1000 : REFRESH_MS);
 }
 

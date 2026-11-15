@@ -65,6 +65,9 @@ pub mod job;
 mod logon;
 #[cfg(windows)]
 pub use logon::{Secret, unprotect_secure_string_hex};
+/// Console width for tee'd tool output (Windows only).
+#[cfg(windows)]
+pub mod console;
 #[cfg(windows)]
 mod process;
 /// Current-user secret storage (DPAPI) and CSPRNG helpers (Windows only).

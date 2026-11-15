@@ -116,6 +116,9 @@ pub struct ExecConfig {
     /// the direct local executor only (D-033); sandboxed and isolated runs
     /// refuse it. `None` for plumbing commands.
     pub secrets: Option<&'static local_executor::SecretEnvironment>,
+    /// Tee each action's output into the build log (D-045); direct local
+    /// execution only. `None` for plumbing commands.
+    pub capture: Option<&'static local_executor::OutputCapture>,
 }
 
 pub fn run_action(
@@ -132,6 +135,7 @@ pub fn run_action(
         local_reuse,
         fresh,
         secrets,
+        capture,
     } = exec;
     let local_reuse = local_reuse && !sandbox && isolated.is_none();
     // Local reuse keys by content only, so a branch switch or re-checkout
@@ -143,6 +147,9 @@ pub fn run_action(
     };
     if let Some(secrets) = secrets {
         prepared.secret_environment = secrets.clone();
+    }
+    if !sandbox && isolated.is_none() {
+        prepared.output_capture = capture.cloned();
     }
     build_digest::profile::mark("digest inputs");
     if enforce_memory {
