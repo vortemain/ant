@@ -8,6 +8,8 @@ const SVG = "http://www.w3.org/2000/svg";
 
 const state = {
   builds: [],
+  running: [],
+  clockOffset: 0, // server clock minus browser clock
   now: Date.now(),
   page: "overview",
   filter: "all",
@@ -427,6 +429,66 @@ function renderOverview(builds) {
   buildsTable($("overview-builds"), builds, { limit: 6 });
 }
 
+// ---------- live builds ----------
+
+function serverNow() {
+  return Date.now() + state.clockOffset;
+}
+
+function renderRunning() {
+  const card = $("live-builds");
+  const list = $("running-list");
+  list.replaceChildren();
+  card.hidden = state.running.length === 0;
+  for (const build of state.running) {
+    const item = el("li", "running-item");
+    const top = el("div", "running-top");
+    top.append(toolBadge(build.adapter, false));
+    const title = el("div", "running-title");
+    title.append(el("span", "running-name", projectName(build.project)));
+    const done = build.steps.length;
+    const total = Math.max(build.total_steps, done + build.current.length, 1);
+    const now = build.current.length ? `now: ${build.current.join(", ")}` : "finishing";
+    title.append(el("span", "running-meta",
+      `${build.adapter}${build.flavor ? ` · ${build.flavor}` : ""} · step ${Math.min(done + 1, total)} of ${total} · ${now}`));
+    top.append(title);
+    const timer = el("span", "running-timer", duration(Math.max(0, serverNow() - build.started_ms)));
+    timer.dataset.since = String(build.started_ms);
+    timer.setAttribute("aria-label", "Elapsed time");
+    top.append(timer);
+    item.append(top);
+    const bar = el("div", "meter meter-brand");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-label", `${projectName(build.project)} progress`);
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", String(total));
+    const fill = el("span");
+    if (done === 0) {
+      // Nothing finished yet: show activity rather than a bar stuck at 0%.
+      bar.classList.add("indeterminate");
+      bar.setAttribute("aria-valuetext", "In progress");
+    } else {
+      bar.setAttribute("aria-valuenow", String(done));
+      fill.style.width = `${(done / total) * 100}%`;
+    }
+    bar.append(fill);
+    item.append(bar);
+    if (build.steps.length) {
+      const steps = el("p", "running-steps",
+        build.steps.map((s) => `${s.id} ${s.status === "reused" ? "reused" : s.status === "succeeded" ? duration(s.millis) : s.status}`).join(" · "));
+      item.append(steps);
+    }
+    list.append(item);
+  }
+}
+
+// Elapsed timers tick every second without re-rendering anything else.
+setInterval(() => {
+  for (const timer of document.querySelectorAll("[data-since]")) {
+    timer.textContent = duration(Math.max(0, serverNow() - Number(timer.dataset.since)));
+  }
+}, 1000);
+
 function renderBuilds(builds) {
   const scoped = state.project ? builds.filter((b) => b.project === state.project) : builds;
   const counts = { all: scoped.length, built: 0, reused: 0, failed: 0 };
@@ -556,7 +618,8 @@ function renderPage() {
   const fileCount = currentFiles(state.builds).filter(({ file }) => file.exists).length;
   $("nav-deliverables").textContent = fileCount ? String(fileCount) : "";
 
-  const empty = state.loaded && state.builds.length === 0;
+  renderRunning();
+  const empty = state.loaded && state.builds.length === 0 && state.running.length === 0;
   $("empty").hidden = !empty;
   for (const name of Object.keys(TITLES)) $(`page-${name}`).hidden = empty || name !== page;
   if (empty) return;
@@ -579,16 +642,21 @@ async function refresh() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     state.builds = data.builds;
+    state.running = data.running || [];
     state.now = data.now_ms;
+    state.clockOffset = data.now_ms - Date.now();
     state.lastOk = Date.now();
     state.loaded = true;
     if (state.project && !state.builds.some((b) => b.project === state.project)) state.project = null;
     $("live").classList.remove("bad");
-    $("live-text").textContent = "Live";
+    $("live-text").textContent = state.running.length ? `Live · ${state.running.length} building` : "Live";
     $("banner").hidden = true;
     // Only re-render when something changed, or once a minute so relative
     // times move: rebuilding the page every few seconds would steal focus.
-    const signature = JSON.stringify(data.builds.map((b) => [b.id, b.downloads.map((f) => [f.exists, f.replaced, f.bytes])]));
+    const signature = JSON.stringify([
+      data.builds.map((b) => [b.id, b.downloads.map((f) => [f.exists, f.replaced, f.bytes])]),
+      state.running.map((b) => [b.id, b.steps.length, b.current]),
+    ]);
     if (signature !== state.signature || Date.now() - state.renderedAt > 60000) {
       state.signature = signature;
       render();
@@ -651,6 +719,11 @@ for (const chip of document.querySelectorAll(".chip")) {
 }
 window.addEventListener("hashchange", route);
 
+// Poll every 3 s, every second while something is building.
+async function poll() {
+  await refresh();
+  setTimeout(poll, state.running.length ? 1000 : REFRESH_MS);
+}
+
 route();
-refresh();
-setInterval(refresh, REFRESH_MS);
+poll();

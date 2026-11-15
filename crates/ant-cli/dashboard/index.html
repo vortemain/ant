@@ -75,6 +75,15 @@
       <div class="banner" id="banner" role="alert" hidden></div>
 
       <main id="content" tabindex="-1">
+        <section class="card live-card" id="live-builds" hidden aria-labelledby="live-title">
+          <header class="card-head">
+            <div>
+              <h2 id="live-title"><span class="status running">Running</span> Building now</h2>
+              <p class="card-sub">Updates as each step starts and finishes</p>
+            </div>
+          </header>
+          <ul class="running-list" id="running-list"></ul>
+        </section>
         <!-- Overview -->
         <section class="page" id="page-overview" aria-labelledby="page-title">
           <div class="kpis">

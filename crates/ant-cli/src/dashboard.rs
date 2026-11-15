@@ -97,7 +97,7 @@ fn serve(
         match listener.accept() {
             Ok((stream, _)) => {
                 // One request per connection; a bad client only hurts itself.
-                let _ = handle(stream, address, token, &history::recent);
+                let _ = handle(stream, address, token, &history::recent, &history::running);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(50));
@@ -160,6 +160,7 @@ fn handle(
     address: SocketAddr,
     token: &str,
     builds: &dyn Fn(usize) -> Vec<BuildRecord>,
+    running: &dyn Fn() -> Vec<history::RunningBuild>,
 ) -> std::io::Result<()> {
     let request = read_request(&stream)?;
     let allowed_hosts = [
@@ -209,7 +210,7 @@ fn handle(
             APP_JS.as_bytes(),
         ),
         "api/builds" => {
-            let body = builds_json(&builds(SHOWN));
+            let body = builds_json(&builds(SHOWN), &running());
             respond(
                 &mut stream,
                 "200 OK",
@@ -245,7 +246,7 @@ fn handle(
 /// whether it still exists, its size, and its download path. A deliverable
 /// a newer build of the same project collected again is `replaced`: the
 /// file on disk is the newer build's, so it is not offered as this one's.
-fn builds_json(builds: &[BuildRecord]) -> String {
+fn builds_json(builds: &[BuildRecord], running: &[history::RunningBuild]) -> String {
     let mut collected: std::collections::HashSet<(PathBuf, PathBuf)> =
         std::collections::HashSet::new();
     let items: Vec<serde_json::Value> = builds
@@ -281,7 +282,8 @@ fn builds_json(builds: &[BuildRecord]) -> String {
             })
         })
         .collect();
-    serde_json::json!({ "now_ms": history::now_ms(), "builds": items }).to_string()
+    serde_json::json!({ "now_ms": history::now_ms(), "running": running, "builds": items })
+        .to_string()
 }
 
 /// `<build id>/<index>` → the deliverable's absolute path and file name,
@@ -364,7 +366,21 @@ mod tests {
             for _ in 0..10 {
                 let (stream, _) = listener.accept().expect("accept");
                 let records = vec![record.clone(), older.clone()];
-                handle(stream, address, token, &move |_| records.clone()).expect("handle");
+                let live = vec![history::RunningBuild {
+                    id: "200-1".to_owned(),
+                    adapter: "go".to_owned(),
+                    total_steps: 1,
+                    current: vec!["go-build".to_owned()],
+                    ..history::RunningBuild::default()
+                }];
+                handle(
+                    stream,
+                    address,
+                    token,
+                    &move |_| records.clone(),
+                    &move || live.clone(),
+                )
+                .expect("handle");
             }
         });
 
@@ -389,6 +405,7 @@ mod tests {
         assert!(head.starts_with("HTTP/1.1 200"), "{head}");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(json["builds"][0]["adapter"], "cargo");
+        assert_eq!(json["running"][0]["current"][0], "go-build");
         assert_eq!(json["builds"][0]["downloads"][0]["exists"], true);
         assert_eq!(json["builds"][0]["downloads"][0]["bytes"], 6);
         assert_eq!(json["builds"][0]["downloads"][0]["replaced"], false);

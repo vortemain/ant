@@ -385,7 +385,22 @@ pub fn build_and_collect(
     }
     let cancellation = local_executor::CancellationToken::new();
     crate::install_ctrl_c_handler(&cancellation);
-    let reporter = HumanReporter::default();
+    let build_id = crate::history::new_id(started_ms);
+    let running = crate::history::RunningBuild {
+        id: build_id.clone(),
+        started_ms,
+        project: PathBuf::from(shown(&root)),
+        adapter: adapter.name().to_owned(),
+        flavor: flavor.trim_start_matches(" · ").to_owned(),
+        total_steps: count,
+        ..crate::history::RunningBuild::default()
+    };
+    crate::history::update_running(&running);
+    let _running_guard = crate::history::RunningGuard(build_id.clone());
+    let reporter = HumanReporter {
+        running: Some(running),
+        ..HumanReporter::default()
+    };
     let steps = std::sync::Arc::clone(&reporter.steps);
     let events = std::sync::Mutex::new(EventStream::with_sink(
         Box::new(reporter),
@@ -421,8 +436,9 @@ pub fn build_and_collect(
     let elapsed = started.elapsed().as_secs_f64();
     // History (D-042): what this build did, recorded whatever the outcome.
     let history = |succeeded: bool, deliverables: Vec<PathBuf>| {
+        crate::history::finish_running(&build_id);
         crate::history::record(&crate::history::BuildRecord {
-            id: crate::history::new_id(started_ms),
+            id: build_id.clone(),
             started_ms,
             project: PathBuf::from(shown(&root)),
             adapter: adapter.name().to_owned(),
@@ -542,16 +558,31 @@ fn install_artifacts(
 struct HumanReporter {
     started: HashMap<String, Instant>,
     steps: std::sync::Arc<std::sync::Mutex<Vec<crate::history::StepRecord>>>,
+    /// The in-progress record the dashboard shows live (D-044).
+    running: Option<crate::history::RunningBuild>,
 }
 
 impl HumanReporter {
-    fn record(&self, id: &str, status: &str, millis: u64) {
+    fn record(&mut self, id: &str, status: &str, millis: u64) {
+        let step = crate::history::StepRecord {
+            id: id.to_owned(),
+            status: status.to_owned(),
+            millis,
+        };
         if let Ok(mut steps) = self.steps.lock() {
-            steps.push(crate::history::StepRecord {
-                id: id.to_owned(),
-                status: status.to_owned(),
-                millis,
-            });
+            steps.push(step.clone());
+        }
+        if let Some(running) = &mut self.running {
+            running.current.retain(|current| current != id);
+            running.steps.push(step);
+            crate::history::update_running(running);
+        }
+    }
+
+    fn started(&mut self, id: &str) {
+        if let Some(running) = &mut self.running {
+            running.current.push(id.to_owned());
+            crate::history::update_running(running);
         }
     }
 }
@@ -560,6 +591,7 @@ impl EventSink for HumanReporter {
     fn emit(&mut self, event: Event) -> std::io::Result<()> {
         match event.kind {
             EventKind::ActionStarted { action_id } => {
+                self.started(&action_id);
                 self.started.insert(action_id, Instant::now());
             }
             EventKind::ActionFinished {

@@ -96,6 +96,116 @@ fn read_from(file: &Path, limit: usize) -> Vec<BuildRecord> {
         .collect()
 }
 
+/// A build in progress (D-044): rewritten after every step to
+/// `<user cache>/history/running/<id>.json`, removed when the build ends.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RunningBuild {
+    pub id: String,
+    pub started_ms: u64,
+    pub project: PathBuf,
+    pub adapter: String,
+    pub flavor: String,
+    pub total_steps: usize,
+    /// Steps that finished, in order.
+    pub steps: Vec<StepRecord>,
+    /// Steps running now.
+    pub current: Vec<String>,
+    /// When this record was last written (a stale record means the build
+    /// was killed before it could clean up).
+    pub updated_ms: u64,
+}
+
+/// A running record not refreshed for this long belongs to a build that
+/// was killed; it is ignored and removed.
+pub const STALE_RUNNING_MS: u64 = 6 * 60 * 60 * 1000;
+
+fn running_dir() -> Option<PathBuf> {
+    Some(
+        build_adapter::user_cache_dir()?
+            .join("history")
+            .join("running"),
+    )
+}
+
+fn running_file(dir: &Path, id: &str) -> PathBuf {
+    let safe: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    dir.join(format!("{safe}.json"))
+}
+
+/// Write the in-progress record (best effort, atomic replace).
+pub fn update_running(running: &RunningBuild) {
+    let Some(dir) = running_dir() else {
+        return;
+    };
+    let _ = write_running(&dir, running);
+}
+
+fn write_running(dir: &Path, running: &RunningBuild) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let file = running_file(dir, &running.id);
+    let temp = file.with_extension("json.tmp");
+    let mut record = running.clone();
+    record.updated_ms = now_ms();
+    fs::write(
+        &temp,
+        serde_json::to_vec(&record).map_err(std::io::Error::other)?,
+    )?;
+    fs::rename(&temp, &file)
+}
+
+/// Remove the in-progress record of build `id`.
+pub fn finish_running(id: &str) {
+    if let Some(dir) = running_dir() {
+        let _ = fs::remove_file(running_file(&dir, id));
+    }
+}
+
+/// Removes a build's in-progress record when dropped, so every way out of
+/// `ant build` (success, failure, early error) clears it.
+pub struct RunningGuard(pub String);
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        finish_running(&self.0);
+    }
+}
+
+/// Builds in progress, oldest first; stale records are removed.
+pub fn running() -> Vec<RunningBuild> {
+    running_dir()
+        .map(|dir| read_running(&dir, now_ms()))
+        .unwrap_or_default()
+}
+
+fn read_running(dir: &Path, now: u64) -> Vec<RunningBuild> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<RunningBuild> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let record = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RunningBuild>(&bytes).ok());
+        match record {
+            Some(record) if now.saturating_sub(record.updated_ms) < STALE_RUNNING_MS => {
+                found.push(record);
+            }
+            _ => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    found.sort_by_key(|record| record.started_ms);
+    found
+}
+
 /// A fresh build id: start time plus process id.
 pub fn new_id(started_ms: u64) -> String {
     format!("{started_ms}-{}", std::process::id())
@@ -129,6 +239,46 @@ mod tests {
             }],
             deliverables: vec![PathBuf::from("dist/app")],
         }
+    }
+
+    #[test]
+    fn running_records_update_list_and_expire() {
+        let dir = std::env::temp_dir().join(format!("ant-running-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut build = RunningBuild {
+            id: "100-7".to_owned(),
+            started_ms: 100,
+            project: PathBuf::from("/work/app"),
+            adapter: "cargo".to_owned(),
+            total_steps: 2,
+            current: vec!["configure".to_owned()],
+            ..RunningBuild::default()
+        };
+        write_running(&dir, &build).expect("write");
+        build.current = vec!["build".to_owned()];
+        build.steps.push(StepRecord {
+            id: "configure".to_owned(),
+            status: "succeeded".to_owned(),
+            millis: 5,
+        });
+        write_running(&dir, &build).expect("rewrite");
+        let now = now_ms();
+        let found = read_running(&dir, now);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].current, vec!["build".to_owned()]);
+        assert_eq!(found[0].steps.len(), 1);
+        // A record nobody refreshed for hours belongs to a killed build.
+        assert!(read_running(&dir, now + STALE_RUNNING_MS + 1).is_empty());
+        assert!(
+            !running_file(&dir, "100-7").exists(),
+            "stale record removed"
+        );
+        assert_eq!(
+            running_file(&dir, "../../x").file_name().unwrap(),
+            "x.json",
+            "ids cannot escape the directory"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
