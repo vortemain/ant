@@ -387,3 +387,69 @@ fn ant_build_builds_a_go_module_and_reuses_it() {
     assert!(!stdout.contains("reused"), "an edit rebuilds: {stdout:?}");
     assert_eq!(run(), "edited");
 }
+
+#[test]
+fn ant_build_on_a_server_refuses_what_cannot_work() {
+    let dir = TempDir::new("offload");
+    rust_workspace(dir.path());
+    let data = dir.path().join(".ant").join("data-home");
+    let servers = data.join("servers");
+    fs::create_dir_all(&servers).unwrap();
+    let profile = |name: &str, os: &str| {
+        let os = if os.is_empty() {
+            String::new()
+        } else {
+            format!(", \"os\": \"{os}\", \"arch\": \"x86_64\"")
+        };
+        write(
+            &servers.join(format!("{name}.json")),
+            &format!(
+                "{{\"name\": \"{name}\", \"target\": \"me@build-box\", \"remote_port\": 8742, \"deployed_ms\": 1{os}}}"
+            ),
+        );
+    };
+    profile("other", "Plan9");
+    profile("old", "");
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ant"))
+            .current_dir(dir.path())
+            .env("RUST_BACKTRACE", "0")
+            .env("ANT_CACHE_HOME", dir.path().join(".ant").join("cache-home"))
+            .env("ANT_DATA_HOME", &data)
+            .args(args)
+            .output()
+            .expect("spawn ant");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (code, stderr) = run(&["build", "--on", "nowhere"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no server named 'nowhere'"), "{stderr:?}");
+    let (code, stderr) = run(&["build", "--on", "other"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("other runs Plan9") && stderr.contains("--local"),
+        "{stderr:?}"
+    );
+    let (code, stderr) = run(&["build", "--on", "old"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("redeploy once") && stderr.contains("me@build-box"),
+        "{stderr:?}"
+    );
+    let (code, stderr) = run(&["build", "--on", "other", "--local"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("choose one of --on and --local"),
+        "{stderr:?}"
+    );
+    // `server` in ant.toml offloads by default; `--local` builds here.
+    write(&dir.path().join("ant.toml"), "server = \"other\"\n");
+    let (code, stderr) = run(&["build"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("other runs Plan9"), "{stderr:?}");
+    let (code, stderr) = run(&["build", "--local", "--dev"]);
+    assert_eq!(code, 0, "{stderr}");
+}

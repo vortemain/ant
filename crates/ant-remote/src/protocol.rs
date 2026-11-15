@@ -78,6 +78,22 @@ pub struct JobSpec {
     pub protocol_version: u32,
     pub action: Action,
     pub inputs: Vec<Entry>,
+    /// Ask the worker to keep this project's workspace between jobs and
+    /// sync only changed inputs (D-048), so incremental tool state (cargo's
+    /// `target/`, Gradle's `build/`) survives and remote edit loops are
+    /// incremental. 16-64 lowercase hex characters naming the client's
+    /// project; absent means a fresh workspace per job. Results from a kept
+    /// workspace are never written to the shared cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_key: Option<String>,
+}
+
+/// Whether `key` is an acceptable [`JobSpec::workspace_key`].
+pub fn valid_workspace_key(key: &str) -> bool {
+    (16..=64).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

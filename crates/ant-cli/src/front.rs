@@ -35,6 +35,9 @@ pub struct ProjectConfig {
     /// Adapter options (see `ant init` output for what each adapter accepts).
     #[serde(default)]
     pub options: BTreeMap<String, String>,
+    /// Build on this server (set up with `ant server deploy`) instead of on
+    /// this machine (D-048); `ant build --local` overrides it.
+    pub server: Option<String>,
 }
 
 /// A path as users expect to read it: without the `\\?\` verbatim prefix
@@ -222,7 +225,7 @@ fn safe_relative_dir(value: &str) -> Result<PathBuf, String> {
 // ant build
 // ---------------------------------------------------------------------------
 
-const BUILD_USAGE: &str = "usage: ant build [android|ios] [--dev|--release] [--fresh] [--project PATH] [--jobs N] [--verbose]";
+const BUILD_USAGE: &str = "usage: ant build [android|ios] [--dev|--release] [--fresh] [--on SERVER|--local] [--project PATH] [--jobs N] [--verbose]";
 
 pub fn build_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     build_and_collect(args).map(|(code, _)| code)
@@ -241,6 +244,8 @@ pub fn build_and_collect(
     let mut verbose = false;
     let mut fresh = false;
     let mut jobs = None;
+    let mut on: Option<String> = None;
+    let mut local = false;
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -249,6 +254,13 @@ pub fn build_and_collect(
             "--verbose" => verbose = true,
             "--fresh" => fresh = true,
             "--project" => project = Some(args.next().ok_or("--project requires a path")?),
+            "--on" => {
+                on = Some(
+                    args.next()
+                        .ok_or("--on requires a server name (see `ant server list`)")?,
+                )
+            }
+            "--local" => local = true,
             "--jobs" => {
                 jobs = Some(
                     args.next()
@@ -291,6 +303,19 @@ pub fn build_and_collect(
             ));
         }
         _ => {}
+    }
+    if local && on.is_some() {
+        return Err("choose one of --on and --local".to_owned());
+    }
+    // Offload to the developer's own server (D-048): `--on`, or `server` in
+    // ant.toml unless `--local`.
+    let on = if local {
+        None
+    } else {
+        on.or_else(|| config.server.clone())
+    };
+    if let Some(name) = &on {
+        check_server(name, android && release)?;
     }
     let (options, flavor) = build_options(adapter, &config.options, dev, release)?;
     let out_dir = safe_relative_dir(config.out_dir.as_deref().unwrap_or(DEFAULT_OUT_DIR))?;
@@ -369,11 +394,14 @@ pub fn build_and_collect(
 
     let count = plan.actions.len();
     // Adapters without a release/debug notion (npm) show no flavor at all.
-    let flavor = if flavor == "default" {
+    let mut flavor = if flavor == "default" {
         String::new()
     } else {
         format!(" · {flavor}")
     };
+    if let Some(name) = &on {
+        let _ = write!(flavor, " · on {name}");
+    }
     println!(
         "ant build · {}{flavor} · {count} step{} · {jobs} parallel",
         adapter.name(),
@@ -437,14 +465,17 @@ pub fn build_and_collect(
         },
     };
     let results = build_adapter::user_cache_dir().map(|dir| dir.join("local-results"));
-    let code = scheduler::run_plan(
-        &graph,
-        &root,
-        &cancellation,
-        run_options,
-        results.as_deref(),
-        &events,
-    )?;
+    let code = match &on {
+        Some(name) => run_on_server(name, &graph, &root)?,
+        None => scheduler::run_plan(
+            &graph,
+            &root,
+            &cancellation,
+            run_options,
+            results.as_deref(),
+            &events,
+        )?,
+    };
     build_log.finish();
     build_digest::profile::mark("run plan");
     let elapsed = started.elapsed().as_secs_f64();
@@ -504,6 +535,66 @@ pub fn build_and_collect(
     }
     history(true, installed.clone());
     Ok((0, installed.iter().map(|path| root.join(path)).collect()))
+}
+
+/// Refuse offloads that cannot work or must not happen (D-048): an unknown
+/// server, a server running another OS (plans are made on this machine and
+/// name this OS's tools), and signed releases (signing secrets never leave
+/// this machine).
+fn check_server(name: &str, signed: bool) -> Result<(), String> {
+    let profile = crate::server::ServerProfile::load(name)?;
+    if signed {
+        return Err(format!(
+            "signed releases are built on this machine so the signing key never leaves it; \
+             run `ant build --release --local` (or drop --on {name})"
+        ));
+    }
+    let Some(os) = &profile.os else {
+        return Err(format!(
+            "Ant does not know which OS {name} runs; redeploy once to record it: ant server deploy {}",
+            profile.target
+        ));
+    };
+    if !os.eq_ignore_ascii_case(std::env::consts::OS) {
+        return Err(format!(
+            "{name} runs {os} and this machine runs {}; `ant build --on` needs the same OS on both \
+             (the build plan is made here). Build here with --local.",
+            std::env::consts::OS
+        ));
+    }
+    if let Some(arch) = &profile.arch {
+        let arch = if arch == "arm64" {
+            "aarch64"
+        } else {
+            arch.as_str()
+        };
+        if arch != std::env::consts::ARCH {
+            println!(
+                "Note: {name} is {arch} and this machine is {}; what it builds is for {arch}.",
+                std::env::consts::ARCH
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Run the plan on a deployed server through an SSH tunnel, in a workspace
+/// the server keeps for this project so rebuilds there are incremental
+/// (D-048). Outputs come back into the project like a local build's.
+fn run_on_server(name: &str, graph: &build_graph::BuildGraph, root: &Path) -> Result<u8, String> {
+    println!("Connecting to {name}…");
+    let (coordinator, _tunnel) = crate::server::connect(name)?;
+    let digest =
+        build_digest::digest_bytes(format!("ant-remote-workspace\n{}", shown(root)).as_bytes())
+            .to_string();
+    let key = &digest[digest.len() - 32..];
+    ant_remote::client::run_plan_in(
+        &coordinator,
+        graph,
+        root,
+        std::time::Duration::from_millis(200),
+        Some(key),
+    )
 }
 
 /// Spawn-time variables that keep a tool's terminal display when its output

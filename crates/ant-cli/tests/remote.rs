@@ -302,6 +302,7 @@ fn coordinator_enforces_auth_roles_and_safe_paths() {
             digest: None,
             executable: false,
         }],
+        workspace_key: None,
     };
     let worker = cluster.client(WORKER_TOKEN);
     let error = worker
@@ -671,4 +672,68 @@ fn task_cache_routes_are_worker_written() {
             .expect("miss"),
         None
     );
+}
+
+/// D-048: with a workspace key the worker keeps the project's workspace
+/// between jobs (undeclared state such as build caches survives, changed
+/// inputs still arrive); without one every job starts fresh.
+#[test]
+fn kept_workspaces_preserve_incremental_state_between_jobs() {
+    let cluster = Cluster::start("sticky", true);
+    let project = TempDir::new("sticky-project");
+    fs::write(project.path().join("in.txt"), "first\n").expect("input");
+    let command = if cfg!(windows) {
+        "type in.txt >> state.txt & copy /Y state.txt out.txt >nul"
+    } else {
+        "cat in.txt >> state.txt; cp state.txt out.txt"
+    };
+    let plan: build_graph::PlanFile = serde_json::from_value(json!({
+        "schema_version": 1,
+        "actions": [action(
+            "accumulate",
+            command,
+            json!([{ "path": "in.txt", "kind": "file" }]),
+            json!([{ "path": "out.txt", "kind": "file" }]),
+            &[],
+        )]
+    }))
+    .expect("plan");
+    let graph = plan.to_graph().expect("graph");
+    let client = cluster.client(CLIENT_TOKEN);
+    let workspace = project.path().canonicalize().expect("workspace");
+    let run = |key: Option<&str>| {
+        let code = ant_remote::client::run_plan_in(
+            &client,
+            &graph,
+            &workspace,
+            std::time::Duration::from_millis(50),
+            key,
+        )
+        .expect("run");
+        assert_eq!(code, 0);
+        fs::read_to_string(project.path().join("out.txt"))
+            .expect("output")
+            .lines()
+            .map(|line| line.trim().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let key = Some("0123456789abcdef0123456789abcdef");
+    assert_eq!(run(key), vec!["first"]);
+    assert_eq!(run(key), vec!["first", "first"], "state kept between jobs");
+    fs::write(project.path().join("in.txt"), "edited\n").expect("edit");
+    assert_eq!(
+        run(key),
+        vec!["first", "first", "edited"],
+        "a changed input reaches the kept workspace"
+    );
+    assert_eq!(run(None), vec!["edited"], "no key: a fresh workspace");
+    let refused = ant_remote::client::run_plan_in(
+        &client,
+        &graph,
+        &workspace,
+        std::time::Duration::from_millis(50),
+        Some("../../escape"),
+    )
+    .expect("run");
+    assert_ne!(refused, 0, "an invalid key is refused by the worker");
 }

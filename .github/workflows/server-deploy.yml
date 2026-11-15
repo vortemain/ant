@@ -1,7 +1,8 @@
 # `ant server deploy` end to end (D-047): the GitHub Ubuntu runner plays the
 # user's Linux server. A real sshd with a fresh key, a real deploy over SSH
 # (systemd services, service account, tokens), status through the tunnel, a
-# real build on the server via `ant remote run --server`, an idempotent
+# real build on the server via `ant remote run --server`, `ant build --on`
+# with Rust installed for the service account (D-048), an idempotent
 # redeploy, and a check that the coordinator is not reachable from outside.
 name: server-deploy
 
@@ -12,6 +13,7 @@ on:
   pull_request:
     paths:
       - crates/ant-cli/src/server.rs
+      - crates/ant-remote/src/worker.rs
       - .github/workflows/server-deploy.yml
 
 permissions:
@@ -38,7 +40,7 @@ jobs:
       - name: ant server deploy
         env:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
-        run: target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci
+        run: target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci --toolchain rust
       - name: ant server status / list
         env:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
@@ -66,12 +68,41 @@ jobs:
           cat out.txt
           grep -q "hello from the laptop" out.txt
           grep -q "as ant" out.txt
+      - name: ant build --on offloads a cargo project, incrementally (D-048)
+        env:
+          ANT_DATA_HOME: ${{ runner.temp }}/ant-data
+          ANT_CACHE_HOME: ${{ runner.temp }}/ant-cache
+        run: |
+          cd "$RUNNER_TEMP" && cargo new --quiet hello && cd hello
+          cargo generate-lockfile --quiet
+          ant="$GITHUB_WORKSPACE/target/release/ant"
+          start=$(date +%s.%N)
+          "$ant" build --on ci | tee build1.txt
+          first=$(echo "$(date +%s.%N) - $start" | bc)
+          grep -q "on ci" build1.txt
+          ./dist/hello | tee run1.txt
+          grep -q "Hello, world!" run1.txt
+          # Built by the server's own toolchain, as the ant user, in a kept
+          # workspace: cargo's target/ is still there for the next build.
+          sudo sh -c 'ls -d /var/lib/ant/worker/projects/*/target/release' | tee kept.txt
+          [ "$(wc -l < kept.txt)" = 1 ]
+          sudo sh -c 'stat -c %U /var/lib/ant/worker/projects/*/target/release/hello' | grep -qx ant
+          # Edit one file: only that change is sent, the build is incremental.
+          sed -i 's/Hello, world!/Hello again from the server!/' src/main.rs
+          start=$(date +%s.%N)
+          "$ant" build --on ci
+          second=$(echo "$(date +%s.%N) - $start" | bc)
+          ./dist/hello | grep -q "Hello again from the server!"
+          echo "first build ${first}s, after one edit ${second}s"
+          # --local still builds on this machine.
+          "$ant" build --local --dev
+          ./dist/hello | grep -q "Hello again from the server!"
       - name: Redeploy keeps tokens and still works
         env:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
         run: |
           before=$(sudo sha256sum /etc/ant/client.token)
-          target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci
+          target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci --toolchain rust
           [ "$before" = "$(sudo sha256sum /etc/ant/client.token)" ]
           target/release/ant server status ci
       - name: The coordinator is not reachable from outside the server

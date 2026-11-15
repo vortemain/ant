@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 /// The coordinator's port on the server's loopback interface.
 pub const REMOTE_PORT: u16 = 8742;
 
-const USAGE: &str = "usage: ant server deploy USER@HOST [--name NAME] [--port N] [--identity FILE] [--binary PATH] [--sandbox]
+const USAGE: &str = "usage: ant server deploy USER@HOST [--name NAME] [--port N] [--identity FILE] [--binary PATH] [--sandbox] [--toolchain rust]
        ant server status [NAME]
        ant server list
        ant server forget NAME";
@@ -46,9 +46,10 @@ const USAGE: &str = "usage: ant server deploy USER@HOST [--name NAME] [--port N]
 /// Runs on the server as root: install the binary, the service account,
 /// tokens, and the two systemd services, then wait until both are active.
 /// Arguments: MODE (upload|download), SOURCE (uploaded path | target
-/// triple), SANDBOX (0|1), EXPECTED (sha256 of an upload, or -).
+/// triple), SANDBOX (0|1), EXPECTED (sha256 of an upload, or -),
+/// TOOLCHAINS (comma-separated, e.g. `rust`, or -).
 const SETUP_SCRIPT: &str = r#"set -eu
-MODE="$1"; SOURCE="$2"; SANDBOX="$3"; EXPECTED="$4"
+MODE="$1"; SOURCE="$2"; SANDBOX="$3"; EXPECTED="$4"; TOOLCHAINS="$5"
 PORT=8742
 if [ "$MODE" = upload ]; then
   BIN="$SOURCE"
@@ -81,6 +82,28 @@ for name in client worker; do
   if [ ! -s "$f" ]; then (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f"); fi
   chown root:ant "$f"; chmod 0640 "$f"
 done
+case ",$TOOLCHAINS," in
+  *,rust,*)
+    if ! command -v cc >/dev/null 2>&1; then
+      if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -q >/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install -y -q gcc >/dev/null
+      elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q gcc >/dev/null
+      else
+        echo "ant server deploy: Rust needs a C linker (cc); install gcc on this server" >&2
+      fi
+    fi
+    if [ ! -x /var/lib/ant/.cargo/bin/cargo ]; then
+      command -v curl >/dev/null 2>&1 || { echo "ant server deploy: installing Rust needs curl" >&2; exit 6; }
+      INIT=$(mktemp)
+      curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$INIT"
+      chmod 0755 "$INIT"
+      runuser -u ant -- env HOME=/var/lib/ant sh "$INIT" -y --profile minimal --no-modify-path >/dev/null
+      rm -f "$INIT"
+    fi
+    echo "rust: $(runuser -u ant -- env HOME=/var/lib/ant /var/lib/ant/.cargo/bin/cargo --version)"
+    ;;
+esac
 SANDBOX_FLAG=""
 if [ "$SANDBOX" = 1 ]; then SANDBOX_FLAG=" --sandbox"; fi
 cat > /etc/systemd/system/ant-coordinator.service <<UNIT
@@ -112,6 +135,7 @@ Wants=ant-coordinator.service
 User=ant
 Group=ant
 Environment=HOME=/var/lib/ant
+Environment=PATH=/var/lib/ant/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/bin/ant worker --coordinator http://127.0.0.1:$PORT --token-file /etc/ant/worker.token --work-dir /var/lib/ant/worker$SANDBOX_FLAG
 Restart=always
 RestartSec=2
@@ -150,6 +174,11 @@ pub struct ServerProfile {
     pub identity: Option<String>,
     pub remote_port: u16,
     pub deployed_ms: u64,
+    /// `uname -s` / `uname -m` of the server, recorded at deploy time.
+    #[serde(default)]
+    pub os: Option<String>,
+    #[serde(default)]
+    pub arch: Option<String>,
 }
 
 fn servers_dir() -> Result<PathBuf, String> {
@@ -413,6 +442,7 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
     let mut identity = None;
     let mut binary: Option<PathBuf> = None;
     let mut sandbox = false;
+    let mut toolchains: Vec<String> = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} requires a value"));
         match arg.as_str() {
@@ -427,6 +457,15 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
             "--identity" => identity = Some(value("--identity")?),
             "--binary" => binary = Some(PathBuf::from(value("--binary")?)),
             "--sandbox" => sandbox = true,
+            "--toolchain" => {
+                let toolchain = value("--toolchain")?;
+                if toolchain != "rust" {
+                    return Err(format!(
+                        "toolchain '{toolchain}' cannot be installed by Ant yet (supported: rust); install it on the server so the `ant` user finds it on PATH"
+                    ));
+                }
+                toolchains.push(toolchain);
+            }
             other if !other.starts_with('-') && target.is_none() => target = Some(other.to_owned()),
             other => return Err(format!("unexpected argument '{other}'\n{USAGE}")),
         }
@@ -435,13 +474,15 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
     valid_target(&target)?;
     let name = name.unwrap_or_else(|| default_name(&target));
     valid_name(&name)?;
-    let profile = ServerProfile {
+    let mut profile = ServerProfile {
         name: name.clone(),
         target: target.clone(),
         ssh_port,
         identity,
         remote_port: REMOTE_PORT,
         deployed_ms: crate::history::now_ms(),
+        os: None,
+        arch: None,
     };
 
     println!("Checking {target}…");
@@ -473,6 +514,8 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
             "{target} needs root, or passwordless sudo for this user (Ant never types passwords)"
         ));
     }
+    profile.os = Some(os.to_owned());
+    profile.arch = Some(arch.to_owned());
     let remote_target = match arch {
         "x86_64" | "amd64" => "x86_64-unknown-linux-musl",
         "aarch64" | "arm64" => "aarch64-unknown-linux-musl",
@@ -508,14 +551,28 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
         None => ("download", remote_target.to_owned(), "-".to_owned()),
     };
     println!("Installing Ant, its service account, and the coordinator and worker services…");
+    if !toolchains.is_empty() {
+        println!(
+            "  and toolchains: {} (this can take a minute the first time)",
+            toolchains.join(", ")
+        );
+    }
     let sudo_prefix = if root { "" } else { "sudo -n " };
     let output = profile.run(
         &format!(
-            "{sudo_prefix}sh -s -- {mode} {source} {} {expected}",
-            if sandbox { 1 } else { 0 }
+            "{sudo_prefix}sh -s -- {mode} {source} {} {expected} {}",
+            if sandbox { 1 } else { 0 },
+            if toolchains.is_empty() {
+                "-".to_owned()
+            } else {
+                toolchains.join(",")
+            }
         ),
         Some(SETUP_SCRIPT),
     )?;
+    for line in output.lines().filter(|line| line.starts_with("rust: ")) {
+        println!("  {line}");
+    }
     let version = output
         .lines()
         .find_map(|line| line.strip_prefix("ANT_DEPLOY_OK "))
@@ -532,7 +589,7 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
     println!("\n✓ {name} is ready: {version} on {target}");
     println!("  {health}");
     println!("  The coordinator listens only on the server itself; Ant reaches it through SSH.");
-    println!("  Build there:  ant remote run --server {name} --plan .ant/plan.json");
+    println!("  Build there:  ant build --on {name}   (or server = \"{name}\" in ant.toml)");
     println!("  Check it:     ant server status {name}");
     Ok(0)
 }

@@ -113,13 +113,33 @@ fn execute_job(
     if let Err(error) = validate_entries(&spec.inputs) {
         return failure(config, error);
     }
-    let workspace = config.work_dir.join(job_id);
-    let _ = std::fs::remove_dir_all(&workspace);
+    // A kept per-project workspace (D-048), only where results are never
+    // shared: cache-producing workers always build from a fresh workspace.
+    let sticky = spec
+        .workspace_key
+        .as_deref()
+        .filter(|key| crate::protocol::valid_workspace_key(key) && !caches_results(config));
+    if spec.workspace_key.is_some() && sticky.is_none() && !caches_results(config) {
+        return failure(config, "invalid workspace key".to_owned());
+    }
+    let workspace = match sticky {
+        Some(key) => config.work_dir.join("projects").join(key),
+        None => config.work_dir.join(job_id),
+    };
+    if sticky.is_none() {
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
     let result = (|| -> Result<JobResult, String> {
         if caches_results(config) {
             return run_cacheable(coordinator, config, &workspace, spec);
         }
-        materialize(coordinator, &workspace, &spec.inputs)?;
+        match sticky {
+            Some(_) => {
+                sync_workspace(coordinator, &workspace, &spec.inputs)?;
+                prune_projects(&config.work_dir.join("projects"), KEPT_PROJECTS);
+            }
+            None => materialize(coordinator, &workspace, &spec.inputs)?,
+        }
         let workspace = workspace
             .canonicalize()
             .map_err(|error| error.to_string())?;
@@ -146,8 +166,105 @@ fn execute_job(
             cache_key: None,
         })
     })();
-    let _ = std::fs::remove_dir_all(&workspace);
+    if sticky.is_none() {
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
     result.unwrap_or_else(|error| failure(config, error))
+}
+
+/// Kept project workspaces per worker; the least recently used go first.
+const KEPT_PROJECTS: usize = 8;
+
+/// Bring a kept workspace up to date with `inputs` (D-048): write only
+/// files whose content changed (with a fresh modification time, so build
+/// tools see the change), leave unchanged files untouched (so their
+/// incremental state stays valid), and delete files that were inputs last
+/// time but are not any more. Files that were never inputs (tool outputs
+/// such as `target/`) are left alone, like in a developer's own checkout.
+fn sync_workspace(
+    coordinator: &Coordinator,
+    workspace: &Path,
+    inputs: &[Entry],
+) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    std::fs::create_dir_all(workspace.join(".ant").join("tmp"))
+        .map_err(|error| error.to_string())?;
+    let manifest_path = workspace.join(".ant").join("sync-manifest.json");
+    let previous: BTreeMap<String, String> = std::fs::read(&manifest_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let mut current: BTreeMap<String, String> = BTreeMap::new();
+    for entry in inputs.iter().filter(|e| e.kind == EntryKind::Dir) {
+        std::fs::create_dir_all(workspace.join(&entry.path)).map_err(|error| error.to_string())?;
+        current.insert(entry.path.clone(), "dir".to_owned());
+    }
+    let mut changed: Vec<&Entry> = Vec::new();
+    for entry in inputs.iter().filter(|e| e.kind == EntryKind::File) {
+        let digest = entry.digest.clone().expect("validated file entry");
+        let tag = format!("{digest}{}", if entry.executable { "+x" } else { "" });
+        if previous.get(&entry.path) != Some(&tag) || !workspace.join(&entry.path).is_file() {
+            changed.push(entry);
+        }
+        current.insert(entry.path.clone(), tag);
+    }
+    for chunk in changed.chunks(256) {
+        let digests: Vec<String> = chunk
+            .iter()
+            .map(|entry| entry.digest.clone().expect("validated file entry"))
+            .collect();
+        let blobs = coordinator.get_blobs(&digests)?;
+        for (entry, bytes) in chunk.iter().zip(blobs) {
+            let target = workspace.join(&entry.path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            // Replace rather than rewrite in place (hard links elsewhere).
+            let _ = std::fs::remove_file(&target);
+            std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
+            if entry.executable {
+                crate::protocol::make_executable(&target)?;
+            }
+        }
+    }
+    // Inputs that disappeared: files first, then now-empty directories,
+    // deepest first. Never anything that was not an input before.
+    let mut gone: Vec<&String> = previous
+        .keys()
+        .filter(|path| !current.contains_key(*path))
+        .collect();
+    gone.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+    for path in gone {
+        let target = workspace.join(path);
+        if previous[path] == "dir" {
+            let _ = std::fs::remove_dir(&target);
+        } else {
+            let _ = std::fs::remove_file(&target);
+        }
+    }
+    let text = serde_json::to_vec(&current).map_err(|error| error.to_string())?;
+    std::fs::write(&manifest_path, text).map_err(|error| error.to_string())
+}
+
+/// Keep the `keep` most recently used project workspaces.
+fn prune_projects(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut projects: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let manifest = entry.path().join(".ant").join("sync-manifest.json");
+            Some((
+                std::fs::metadata(manifest).ok()?.modified().ok()?,
+                entry.path(),
+            ))
+        })
+        .collect();
+    projects.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, path) in projects.into_iter().skip(keep) {
+        let _ = std::fs::remove_dir_all(path);
+    }
 }
 
 /// Write every declared input into `workspace`, verifying each blob.

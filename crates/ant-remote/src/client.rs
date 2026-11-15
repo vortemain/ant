@@ -24,6 +24,18 @@ pub fn run_plan(
     workspace: &Path,
     poll: Duration,
 ) -> Result<u8, String> {
+    run_plan_in(coordinator, graph, workspace, poll, None)
+}
+
+/// Like [`run_plan`], asking workers to keep this project's workspace
+/// between jobs when `workspace_key` is given (D-048).
+pub fn run_plan_in(
+    coordinator: &Coordinator,
+    graph: &BuildGraph,
+    workspace: &Path,
+    poll: Duration,
+    workspace_key: Option<&str>,
+) -> Result<u8, String> {
     let actions = graph.ordered_actions().map_err(|error| error.to_string())?;
     let mut remaining: Vec<&str> = actions.iter().map(|action| action.id.as_str()).collect();
     for action in actions {
@@ -35,6 +47,7 @@ pub fn run_plan(
             protocol_version: PROTOCOL_VERSION,
             action: action.clone(),
             inputs,
+            workspace_key: workspace_key.map(str::to_owned),
         };
         let submitted: SubmitResponse = coordinator
             .post_json("/v1/jobs", &spec, "job submission")?

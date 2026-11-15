@@ -824,6 +824,7 @@ mod tests {
                 protocol_version: 1,
                 action,
                 inputs: Vec::new(),
+                workspace_key: None,
             },
             state: timeout_state,
             attempts: 1,
