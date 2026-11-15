@@ -264,6 +264,85 @@ fn serve(apks: &[PathBuf], host: Option<IpAddr>, port: u16, once: bool) -> Resul
     Ok(code)
 }
 
+/// A LAN share started from the dashboard (D-046): one APK behind a fresh
+/// token, stopped by `cancel` or when it expires.
+pub(crate) struct ActiveShare {
+    pub url: String,
+    pub file: String,
+    pub expires_ms: u64,
+    pub qr: Vec<String>,
+    pub cancel: CancellationToken,
+}
+
+/// Start sharing `apk` on this computer's network address (or `host`) for
+/// `lifetime`, in background threads; the dashboard keeps running.
+pub(crate) fn start_share(
+    apk: PathBuf,
+    host: Option<IpAddr>,
+    lifetime: Duration,
+) -> Result<ActiveShare, String> {
+    let host = host.or_else(lan_address).ok_or(
+        "this computer has no network address to share on (is Wi-Fi or Ethernet connected?)",
+    )?;
+    let listener = TcpListener::bind(SocketAddr::new(host, 0))
+        .map_err(|error| format!("cannot share on {host}: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let address = listener.local_addr().map_err(|error| error.to_string())?;
+    let token = crate::signing::random_hex(16)?;
+    let base = format!("/{token}/");
+    let url = format!("http://{address}{base}");
+    let qr = qr_matrix(&url)?;
+    let file = file_name(&apk);
+    let cancel = CancellationToken::new();
+    {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let _ = run_server(&listener, &base, &[apk], false, &cancel);
+        });
+    }
+    {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + lifetime;
+            while !cancel.is_cancelled() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            cancel.cancel();
+        });
+    }
+    Ok(ActiveShare {
+        url,
+        file,
+        expires_ms: crate::history::now_ms() + lifetime.as_millis() as u64,
+        qr,
+        cancel,
+    })
+}
+
+/// The QR code for `text` as rows of `0`/`1` (dark modules are `1`), for the
+/// dashboard to draw.
+pub(crate) fn qr_matrix(text: &str) -> Result<Vec<String>, String> {
+    let code = qrcode::QrCode::new(text.as_bytes()).map_err(|error| error.to_string())?;
+    let width = code.width();
+    let colors = code.to_colors();
+    Ok(colors
+        .chunks(width)
+        .map(|row| {
+            row.iter()
+                .map(|color| {
+                    if *color == qrcode::Color::Dark {
+                        '1'
+                    } else {
+                        '0'
+                    }
+                })
+                .collect()
+        })
+        .collect())
+}
+
 /// Accept and answer requests until cancelled or, with `once`, until one
 /// APK was sent completely.
 fn run_server(

@@ -369,6 +369,19 @@ function fileList(entries, compact = false) {
       link.setAttribute("aria-label", `Download ${file.name}, ${bytes(file.bytes)}`);
       if (!compact) link.append(icon("M12 3v11m0 0-4-4m4 4 4-4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"));
       link.append(document.createTextNode(compact ? `Download · ${bytes(file.bytes)}` : "Download"));
+      if (!compact && file.name.toLowerCase().endsWith(".apk")) {
+        const sharing = activeShare && activeShare.file === file.name;
+        const phone = el("button", "btn", sharing ? "Sharing · show code" : "Install on phone");
+        phone.type = "button";
+        phone.dataset.share = file.url;
+        phone.prepend(icon("M8 2h8a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm3 17h2"));
+        phone.setAttribute("aria-label", sharing ? `Show the install code for ${file.name}` : `Install ${file.name} on a phone`);
+        phone.addEventListener("click", () => {
+          if (sharing) showShare(activeShare, null);
+          else startShare(build.id, Number(file.url.split("/").pop()), file.name);
+        });
+        item.append(phone);
+      }
       item.append(link);
     }
     list.append(item);
@@ -488,6 +501,7 @@ function renderRunning() {
 
 // Elapsed timers tick every second without re-rendering anything else.
 setInterval(() => {
+  updateShareExpiry();
   for (const timer of document.querySelectorAll("[data-since]")) {
     timer.textContent = duration(Math.max(0, serverNow() - Number(timer.dataset.since)));
   }
@@ -729,6 +743,103 @@ function renderProjects(builds) {
   }
 }
 
+// ---------- install on phone (D-046) ----------
+
+let activeShare = null; // { file, url, qr, expires_ms } while sharing
+
+async function shareRequest(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Ant-Dashboard": "1" },
+    body: body ? JSON.stringify(body) : "",
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+function drawQr(svg, rows) {
+  svg.replaceChildren();
+  const size = rows.length;
+  const quiet = 4;
+  const total = size + quiet * 2;
+  svg.setAttribute("viewBox", `0 0 ${total} ${total}`);
+  svg.append(svgEl("rect", { x: 0, y: 0, width: total, height: total, class: "qr-light" }));
+  rows.forEach((row, y) => {
+    // One rectangle per run of dark modules keeps the drawing small.
+    let x = 0;
+    while (x < row.length) {
+      if (row[x] !== "1") { x += 1; continue; }
+      let end = x;
+      while (end < row.length && row[end] === "1") end += 1;
+      svg.append(svgEl("rect", { x: x + quiet, y: y + quiet, width: end - x, height: 1, class: "qr-dark" }));
+      x = end;
+    }
+  });
+}
+
+function showShare(share, error) {
+  const dialog = $("share-dialog");
+  activeShare = share;
+  $("share-error").hidden = !error;
+  $("share-error").textContent = error || "";
+  $("share-body").hidden = !share;
+  $("share-stop").hidden = !share;
+  $("share-url").parentElement.hidden = !share;
+  $("share-firewall").hidden = !share || !/Windows/i.test(navigator.userAgent);
+  if (share) {
+    $("share-file").textContent = share.file;
+    drawQr($("share-qr"), share.qr);
+    $("share-url").textContent = share.url;
+    updateShareExpiry();
+  } else {
+    $("share-expiry").textContent = "";
+  }
+  if (!dialog.open) dialog.showModal();
+  render();
+}
+
+function updateShareExpiry() {
+  if (!activeShare) return;
+  const left = activeShare.expires_ms - serverNow();
+  if (left <= 0) {
+    activeShare = null;
+    $("share-expiry").textContent = "Sharing has stopped.";
+    $("share-body").hidden = true;
+    $("share-stop").hidden = true;
+    render();
+    return;
+  }
+  const minutes = Math.floor(left / 60000);
+  const seconds = Math.floor((left % 60000) / 1000);
+  $("share-expiry").textContent =
+    `Sharing on your network for ${minutes}:${String(seconds).padStart(2, "0")} more. Only someone with this link can download it.`;
+}
+
+async function startShare(build, index, file) {
+  $("share-file").textContent = file;
+  try {
+    const data = await shareRequest("api/share", { build, index });
+    showShare(data.share, data.error);
+  } catch (error) {
+    showShare(null, `Could not start sharing (${error.message}). Is \`ant dashboard\` still running?`);
+  }
+}
+
+$("share-stop").addEventListener("click", async () => {
+  try { await shareRequest("api/share/stop"); } catch { /* the share expires on its own */ }
+  activeShare = null;
+  $("share-dialog").close();
+  render();
+});
+$("share-done").addEventListener("click", () => $("share-dialog").close());
+$("share-close").addEventListener("click", () => $("share-dialog").close());
+
+// A share started earlier (another tab, or before a reload) is shown too.
+fetch("api/share", { cache: "no-store" })
+  .then((response) => (response.ok ? response.json() : null))
+  .then((data) => { if (data && data.share) { activeShare = data.share; render(); } })
+  .catch(() => {});
+
 function renderDeliverables(builds) {
   const target = $("files");
   const entries = currentFiles(builds);
@@ -753,6 +864,7 @@ function focusKey(node) {
   return node.id ? `#${node.id}`
     : node.dataset.build ? `[data-build="${CSS.escape(node.dataset.build)}"]`
     : node.dataset.log ? `[data-log="${CSS.escape(node.dataset.log)}"]`
+    : node.dataset.share ? `[data-share="${CSS.escape(node.dataset.share)}"]`
     : node.getAttribute("aria-label") ? `[aria-label="${CSS.escape(node.getAttribute("aria-label"))}"]`
       : node.dataset.filter ? `[data-filter="${node.dataset.filter}"]`
         : null;

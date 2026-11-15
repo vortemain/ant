@@ -112,7 +112,7 @@ Ant builds (instantly if nothing changed) and installs the APK on every phone co
 ant dashboard --open
 ```
 
-Opens a dashboard of this computer's builds in your browser: success rate, how much was reused instead of rebuilt (and roughly how much time that saved), a 14-day activity chart, every project with its recent builds, and the deliverables of each project's latest build, ready to download. It updates by itself while you build: a build in progress shows up within a second with its current step, progress, and a running timer, and "Show live output" streams what the build prints (also kept for finished builds; any signing password is masked). Only your computer can open it (it listens on `127.0.0.1` behind a random link); press Ctrl+C to stop it.
+Opens a dashboard of this computer's builds in your browser: success rate, how much was reused instead of rebuilt (and roughly how much time that saved), a 14-day activity chart, every project with its recent builds, and the deliverables of each project's latest build, ready to download. It updates by itself while you build: a build in progress shows up within a second with its current step, progress, and a running timer, and "Show live output" streams what the build prints (also kept for finished builds; any signing password is masked). Only your computer can open it (it listens on `127.0.0.1` behind a random link); press Ctrl+C to stop it. For an Android app, "Install on phone" next to the APK shows a QR code your phone can scan to download and install it over Wi-Fi.
 
 ## Good to know
 

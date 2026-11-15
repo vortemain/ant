@@ -194,5 +194,32 @@
       </main>
     </div>
   </div>
+  <dialog class="share-dialog" id="share-dialog" aria-labelledby="share-title" aria-describedby="share-steps">
+    <div class="dialog-head">
+      <div>
+        <h2 id="share-title">Install on your phone</h2>
+        <p class="card-sub" id="share-file"></p>
+      </div>
+      <button type="button" class="icon-button" id="share-close" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <p class="share-error" id="share-error" role="alert" hidden></p>
+    <div class="share-body" id="share-body">
+      <svg class="share-qr" id="share-qr" role="img" aria-label="QR code with the download link" shape-rendering="crispEdges"></svg>
+      <ol class="share-steps" id="share-steps">
+        <li>Connect your phone to the same Wi-Fi as this computer.</li>
+        <li>Point its camera at the code and open the link.</li>
+        <li>Tap Download, then allow your browser to install apps when Android asks.</li>
+      </ol>
+    </div>
+    <p class="share-link">Or open <code id="share-url"></code> on the phone.</p>
+    <p class="card-sub" id="share-expiry"></p>
+    <p class="card-sub" id="share-firewall" hidden>If Windows asks whether to allow Ant on private networks, allow it so your phone can connect.</p>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="share-stop">Stop sharing</button>
+      <button type="button" class="btn primary" id="share-done">Done</button>
+    </div>
+  </dialog>
 </body>
 </html>

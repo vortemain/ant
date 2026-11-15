@@ -17,6 +17,7 @@
 //!   still resolve inside that build's project.
 
 use crate::history::{self, BuildRecord};
+use crate::install::ActiveShare;
 use local_executor::CancellationToken;
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -87,12 +88,74 @@ fn open_in_browser(url: &str) {
     }
 }
 
+/// The dashboard's one piece of state that changes: the LAN share started
+/// from "Install on phone" (D-046). `start` is injectable for tests.
+pub(crate) struct ShareControl {
+    slot: std::sync::Mutex<Option<ActiveShare>>,
+    start: Box<StartShare>,
+}
+
+type StartShare = dyn Fn(PathBuf) -> Result<ActiveShare, String> + Send + Sync;
+
+/// How long a share started from the dashboard stays up.
+const SHARE_LIFETIME: Duration = Duration::from_secs(15 * 60);
+
+impl ShareControl {
+    fn new(start: Box<StartShare>) -> Self {
+        Self {
+            slot: std::sync::Mutex::new(None),
+            start,
+        }
+    }
+
+    /// The share still running, if any (expired ones are cleared).
+    fn current_json(&self) -> serde_json::Value {
+        let mut slot = self.slot.lock().expect("share slot");
+        if slot
+            .as_ref()
+            .is_some_and(|share| share.cancel.is_cancelled())
+        {
+            *slot = None;
+        }
+        match slot.as_ref() {
+            Some(share) => serde_json::json!({
+                "file": share.file,
+                "url": share.url,
+                "qr": share.qr,
+                "expires_ms": share.expires_ms,
+            }),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    fn stop(&self) {
+        if let Some(share) = self.slot.lock().expect("share slot").take() {
+            share.cancel.cancel();
+        }
+    }
+
+    fn start(&self, apk: PathBuf) -> Result<(), String> {
+        self.stop();
+        let share = (self.start)(apk)?;
+        *self.slot.lock().expect("share slot") = Some(share);
+        Ok(())
+    }
+}
+
 fn serve(
     listener: &TcpListener,
     address: SocketAddr,
     token: &str,
     cancellation: &CancellationToken,
 ) {
+    // `ANT_SHARE_HOST` picks the network address to share on (machines
+    // with several networks; tests use 127.0.0.1).
+    let share_host = std::env::var("ANT_SHARE_HOST")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    let shares = ShareControl::new(Box::new(move |apk| {
+        crate::install::start_share(apk, share_host, SHARE_LIFETIME)
+    }));
     while !cancellation.is_cancelled() {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -104,6 +167,7 @@ fn serve(
                     &history::recent,
                     &history::running,
                     &|id, from| crate::build_log::read(id, from, LOG_CHUNK),
+                    &shares,
                 );
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -112,13 +176,23 @@ fn serve(
             Err(_) => std::thread::sleep(Duration::from_millis(200)),
         }
     }
+    shares.stop();
 }
 
 struct Request {
     method: String,
     path: String,
     host: String,
+    /// The dashboard's own scripts send `X-Ant-Dashboard: 1` on requests
+    /// that change something. Other web pages cannot send a custom header
+    /// to this origin (it needs a CORS preflight this server never
+    /// approves), so its presence blocks cross-site request forgery.
+    from_dashboard: bool,
+    body: Vec<u8>,
 }
+
+/// Largest request body accepted (share requests are tiny JSON).
+const MAX_BODY: usize = 4096;
 
 fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
     stream.set_nonblocking(false)?;
@@ -131,18 +205,37 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
     let method = parts.next().unwrap_or("").to_owned();
     let path = parts.next().unwrap_or("").to_owned();
     let mut host = String::new();
+    let mut from_dashboard = false;
+    let mut length = 0usize;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 || header == "\r\n" || header == "\n" {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.trim().eq_ignore_ascii_case("host")
-        {
-            host = value.trim().to_owned();
+        if let Some((name, value)) = header.split_once(':') {
+            let name = name.trim();
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("host") {
+                host = value.to_owned();
+            } else if name.eq_ignore_ascii_case("x-ant-dashboard") {
+                from_dashboard = value == "1";
+            } else if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().unwrap_or(usize::MAX);
+            }
         }
     }
-    Ok(Request { method, path, host })
+    let mut body = Vec::new();
+    if length > 0 && length <= MAX_BODY {
+        body.resize(length, 0);
+        reader.read_exact(&mut body)?;
+    }
+    Ok(Request {
+        method,
+        path,
+        host,
+        from_dashboard,
+        body,
+    })
 }
 
 fn respond(
@@ -169,6 +262,7 @@ fn handle(
     builds: &dyn Fn(usize) -> Vec<BuildRecord>,
     running: &dyn Fn() -> Vec<history::RunningBuild>,
     logs: &LogReader,
+    shares: &ShareControl,
 ) -> std::io::Result<()> {
     let request = read_request(&stream)?;
     let allowed_hosts = [
@@ -181,14 +275,51 @@ fn handle(
     {
         return respond(&mut stream, "403 Forbidden", "text/plain", "", b"");
     }
-    if request.method != "GET" {
-        return respond(&mut stream, "405 Method Not Allowed", "text/plain", "", b"");
-    }
     let base = format!("/{token}/");
     let Some(route) = request.path.strip_prefix(&base) else {
         return respond(&mut stream, "404 Not Found", "text/plain", "", b"");
     };
+    // State changes (D-046): POST to the share routes, from the dashboard's
+    // own scripts only.
+    if request.method == "POST" {
+        if !request.from_dashboard {
+            return respond(&mut stream, "403 Forbidden", "text/plain", "", b"");
+        }
+        let reply = match route {
+            "api/share" => start_share_request(&request.body, &builds(SHOWN), shares),
+            "api/share/stop" => {
+                shares.stop();
+                Ok(())
+            }
+            _ => return respond(&mut stream, "404 Not Found", "text/plain", "", b""),
+        };
+        let body = match reply {
+            Ok(()) => serde_json::json!({ "share": shares.current_json() }),
+            Err(message) => serde_json::json!({ "share": shares.current_json(), "error": message }),
+        }
+        .to_string();
+        return respond(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            "",
+            body.as_bytes(),
+        );
+    }
+    if request.method != "GET" {
+        return respond(&mut stream, "405 Method Not Allowed", "text/plain", "", b"");
+    }
     match route {
+        "api/share" => {
+            let body = serde_json::json!({ "share": shares.current_json() }).to_string();
+            respond(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                "",
+                body.as_bytes(),
+            )
+        }
         "" => respond(
             &mut stream,
             "200 OK",
@@ -270,6 +401,26 @@ fn handle(
             None => respond(&mut stream, "404 Not Found", "text/plain", "", b""),
         },
     }
+}
+
+/// Start sharing the APK a recorded build collected (`{"build", "index"}`),
+/// under the same rules as downloads (recorded, still inside the project,
+/// not replaced by a newer build).
+fn start_share_request(
+    body: &[u8],
+    builds: &[BuildRecord],
+    shares: &ShareControl,
+) -> Result<(), String> {
+    let request: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| "expected {\"build\": id, \"index\": n}".to_owned())?;
+    let build = request["build"].as_str().ok_or("missing build")?;
+    let index = request["index"].as_u64().ok_or("missing index")?;
+    let (path, name) = file_for(&format!("{build}/{index}"), builds)
+        .ok_or("that file is not available any more")?;
+    if !name.to_ascii_lowercase().ends_with(".apk") {
+        return Err("only Android apps (.apk) can be installed on a phone".to_owned());
+    }
+    shares.start(path)
 }
 
 /// Reads a build's log from an offset: `(bytes, current size)`.
@@ -384,6 +535,164 @@ mod tests {
         )
     }
 
+    fn post(
+        address: SocketAddr,
+        path: &str,
+        host: &str,
+        body: &str,
+        from_dashboard: bool,
+    ) -> (String, Vec<u8>) {
+        let mut stream = TcpStream::connect(address).expect("connect");
+        let marker = if from_dashboard {
+            "X-Ant-Dashboard: 1\r\n"
+        } else {
+            ""
+        };
+        write!(
+            stream,
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\n{marker}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("request");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("response");
+        let split = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("header end");
+        (
+            String::from_utf8_lossy(&response[..split]).into_owned(),
+            response[split + 4..].to_vec(),
+        )
+    }
+
+    /// D-046: sharing an APK to a phone needs the dashboard's own header,
+    /// only shares recorded APKs, serves the bytes, and stops on request.
+    #[test]
+    fn shares_recorded_apks_to_phones_and_stops() {
+        let project = std::env::temp_dir().join(format!("ant-share-{}", std::process::id()));
+        std::fs::create_dir_all(project.join("dist")).expect("dist");
+        std::fs::write(project.join("dist").join("app-debug.apk"), b"PK-apk-bytes").expect("apk");
+        std::fs::write(project.join("dist").join("tool.exe"), b"MZ").expect("exe");
+        let record = BuildRecord {
+            id: "300-5".to_owned(),
+            started_ms: 300,
+            project: project.clone(),
+            adapter: "gradle".to_owned(),
+            flavor: "debug".to_owned(),
+            succeeded: true,
+            millis: 10,
+            steps: Vec::new(),
+            deliverables: vec![
+                PathBuf::from("dist/app-debug.apk"),
+                PathBuf::from("dist/tool.exe"),
+            ],
+        };
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let address = listener.local_addr().expect("address");
+        let token = "0123456789abcdef0123456789abcdef";
+        let host = format!("127.0.0.1:{}", address.port());
+        let server = std::thread::spawn(move || {
+            let shares = ShareControl::new(Box::new(|apk| {
+                crate::install::start_share(
+                    apk,
+                    Some(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                    Duration::from_secs(60),
+                )
+            }));
+            for _ in 0..6 {
+                let (stream, _) = listener.accept().expect("accept");
+                let records = vec![record.clone()];
+                handle(
+                    stream,
+                    address,
+                    token,
+                    &move |_| records.clone(),
+                    &Vec::new,
+                    &|_, _| None,
+                    &shares,
+                )
+                .expect("handle");
+            }
+        });
+        let start = format!("/{token}/api/share");
+        let (head, _) = post(
+            address,
+            &start,
+            &host,
+            r#"{"build":"300-5","index":0}"#,
+            false,
+        );
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "forged request without the header: {head}"
+        );
+        let (_, body) = post(
+            address,
+            &start,
+            &host,
+            r#"{"build":"300-5","index":1}"#,
+            true,
+        );
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            json["error"].as_str().unwrap_or("").contains(".apk"),
+            "{json}"
+        );
+        let (head, body) = post(
+            address,
+            &start,
+            &host,
+            r#"{"build":"300-5","index":0}"#,
+            true,
+        );
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let share = &json["share"];
+        assert_eq!(share["file"], "app-debug.apk");
+        let url = share["url"].as_str().expect("url").to_owned();
+        assert!(share["qr"].as_array().expect("qr").len() >= 21, "{share}");
+        let (_, body) = get(address, &format!("/{token}/api/share"), &host);
+        assert!(String::from_utf8_lossy(&body).contains("app-debug.apk"));
+        // A phone downloads the APK from the share.
+        let share_address: SocketAddr = url
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .expect("address")
+            .parse()
+            .expect("socket address");
+        let share_path = format!("/{}", url.splitn(4, '/').nth(3).expect("path"));
+        let (head, apk) = get(
+            share_address,
+            &format!("{share_path}app-debug.apk"),
+            "phone",
+        );
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert_eq!(apk, b"PK-apk-bytes");
+        let (_, body) = post(
+            address,
+            &format!("/{token}/api/share/stop"),
+            &host,
+            "",
+            true,
+        );
+        assert!(
+            String::from_utf8_lossy(&body).contains("\"share\":null"),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        let (_, body) = get(address, &format!("/{token}/api/share"), &host);
+        assert!(String::from_utf8_lossy(&body).contains("\"share\":null"));
+        server.join().expect("server");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            TcpStream::connect(share_address).is_err(),
+            "the share stops listening once stopped"
+        );
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
     #[test]
     fn log_chunks_never_split_a_character() {
         let text = "café";
@@ -452,6 +761,7 @@ mod tests {
                             (log[start..].to_vec(), log.len() as u64)
                         })
                     },
+                    &ShareControl::new(Box::new(|_| Err("no sharing in this test".to_owned()))),
                 )
                 .expect("handle");
             }

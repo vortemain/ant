@@ -301,6 +301,32 @@ main { padding: 20px clamp(16px, 3vw, 32px) 40px; display: flex; flex-direction:
 .a91 { color: #ffa198; } .a92 { color: #56d364; } .a93 { color: #e3b341; } .a94 { color: #79c0ff; }
 .a95 { color: #d2a8ff; } .a96 { color: #56d4dd; } .ab { font-weight: 700; } .ad { opacity: 0.75; }
 
+/* ---------- install on phone (D-046) ---------- */
+.file .btn + .btn { margin-left: 8px; }
+.share-dialog {
+  width: min(560px, calc(100vw - 32px)); padding: 22px; border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg);
+}
+.share-dialog::backdrop { background: rgba(10, 12, 16, 0.55); }
+.dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.dialog-head h2 { font-size: 1.05rem; }
+.share-body { display: grid; grid-template-columns: 200px 1fr; gap: 18px; align-items: center; }
+.share-body[hidden] { display: none; }
+.share-qr { width: 200px; height: 200px; border-radius: 10px; border: 1px solid var(--border); }
+.qr-light { fill: #ffffff; } .qr-dark { fill: #000000; }
+.share-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+.share-link { margin: 14px 0 6px; color: var(--muted); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.share-link[hidden], #share-firewall[hidden], .share-error[hidden] { display: none; }
+.share-error {
+  padding: 10px 12px; border-radius: 8px; background: var(--bad-bg); color: var(--bad); font-weight: 500; margin-bottom: 12px;
+}
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.dialog-actions [hidden] { display: none; }
+@media (max-width: 520px) {
+  .share-body { grid-template-columns: 1fr; justify-items: center; }
+  .file { flex-wrap: wrap; }
+}
+
 /* ---------- badges ---------- */
 .status {
   display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600;
