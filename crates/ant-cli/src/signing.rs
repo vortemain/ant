@@ -101,7 +101,7 @@ fn key_dir(app_id: &str) -> Result<PathBuf, String> {
     Ok(data.join("signing").join("android").join(app_id))
 }
 
-fn sealed_name(base: &str) -> String {
+pub(crate) fn sealed_name(base: &str) -> String {
     if cfg!(windows) {
         format!("{base}.dpapi")
     } else {
@@ -119,28 +119,28 @@ pub fn protection_description() -> &'static str {
 }
 
 #[cfg(windows)]
-fn seal(secret: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn seal(secret: &[u8]) -> Result<Vec<u8>, String> {
     ant_sandbox_win::secrets::protect_for_current_user(secret).map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
-fn unseal(blob: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn unseal(blob: &[u8]) -> Result<Vec<u8>, String> {
     ant_sandbox_win::secrets::unprotect_for_current_user(blob).map_err(|error| error.to_string())
 }
 
 #[cfg(not(windows))]
-fn seal(secret: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn seal(secret: &[u8]) -> Result<Vec<u8>, String> {
     Ok(secret.to_vec())
 }
 
 #[cfg(not(windows))]
-fn unseal(blob: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn unseal(blob: &[u8]) -> Result<Vec<u8>, String> {
     Ok(blob.to_vec())
 }
 
 /// Write a file only the current user can read (mode 0600 on Unix; the
 /// per-user profile directory's ACL on Windows). Fails if it exists.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);

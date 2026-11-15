@@ -11,7 +11,7 @@ use std::time::Duration;
 
 const COORDINATOR_USAGE: &str = "usage: ant coordinator --data-dir DIR --client-token-file FILE --worker-token-file FILE [--viewer-token-file FILE] [--listen ADDR] [--allow-non-loopback] [--max-body-mb N]";
 const WORKER_USAGE: &str = "usage: ant worker --coordinator URL --token-file FILE --work-dir DIR [--id NAME] [--sandbox] [--task-cache] [--once] [--allow-insecure-http]";
-const REMOTE_USAGE: &str = "usage: ant remote run --coordinator URL --token-file FILE --plan PLAN.json [--workspace PATH] [--allow-insecure-http]";
+const REMOTE_USAGE: &str = "usage: ant remote run (--server NAME | --coordinator URL --token-file FILE) --plan PLAN.json [--workspace PATH] [--allow-insecure-http]";
 
 /// Minimal flag parser: `--flag VALUE` pairs and boolean `--flag`s.
 struct Flags {
@@ -178,11 +178,25 @@ pub fn remote_command(mut args: impl Iterator<Item = OsString>) -> Result<u8, St
     }
     let flags = Flags::parse(
         args,
-        &["--coordinator", "--token-file", "--plan", "--workspace"],
+        &[
+            "--coordinator",
+            "--token-file",
+            "--plan",
+            "--workspace",
+            "--server",
+        ],
         &["--allow-insecure-http"],
         REMOTE_USAGE,
     )?;
-    let coordinator = connect(&flags, REMOTE_USAGE)?;
+    // `--server NAME` (D-047): a server set up with `ant server deploy`,
+    // reached through an SSH tunnel kept open for the whole run.
+    let (coordinator, _tunnel) = match flags.get("--server") {
+        Some(name) => {
+            let (coordinator, tunnel) = crate::server::connect(name)?;
+            (coordinator, Some(tunnel))
+        }
+        None => (connect(&flags, REMOTE_USAGE)?, None),
+    };
     let graph = crate::load_graph(&PathBuf::from(flags.require("--plan", REMOTE_USAGE)?))?;
     let workspace = match flags.get("--workspace") {
         Some(path) => PathBuf::from(path),

@@ -1,0 +1,86 @@
+# `ant server deploy` end to end (D-047): the GitHub Ubuntu runner plays the
+# user's Linux server. A real sshd with a fresh key, a real deploy over SSH
+# (systemd services, service account, tokens), status through the tunnel, a
+# real build on the server via `ant remote run --server`, an idempotent
+# redeploy, and a check that the coordinator is not reachable from outside.
+name: server-deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["p8-*"]
+  pull_request:
+    paths:
+      - crates/ant-cli/src/server.rs
+      - .github/workflows/server-deploy.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build ant (release)
+        run: cargo build --release --locked -p ant-cli
+      - name: Start an SSH server that accepts this user's new key
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q openssh-server
+          ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -q
+          cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+          chmod 755 ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
+          sudo systemctl start ssh
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new runner@127.0.0.1 'echo ssh ok'
+      - name: ant server deploy
+        env:
+          ANT_DATA_HOME: ${{ runner.temp }}/ant-data
+        run: target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci
+      - name: ant server status / list
+        env:
+          ANT_DATA_HOME: ${{ runner.temp }}/ant-data
+        run: |
+          target/release/ant server list
+          target/release/ant server status ci | tee status.txt
+          grep -q "1 worker online" status.txt
+      - name: A real build on the server through the tunnel
+        env:
+          ANT_DATA_HOME: ${{ runner.temp }}/ant-data
+        run: |
+          mkdir -p "$RUNNER_TEMP/project" && cd "$RUNNER_TEMP/project"
+          echo "hello from the laptop" > in.txt
+          cat > plan.json <<'EOF'
+          {"schema_version": 1, "actions": [{"action": {
+            "schema_version": 1, "id": "on-server",
+            "argv": ["sh", "-c", "{ cat in.txt; echo built on $(hostname) as $(id -un); } > out.txt"],
+            "working_directory": ".",
+            "inputs": [{"path": "in.txt", "kind": "file"}],
+            "outputs": [{"path": "out.txt", "kind": "file"}],
+            "environment": [], "cache_policy": "never"},
+            "dependencies": []}]}
+          EOF
+          "$GITHUB_WORKSPACE/target/release/ant" remote run --server ci --plan plan.json --workspace .
+          cat out.txt
+          grep -q "hello from the laptop" out.txt
+          grep -q "as ant" out.txt
+      - name: Redeploy keeps tokens and still works
+        env:
+          ANT_DATA_HOME: ${{ runner.temp }}/ant-data
+        run: |
+          before=$(sudo sha256sum /etc/ant/client.token)
+          target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci
+          [ "$before" = "$(sudo sha256sum /etc/ant/client.token)" ]
+          target/release/ant server status ci
+      - name: The coordinator is not reachable from outside the server
+        run: |
+          addr=$(hostname -I | awk '{print $1}')
+          if curl -s --max-time 3 "http://$addr:8742/v1/health"; then echo "coordinator reachable on $addr" >&2; exit 1; fi
+          curl -fsS http://127.0.0.1:8742/v1/health
+          systemctl show ant-coordinator -p User -p NoNewPrivileges -p ProtectSystem
+          stat -c '%a %U:%G %n' /etc/ant /etc/ant/client.token /etc/ant/worker.token /var/lib/ant
+      - name: Service logs
+        if: always()
+        run: sudo journalctl -u ant-coordinator -u ant-worker --no-pager | tail -60
