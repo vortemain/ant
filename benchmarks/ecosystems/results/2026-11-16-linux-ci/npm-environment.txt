@@ -1,0 +1,10 @@
+date_utc=2026-11-16T06:42:44Z
+ant_commit=1f989b3
+cpu=Intel(R) Xeon(R) 6975P-C
+cores=4
+os=Ubuntu 26.04.1 LTS Linux 7.0.0-1016-aws
+node=v24.22.3 npm=11.19.1
+java=openjdk version "25.0.5" 2026-10-20 LTS
+ant=Ant 0.1.0
+reps=3
+subject_npm=create-vite@6 react-ts; vite vite/6.4.6 linux-x64 node-v24.22.3

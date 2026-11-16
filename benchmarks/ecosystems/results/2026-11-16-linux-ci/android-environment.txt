@@ -1,0 +1,10 @@
+date_utc=2026-11-16T06:42:35Z
+ant_commit=1f989b3
+cpu=AMD EPYC 9V45 96-Core Processor
+cores=4
+os=Ubuntu 26.04.1 LTS Linux 7.0.0-1019-azure
+node=v24.22.2 npm=11.19.1
+java=openjdk version "17.0.21" 2026-10-20
+ant=Ant 0.1.0
+reps=3
+subject_android=android/compose-samples@25631e8f544a9a1e3f01e296eaf1b4c28428196c JetNews assembleDebug

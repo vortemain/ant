@@ -1,0 +1,21 @@
+subject,tool,scenario,rep,seconds,notes
+android,native,cold,1,2.674,dependencies pre-fetched
+android,native,no-change,1,1.108,
+android,native,no-change,2,1.152,
+android,native,no-change,3,1.052,
+android,native,edit,1,2.061,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,native,revert,1,1.150,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,native,edit,2,1.630,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,native,revert,2,1.042,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,native,edit,3,1.390,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,native,revert,3,1.043,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,ant,cold,1,11.388,dependencies pre-fetched
+android,ant,no-change,1,0.077,
+android,ant,no-change,2,0.051,
+android,ant,no-change,3,0.047,
+android,ant,edit,1,1.495,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,ant,revert,1,0.053,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,ant,edit,2,1.281,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,ant,revert,2,0.034,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,ant,edit,3,1.293,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
+android,ant,revert,3,0.036,app/src/main/java/com/example/jetnews/JetnewsApplication.kt
