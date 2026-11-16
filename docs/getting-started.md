@@ -70,14 +70,17 @@ All fields are optional. Unknown keys are rejected, so typos fail loudly instead
 | JavaScript/TypeScript (npm, including workspaces) | `package.json` with a `build` script | none by default (your build script writes its own output); set `outputs = "entry-points"` under `[options]` to have Ant verify and collect the entries named in `package.json` |
 | C/C++ (CMake) | `CMakeLists.txt` | executables and shared libraries (from CMake's own target list); Visual Studio's bundled CMake is found automatically on Windows |
 | Go (modules) | `go.mod` | one executable per `main` package (release builds are trimmed: no paths or symbols) |
-| Flutter (web) | `pubspec.yaml` using the Flutter SDK | `index.html` and `main.dart.js` |
-| iOS (Xcode, on a Mac) | `*.xcodeproj` / `*.xcworkspace` | none yet (the build lands in `.ant/build`); `ant build ios` |
-| Java (Maven) | `pom.xml` | the `target/` folder (your JAR/WAR) |
+| Flutter (web) | `pubspec.yaml` using the Flutter SDK | the whole web app, in `dist/web/` (ready to host) |
+| iOS (Xcode, on a Mac) | `*.xcodeproj` / `*.xcworkspace` | the `.app` bundle (`sdk = "iphonesimulator"` under `[options]` builds for the simulator with no signing identity; device builds need your Apple signing setup); `ant build ios` |
+| Java (Maven) | `pom.xml` | the packaged JAR/WAR/EAR (side artifacts such as `-sources` are left out) |
 | Python packages | `pyproject.toml` with `[build-system]`, or `setup.py` | the `dist/` folder (wheel and/or sdist) |
 | Desktop apps (Tauri, Electron) | `src-tauri/tauri.conf.json`; an npm project using `electron` | the installer folder (`src-tauri/target/release/bundle/`, `dist/`) |
 | Container images (Docker) | a `Dockerfile` (alone, or `adapter = "docker"` in `ant.toml`) | the image in Docker, or `dist/image.tar` with `output = "tar"` |
+| .NET (C#, F#, VB) | one `*.sln`/`*.slnx`, or one `*.csproj`/`*.fsproj`/`*.vbproj` | the published app, in `dist/<name>/` |
 
 Vite and Next.js projects (npm) report their `dist/` / `.next/` folder automatically.
+
+Each of these is built for real, from the small projects in [`examples/`](../examples/), on Linux, Windows, and macOS by the `verify-adapters` workflow.
 | Android (Gradle wrapper) | `settings.gradle(.kts)` + `gradlew` | each app module's debug APK, signed with your usual debug key; Ant finds the Android SDK in its default location if `ANDROID_HOME` is not set, uses your own Gradle cache, and keeps Gradle's daemon warm between builds |
 
 iOS, web bundlers, desktop installers, containers, and more languages are on the roadmap ([vision](vision.md), [plan](plan.md)).
@@ -123,4 +126,4 @@ Opens a dashboard of this computer's builds in your browser: success rate, how m
 - Ant also remembers the build plan it worked out for your project and reuses it while nothing that shapes it has changed (project files, the toolchain rustup selects, cargo configuration, or `CARGO_*`/`RUSTUP_*` environment), so it does not ask cargo about your workspace on every build.
 - Set `ANT_PROFILE=1` to see where an `ant build` spends its time.
 - Ant's working files live in `.ant/` (for example `.ant/plan.json`, the exact plan it ran); you can delete them at any time.
-- Have a Linux server and a Linux machine? `ant server deploy you@your-server --toolchain rust` installs Ant (and Rust) there over SSH in one step (nothing is exposed to the internet; Ant talks to it through SSH), `ant server status` checks it, and `ant build --on NAME` builds there, with deliverables in `dist/` as usual. The server keeps your project's build state, so rebuilds after an edit stay incremental. Put `server = "NAME"` in `ant.toml` to always build there, and `ant build --local` to build here anyway. Signed releases always build on your machine. Add `--workers N` to `ant server deploy` so independent build steps run side by side on a bigger server. Details: [remote operations](remote/operations.md).
+- Have a Linux server and a Linux machine? `ant server deploy you@your-server --toolchain rust` installs Ant (and Rust) there over SSH in one step (nothing is exposed to the internet; Ant talks to it through SSH), `ant server status` checks it, and `ant build --on NAME` builds there, with deliverables in `dist/` as usual. The server keeps your project's build state, so rebuilds after an edit stay incremental. Put `server = "NAME"` in `ant.toml` to build there by default: when that server cannot take a build (it is unreachable, runs another OS, or the build is a signed release), Ant says why and builds on your machine. `ant build --local` builds here anyway; `ant build --on NAME` insists. If one step fails, Ant stops the steps still running on the server. Your servers are also listed, with a health check, on the dashboard's Servers page. Signed releases always build on your machine. Add `--workers N` to `ant server deploy` so independent build steps run side by side on a bigger server. Details: [remote operations](remote/operations.md).

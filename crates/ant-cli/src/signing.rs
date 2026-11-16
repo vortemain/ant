@@ -179,7 +179,7 @@ mod keyring {
         Ok(output.stdout)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     fn service(id: &str) -> String {
         format!("dev.ant.secret.{id}")
     }
