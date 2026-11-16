@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 /// The coordinator's port on the server's loopback interface.
 pub const REMOTE_PORT: u16 = 8742;
 
-const USAGE: &str = "usage: ant server deploy USER@HOST [--name NAME] [--port N] [--identity FILE] [--binary PATH] [--sandbox] [--toolchain rust]
+const USAGE: &str = "usage: ant server deploy USER@HOST [--name NAME] [--port N] [--identity FILE] [--binary PATH] [--sandbox] [--toolchain rust] [--workers N]
        ant server status [NAME]
        ant server list
        ant server forget NAME";
@@ -47,9 +47,9 @@ const USAGE: &str = "usage: ant server deploy USER@HOST [--name NAME] [--port N]
 /// tokens, and the two systemd services, then wait until both are active.
 /// Arguments: MODE (upload|download), SOURCE (uploaded path | target
 /// triple), SANDBOX (0|1), EXPECTED (sha256 of an upload, or -),
-/// TOOLCHAINS (comma-separated, e.g. `rust`, or -).
+/// TOOLCHAINS (comma-separated, e.g. `rust`, or -), WORKERS (1-16).
 const SETUP_SCRIPT: &str = r#"set -eu
-MODE="$1"; SOURCE="$2"; SANDBOX="$3"; EXPECTED="$4"; TOOLCHAINS="$5"
+MODE="$1"; SOURCE="$2"; SANDBOX="$3"; EXPECTED="$4"; TOOLCHAINS="$5"; WORKERS="${6:-1}"
 PORT=8742
 if [ "$MODE" = upload ]; then
   BIN="$SOURCE"
@@ -148,14 +148,55 @@ ReadWritePaths=/var/lib/ant
 [Install]
 WantedBy=multi-user.target
 UNIT
+# Extra workers (D-050): ant-worker@2 ... ant-worker@N, each with its own
+# work directory, so up to N independent actions build at once.
+cat > /etc/systemd/system/ant-worker@.service <<UNIT
+[Unit]
+Description=Ant worker %i (installed by ant server deploy)
+After=ant-coordinator.service
+Wants=ant-coordinator.service
+
+[Service]
+User=ant
+Group=ant
+Environment=HOME=/var/lib/ant
+Environment=PATH=/var/lib/ant/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/ant worker --coordinator http://127.0.0.1:$PORT --token-file /etc/ant/worker.token --work-dir /var/lib/ant/worker-%i --id %H-%i$SANDBOX_FLAG
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ant
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 systemctl daemon-reload
 systemctl enable ant-coordinator.service ant-worker.service >/dev/null 2>&1
 systemctl restart ant-coordinator.service
 systemctl restart ant-worker.service
+UNITS="ant-coordinator.service ant-worker.service"
+n=2
+while [ "$n" -le 16 ]; do
+  if [ "$n" -le "$WORKERS" ]; then
+    install -d -m 0750 -o ant -g ant "/var/lib/ant/worker-$n"
+    systemctl enable "ant-worker@$n.service" >/dev/null 2>&1
+    systemctl restart "ant-worker@$n.service"
+    UNITS="$UNITS ant-worker@$n.service"
+  else
+    systemctl disable --now "ant-worker@$n.service" >/dev/null 2>&1 || true
+  fi
+  n=$((n + 1))
+done
 i=0
-until systemctl is-active --quiet ant-coordinator.service && systemctl is-active --quiet ant-worker.service; do
+while :; do
+  all=1
+  for unit in $UNITS; do systemctl is-active --quiet "$unit" || all=0; done
+  [ "$all" = 1 ] && break
   i=$((i + 1))
-  if [ "$i" -ge 30 ]; then systemctl status --no-pager ant-coordinator.service ant-worker.service >&2 || true; exit 5; fi
+  if [ "$i" -ge 30 ]; then systemctl status --no-pager $UNITS >&2 || true; exit 5; fi
   sleep 1
 done
 echo "ANT_DEPLOY_OK $(/usr/local/bin/ant --version)"
@@ -443,6 +484,7 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
     let mut binary: Option<PathBuf> = None;
     let mut sandbox = false;
     let mut toolchains: Vec<String> = Vec::new();
+    let mut workers: u8 = 1;
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} requires a value"));
         match arg.as_str() {
@@ -457,6 +499,13 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
             "--identity" => identity = Some(value("--identity")?),
             "--binary" => binary = Some(PathBuf::from(value("--binary")?)),
             "--sandbox" => sandbox = true,
+            "--workers" => {
+                workers = value("--workers")?
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|n| (1..=16).contains(n))
+                    .ok_or("--workers takes a number from 1 to 16")?;
+            }
             "--toolchain" => {
                 let toolchain = value("--toolchain")?;
                 if toolchain != "rust" {
@@ -560,7 +609,7 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
     let sudo_prefix = if root { "" } else { "sudo -n " };
     let output = profile.run(
         &format!(
-            "{sudo_prefix}sh -s -- {mode} {source} {} {expected} {}",
+            "{sudo_prefix}sh -s -- {mode} {source} {} {expected} {} {workers}",
             if sandbox { 1 } else { 0 },
             if toolchains.is_empty() {
                 "-".to_owned()
@@ -697,7 +746,7 @@ pub fn server_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
             let _ = std::fs::remove_file(dir.join(sealed_name(&format!("{name}.token"))));
             println!(
                 "Forgot {name} on this computer. The server itself still runs Ant; remove it there with: \
-                 sudo systemctl disable --now ant-worker ant-coordinator"
+                 sudo systemctl disable --now 'ant-worker@*' ant-worker ant-coordinator"
             );
             Ok(0)
         }

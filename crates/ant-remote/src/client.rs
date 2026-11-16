@@ -40,32 +40,121 @@ pub fn run_plan_in(
     workspace_key: Option<&str>,
     output: Option<OutputHandler<'_>>,
 ) -> Result<u8, String> {
-    let actions = graph.ordered_actions().map_err(|error| error.to_string())?;
-    let mut remaining: Vec<&str> = actions.iter().map(|action| action.id.as_str()).collect();
-    for action in actions {
-        remaining.remove(0);
-        println!("action={} status=started remote=true", action.id);
-        let inputs = collect_inputs(workspace, action)?;
-        upload_missing(coordinator, workspace, &inputs)?;
-        let spec = JobSpec {
-            protocol_version: PROTOCOL_VERSION,
-            action: action.clone(),
-            inputs,
-            workspace_key: workspace_key.map(str::to_owned),
-        };
-        let submitted: SubmitResponse = coordinator
-            .post_json("/v1/jobs", &spec, "job submission")?
-            .ok_or("job submission returned no body")?;
-        let status = wait(coordinator, &submitted.job_id, action, poll, output)?;
-        let code = report(coordinator, workspace, action, &status)?;
-        if code != 0 {
-            for id in &remaining {
-                println!("action={id} status=skipped");
+    // Every action whose dependencies are done is submitted at once; the
+    // coordinator queues them and each worker leases one at a time, so with
+    // N workers up to N actions run in parallel (D-050). Fail-fast: after a
+    // failure nothing new is submitted, actions already submitted finish.
+    let nodes = graph.ordered_nodes().map_err(|error| error.to_string())?;
+    let parallel = nodes.len() > 1;
+    let mut pending: Vec<&build_graph::BuildNode> = nodes;
+    let mut running: Vec<RunningJob<'_>> = Vec::new();
+    let mut done: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut failed: Option<u8> = None;
+    loop {
+        if failed.is_none() {
+            let mut index = 0;
+            while index < pending.len() {
+                let node = pending[index];
+                if !node
+                    .dependencies
+                    .iter()
+                    .all(|dependency| done.contains(dependency.as_str()))
+                {
+                    index += 1;
+                    continue;
+                }
+                pending.remove(index);
+                let action = &node.action;
+                println!("action={} status=started remote=true", action.id);
+                let inputs = collect_inputs(workspace, action)?;
+                upload_missing(coordinator, workspace, &inputs)?;
+                let spec = JobSpec {
+                    protocol_version: PROTOCOL_VERSION,
+                    action: action.clone(),
+                    inputs,
+                    workspace_key: workspace_key.map(str::to_owned),
+                };
+                let submitted: SubmitResponse = coordinator
+                    .post_json("/v1/jobs", &spec, "job submission")?
+                    .ok_or("job submission returned no body")?;
+                running.push(RunningJob {
+                    action,
+                    job_id: submitted.job_id,
+                    // Generous client-side bound: the action's own timeout
+                    // plus queueing and transfer; none means wait.
+                    deadline: action.timeout_ms.map(|ms| {
+                        Instant::now() + Duration::from_millis(ms) + Duration::from_secs(600)
+                    }),
+                    log: output.map(|handler| LogFollower {
+                        handler,
+                        next: 0,
+                        truncated: false,
+                        prefix: parallel.then(|| format!("[{}] ", action.id)),
+                        partial: String::new(),
+                    }),
+                });
             }
-            return Ok(code);
+        }
+        if running.is_empty() {
+            break;
+        }
+        std::thread::sleep(poll);
+        let mut index = 0;
+        while index < running.len() {
+            let job = &mut running[index];
+            let status: JobStatus =
+                coordinator.get_json(&format!("/v1/jobs/{}", job.job_id), "job status")?;
+            if let Some(follower) = &mut job.log
+                && !follower.follow(coordinator, &job.job_id)
+            {
+                job.log = None;
+            }
+            if !matches!(status.state, JobState::Completed | JobState::Failed) {
+                if job
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() > deadline)
+                {
+                    return Err(format!(
+                        "job {} did not finish in time (state {:?})",
+                        job.job_id, status.state
+                    ));
+                }
+                index += 1;
+                continue;
+            }
+            let job = running.remove(index);
+            if let Some(mut follower) = job.log {
+                follower.finish();
+            }
+            let code = report(coordinator, workspace, job.action, &status)?;
+            if code == 0 {
+                done.insert(job.action.id.as_str());
+            } else {
+                failed.get_or_insert(code);
+            }
         }
     }
+    if let Some(code) = failed {
+        for node in &pending {
+            println!("action={} status=skipped", node.action.id);
+        }
+        return Ok(code);
+    }
+    if let Some(node) = pending.first() {
+        return Err(format!(
+            "action {} never became ready (unfinished dependencies)",
+            node.action.id
+        ));
+    }
     Ok(0)
+}
+
+/// A submitted job the client is waiting for.
+struct RunningJob<'a> {
+    action: &'a Action,
+    job_id: String,
+    deadline: Option<Instant>,
+    log: Option<LogFollower<'a>>,
 }
 
 fn rel(path: &Path) -> String {
@@ -165,49 +254,14 @@ fn upload_missing(
     coordinator.put_blobs(&blobs)
 }
 
-fn wait(
-    coordinator: &Coordinator,
-    job_id: &str,
-    action: &Action,
-    poll: Duration,
-    output: Option<OutputHandler<'_>>,
-) -> Result<JobStatus, String> {
-    // Generous client-side bound: the action's own timeout plus queueing and
-    // transfer; without a timeout the client waits until the job finishes.
-    let deadline = action
-        .timeout_ms
-        .map(|ms| Instant::now() + Duration::from_millis(ms) + Duration::from_secs(600));
-    let mut log = output.map(|handler| LogFollower {
-        handler,
-        next: 0,
-        truncated: false,
-    });
-    loop {
-        let status: JobStatus =
-            coordinator.get_json(&format!("/v1/jobs/{job_id}"), "job status")?;
-        if let Some(follower) = &mut log
-            && !follower.follow(coordinator, job_id)
-        {
-            log = None;
-        }
-        if matches!(status.state, JobState::Completed | JobState::Failed) {
-            return Ok(status);
-        }
-        if deadline.is_some_and(|deadline| Instant::now() > deadline) {
-            return Err(format!(
-                "job {job_id} did not finish in time (state {:?})",
-                status.state
-            ));
-        }
-        std::thread::sleep(poll);
-    }
-}
-
-/// Prints a job's output as it grows (D-049).
+/// Prints a job's output as it grows (D-049). With several jobs running at
+/// once each line carries the action's id (D-050).
 struct LogFollower<'a> {
     handler: OutputHandler<'a>,
     next: u64,
     truncated: bool,
+    prefix: Option<String>,
+    partial: String,
 }
 
 impl LogFollower<'_> {
@@ -221,14 +275,39 @@ impl LogFollower<'_> {
             return false;
         };
         if !log.text.is_empty() {
-            (self.handler)(&log.text);
+            self.emit(&log.text);
         }
         if log.truncated && !self.truncated {
             self.truncated = true;
-            (self.handler)("\n[ant: output truncated on the server; the build continues]\n");
+            self.emit("\n[ant: output truncated on the server; the build continues]\n");
         }
         self.next = log.next;
         true
+    }
+
+    fn emit(&mut self, text: &str) {
+        let Some(prefix) = &self.prefix else {
+            (self.handler)(text);
+            return;
+        };
+        self.partial.push_str(text);
+        let Some(end) = self.partial.rfind('\n') else {
+            return;
+        };
+        let complete: String = self.partial.drain(..=end).collect();
+        let mut out = String::with_capacity(complete.len() + prefix.len() * 4);
+        for line in complete.split_inclusive('\n') {
+            out.push_str(prefix);
+            out.push_str(line);
+        }
+        (self.handler)(&out);
+    }
+
+    /// The last line, when the tool's output did not end with a newline.
+    fn finish(&mut self) {
+        if self.prefix.is_some() && !self.partial.is_empty() {
+            self.emit("\n");
+        }
     }
 }
 

@@ -54,7 +54,7 @@ struct Cluster {
     dir: TempDir,
     url: String,
     _coordinator: Guard,
-    _worker: Option<Guard>,
+    workers: Vec<Guard>,
 }
 
 impl Cluster {
@@ -87,32 +87,37 @@ impl Cluster {
             .to_owned();
         let url = format!("http://{addr}");
         let coordinator = Guard(coordinator);
-        let worker = with_worker.then(|| {
-            Guard(
-                Command::new(env!("CARGO_BIN_EXE_ant"))
-                    .args([
-                        "worker",
-                        "--coordinator",
-                        &url,
-                        "--id",
-                        "test-worker",
-                        "--token-file",
-                    ])
-                    .arg(dir.path().join("worker.token"))
-                    .arg("--work-dir")
-                    .arg(dir.path().join("work"))
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .expect("spawn worker"),
-            )
-        });
-        Cluster {
+        let mut cluster = Cluster {
             dir,
             url,
             _coordinator: coordinator,
-            _worker: worker,
+            workers: Vec::new(),
+        };
+        if with_worker {
+            cluster.add_worker("test-worker", "work");
         }
+        cluster
+    }
+
+    fn add_worker(&mut self, id: &str, work_dir: &str) {
+        self.workers.push(Guard(
+            Command::new(env!("CARGO_BIN_EXE_ant"))
+                .args([
+                    "worker",
+                    "--coordinator",
+                    &self.url,
+                    "--id",
+                    id,
+                    "--token-file",
+                ])
+                .arg(self.dir.path().join("worker.token"))
+                .arg("--work-dir")
+                .arg(self.dir.path().join(work_dir))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn worker"),
+        ));
     }
 
     fn client(&self, token: &str) -> Coordinator {
@@ -816,4 +821,146 @@ fn job_output_streams_to_the_client() {
         .get_json::<ant_remote::protocol::JobLog>(&format!("{path}?from=x"), "log")
         .expect_err("bad offset");
     assert!(error.contains("400"), "{error}");
+}
+
+/// D-050: independent actions run on different workers at the same time;
+/// a dependent action waits for both and sees their outputs; with several
+/// actions each output line names its action.
+#[test]
+fn independent_actions_run_in_parallel_on_several_workers() {
+    let mut cluster = Cluster::start("parallel", true);
+    cluster.add_worker("second-worker", "work-2");
+    let project = TempDir::new("parallel-project");
+    let (slow_a, slow_b, join) = if cfg!(windows) {
+        (
+            "ping -n 4 127.0.0.1 >nul & echo from a> a.txt & echo a done",
+            "ping -n 4 127.0.0.1 >nul & echo from b> b.txt & echo b done",
+            "copy /b a.txt+b.txt both.txt >nul",
+        )
+    } else {
+        (
+            "sleep 3; echo from a > a.txt; echo a done",
+            "sleep 3; echo from b > b.txt; echo b done",
+            "cat a.txt b.txt > both.txt",
+        )
+    };
+    let plan: build_graph::PlanFile = serde_json::from_value(json!({
+        "schema_version": 1,
+        "actions": [
+            action("a", slow_a, json!([]), json!([{ "path": "a.txt", "kind": "file" }]), &[]),
+            action("b", slow_b, json!([]), json!([{ "path": "b.txt", "kind": "file" }]), &[]),
+            action(
+                "join",
+                join,
+                json!([{ "path": "a.txt", "kind": "file" }, { "path": "b.txt", "kind": "file" }]),
+                json!([{ "path": "both.txt", "kind": "file" }]),
+                &["a", "b"],
+            ),
+        ]
+    }))
+    .expect("plan");
+    let graph = plan.to_graph().expect("graph");
+    let client = cluster.client(CLIENT_TOKEN);
+    // Both workers registered before timing anything.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let workers: serde_json::Value =
+            client.get_json("/v1/workers", "workers").expect("workers");
+        if workers["workers"].as_array().map_or(0, Vec::len) >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "workers never registered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let workspace = project.path().canonicalize().expect("workspace");
+    let seen = std::sync::Mutex::new(String::new());
+    let handler = |text: &str| seen.lock().expect("lock").push_str(text);
+    let started = std::time::Instant::now();
+    let code = ant_remote::client::run_plan_in(
+        &client,
+        &graph,
+        &workspace,
+        std::time::Duration::from_millis(50),
+        None,
+        Some(&handler),
+    )
+    .expect("run");
+    let elapsed = started.elapsed();
+    assert_eq!(code, 0);
+    let both = fs::read_to_string(project.path().join("both.txt")).expect("joined");
+    assert!(
+        both.contains("from a") && both.contains("from b"),
+        "{both:?}"
+    );
+    let jobs: ant_remote::protocol::JobList = client.get_json("/v1/jobs", "jobs").expect("jobs");
+    let worker_of = |id: &str| {
+        jobs.jobs
+            .iter()
+            .find(|job| job.action_id == id)
+            .and_then(|job| job.worker_id.clone())
+            .expect("worker")
+    };
+    assert_ne!(
+        worker_of("a"),
+        worker_of("b"),
+        "a and b ran on different workers"
+    );
+    // Sequentially a and b alone take 6 s.
+    assert!(
+        elapsed < std::time::Duration::from_millis(5500),
+        "a and b overlapped: {elapsed:?}"
+    );
+    let seen = seen.into_inner().expect("lock");
+    assert!(
+        seen.contains("[a] a done") && seen.contains("[b] b done"),
+        "{seen:?}"
+    );
+}
+
+/// D-050: in a kept workspace, syncing one action's inputs never deletes
+/// another action's inputs.
+#[test]
+fn kept_workspaces_keep_other_actions_inputs() {
+    let cluster = Cluster::start("sticky-actions", true);
+    let project = TempDir::new("sticky-actions-project");
+    fs::write(project.path().join("a.txt"), "a\n").expect("input");
+    fs::write(project.path().join("b.txt"), "b\n").expect("input");
+    let check = if cfg!(windows) {
+        "if exist a.txt (copy /Y b.txt out-b.txt >nul) else (exit 3)"
+    } else {
+        "test -f a.txt && cp b.txt out-b.txt"
+    };
+    let copy_a = if cfg!(windows) {
+        "copy /Y a.txt out-a.txt >nul"
+    } else {
+        "cp a.txt out-a.txt"
+    };
+    let plan: build_graph::PlanFile = serde_json::from_value(json!({
+        "schema_version": 1,
+        "actions": [
+            action("a", copy_a, json!([{ "path": "a.txt", "kind": "file" }]),
+                json!([{ "path": "out-a.txt", "kind": "file" }]), &[]),
+            action("b", check, json!([{ "path": "b.txt", "kind": "file" }]),
+                json!([{ "path": "out-b.txt", "kind": "file" }]), &["a"]),
+        ]
+    }))
+    .expect("plan");
+    let graph = plan.to_graph().expect("graph");
+    let client = cluster.client(CLIENT_TOKEN);
+    let workspace = project.path().canonicalize().expect("workspace");
+    for _ in 0..2 {
+        let code = ant_remote::client::run_plan_in(
+            &client,
+            &graph,
+            &workspace,
+            std::time::Duration::from_millis(50),
+            Some("00112233445566778899aabbccddeeff"),
+            None,
+        )
+        .expect("run");
+        assert_eq!(code, 0, "b still finds a's input in the kept workspace");
+    }
 }

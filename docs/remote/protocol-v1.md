@@ -99,4 +99,4 @@ On a hit the worker reports the stored outputs without executing (`JobResult.reu
 - Tool output (D-049) is kept in coordinator memory only (up to 4 MiB per job, then truncated) and only the direct executor streams it; sandboxed workers do not capture output yet.
 - No cancellation propagation from client to worker; a client that gives up leaves the job to run.
 - No job routing by OS/toolchain, no fairness between clients, no blob garbage collection, single coordinator.
-- The client runs actions sequentially (no remote parallelism yet) and does not consult the local cache.
+- The client submits every ready action at once (D-050); after a failure it submits nothing new but cannot cancel jobs already submitted. It does not consult the local cache.

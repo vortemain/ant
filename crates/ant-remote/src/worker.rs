@@ -135,7 +135,7 @@ fn execute_job(
         }
         match sticky {
             Some(_) => {
-                sync_workspace(coordinator, &workspace, &spec.inputs)?;
+                sync_workspace(coordinator, &workspace, &spec.action.id, &spec.inputs)?;
                 prune_projects(&config.work_dir.join("projects"), KEPT_PROJECTS);
             }
             None => materialize(coordinator, &workspace, &spec.inputs)?,
@@ -260,29 +260,45 @@ const KEPT_PROJECTS: usize = 8;
 fn sync_workspace(
     coordinator: &Coordinator,
     workspace: &Path,
+    action_id: &str,
     inputs: &[Entry],
 ) -> Result<(), String> {
     use std::collections::BTreeMap;
-    std::fs::create_dir_all(workspace.join(".ant").join("tmp"))
-        .map_err(|error| error.to_string())?;
-    let manifest_path = workspace.join(".ant").join("sync-manifest.json");
-    let previous: BTreeMap<String, String> = std::fs::read(&manifest_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let ant_dir = workspace.join(".ant");
+    std::fs::create_dir_all(ant_dir.join("tmp")).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(ant_dir.join("sync")).map_err(|error| error.to_string())?;
+    let read = |path: &Path| -> BTreeMap<String, String> {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    };
+    // What is on disk now (path -> content tag), shared by every action of
+    // the project, so a file another action already wrote is not rewritten.
+    let manifest_path = ant_dir.join("sync-manifest.json");
+    let mut on_disk = read(&manifest_path);
+    // This action's inputs last time: only these may be deleted when they
+    // disappear, so one action never removes another action's sources.
+    let action_hex = digest_bytes(action_id.as_bytes()).to_string();
+    let action_path = ant_dir
+        .join("sync")
+        .join(format!("{}.json", action_hex.trim_start_matches("sha256:")));
+    let previous = read(&action_path);
     let mut current: BTreeMap<String, String> = BTreeMap::new();
     for entry in inputs.iter().filter(|e| e.kind == EntryKind::Dir) {
         std::fs::create_dir_all(workspace.join(&entry.path)).map_err(|error| error.to_string())?;
+        on_disk.insert(entry.path.clone(), "dir".to_owned());
         current.insert(entry.path.clone(), "dir".to_owned());
     }
     let mut changed: Vec<&Entry> = Vec::new();
     for entry in inputs.iter().filter(|e| e.kind == EntryKind::File) {
         let digest = entry.digest.clone().expect("validated file entry");
         let tag = format!("{digest}{}", if entry.executable { "+x" } else { "" });
-        if previous.get(&entry.path) != Some(&tag) || !workspace.join(&entry.path).is_file() {
+        if on_disk.get(&entry.path) != Some(&tag) || !workspace.join(&entry.path).is_file() {
             changed.push(entry);
         }
-        current.insert(entry.path.clone(), tag);
+        on_disk.insert(entry.path.clone(), tag);
+        current.insert(entry.path.clone(), "file".to_owned());
     }
     for chunk in changed.chunks(256) {
         let digests: Vec<String> = chunk
@@ -303,8 +319,8 @@ fn sync_workspace(
             }
         }
     }
-    // Inputs that disappeared: files first, then now-empty directories,
-    // deepest first. Never anything that was not an input before.
+    // This action's inputs that disappeared: files first, then now-empty
+    // directories, deepest first. Never anything that was not an input.
     let mut gone: Vec<&String> = previous
         .keys()
         .filter(|path| !current.contains_key(*path))
@@ -317,8 +333,11 @@ fn sync_workspace(
         } else {
             let _ = std::fs::remove_file(&target);
         }
+        on_disk.remove(path);
     }
     let text = serde_json::to_vec(&current).map_err(|error| error.to_string())?;
+    std::fs::write(&action_path, text).map_err(|error| error.to_string())?;
+    let text = serde_json::to_vec(&on_disk).map_err(|error| error.to_string())?;
     std::fs::write(&manifest_path, text).map_err(|error| error.to_string())
 }
 

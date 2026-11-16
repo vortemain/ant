@@ -2,7 +2,8 @@
 # user's Linux server. A real sshd with a fresh key, a real deploy over SSH
 # (systemd services, service account, tokens), status through the tunnel, a
 # real build on the server via `ant remote run --server`, `ant build --on`
-# with Rust installed for the service account (D-048), an idempotent
+# with Rust installed for the service account (D-048), several workers
+# building independent actions at once with a measured speedup (D-050), an idempotent
 # redeploy, and a check that the coordinator is not reachable from outside.
 name: server-deploy
 
@@ -41,14 +42,18 @@ jobs:
       - name: ant server deploy
         env:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
-        run: target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci --toolchain rust
+        run: target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci --toolchain rust --workers 4
       - name: ant server status / list
         env:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
         run: |
           target/release/ant server list
-          target/release/ant server status ci | tee status.txt
-          grep -q "1 worker online" status.txt
+          for i in $(seq 20); do
+            target/release/ant server status ci | tee status.txt
+            grep -q "4 workers online" status.txt && break
+            sleep 1
+          done
+          grep -q "4 workers online" status.txt
       - name: A real build on the server through the tunnel
         env:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
@@ -100,6 +105,39 @@ jobs:
           # --local still builds on this machine.
           "$ant" build --local --dev
           ./dist/hello | grep -q "Hello again from the server!"
+      - name: Several workers build independent actions at once (D-050)
+        env:
+          ANT_DATA_HOME: ${{ runner.temp }}/ant-data
+        run: |
+          ant="$GITHUB_WORKSPACE/target/release/ant"
+          mkdir -p "$RUNNER_TEMP/parallel" && cd "$RUNNER_TEMP/parallel"
+          # Four CPU-bound, independent actions (~1-2 s of hashing each).
+          {
+            echo '{"schema_version": 1, "actions": ['
+            for i in 1 2 3 4; do
+              [ "$i" = 1 ] || echo ','
+              echo "{\"action\": {\"schema_version\": 1, \"id\": \"hash-$i\","
+              echo " \"argv\": [\"sh\", \"-c\", \"head -c 2000000000 /dev/zero | sha256sum > out-$i.txt\"],"
+              echo " \"working_directory\": \".\", \"inputs\": [],"
+              echo " \"outputs\": [{\"path\": \"out-$i.txt\", \"kind\": \"file\"}],"
+              echo " \"environment\": [], \"cache_policy\": \"never\"}, \"dependencies\": []}"
+            done
+            echo ']}'
+          } > "$RUNNER_TEMP/parallel-plan.json"
+          timed() {
+            start=$(date +%s.%N)
+            "$ant" remote run --server ci --plan "$RUNNER_TEMP/parallel-plan.json" --workspace . > "$RUNNER_TEMP/parallel-run.txt"
+            echo "$(date +%s.%N) - $start" | bc
+          }
+          four=$(timed)
+          [ "$(grep -o 'worker=[^ ]*' "$RUNNER_TEMP/parallel-run.txt" | sort -u | wc -l)" -ge 2 ]
+          ls out-1.txt out-2.txt out-3.txt out-4.txt
+          "$ant" server deploy runner@127.0.0.1 --binary "$ant" --name ci --toolchain rust --workers 1
+          for i in $(seq 20); do "$ant" server status ci | grep -q "1 worker online" && break; sleep 1; done
+          systemctl is-active --quiet ant-worker@2.service && { echo "extra worker still running" >&2; exit 1; }
+          one=$(timed)
+          echo "4 independent actions on $(nproc) cores: 1 worker ${one}s, 4 workers ${four}s, speedup $(echo "scale=2; $one / $four" | bc)x" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$(echo "$one > 1.5 * $four" | bc)" = 1 ]
       - name: Redeploy keeps tokens and still works
         env:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
