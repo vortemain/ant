@@ -248,7 +248,9 @@ fn ant_build_gives_npm_its_user_config_and_referenced_tokens() {
     );
     write(
         &dir.path().join(".npmrc"),
-        &format!("cache=${{{home}}}/ant-test-npm-cache\n//registry.example.test/:_authToken=${{ANT_TEST_NPM_TOKEN}}\n"),
+        &format!(
+            "cache=${{{home}}}/ant-test-npm-cache\n//registry.example.test/:_authToken=${{ANT_TEST_NPM_TOKEN}}\n"
+        ),
     );
     write(
         &dir.path().join("build.js"),
