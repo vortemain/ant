@@ -92,14 +92,20 @@ jobs:
           grep -q "Hello, world!" "$RUNNER_TEMP/run1.txt"
           # Built by the server's own toolchain, as the ant user, in a kept
           # workspace: cargo's target/ is still there for the next build.
-          sudo sh -c 'ls -d /var/lib/ant/worker/projects/*/target/release' | tee "$RUNNER_TEMP/kept.txt"
+          sudo sh -c 'ls -d /var/lib/ant/worker*/projects/*/target/release' | tee "$RUNNER_TEMP/kept.txt"
           [ "$(wc -l < "$RUNNER_TEMP/kept.txt")" = 1 ]
-          sudo sh -c 'stat -c %U /var/lib/ant/worker/projects/*/target/release/hello' | grep -qx ant
+          sudo sh -c 'stat -c %U /var/lib/ant/worker*/projects/*/target/release/hello' | grep -qx ant
           # Edit one file: only that change is sent, the build is incremental.
           sed -i 's/Hello, world!/Hello again from the server!/' src/main.rs
           start=$(date +%s.%N)
-          "$ant" build --on ci
+          "$ant" build --on ci 2>&1 | tee "$RUNNER_TEMP/build2.txt"
           second=$(echo "$(date +%s.%N) - $start" | bc)
+          # With four workers the rebuild still lands on the worker that
+          # keeps this project's state (D-050).
+          w1=$(grep -o 'worker=[^ ]*' "$RUNNER_TEMP/build1.txt")
+          w2=$(grep -o 'worker=[^ ]*' "$RUNNER_TEMP/build2.txt")
+          echo "first build on $w1, rebuild on $w2"
+          [ "$w1" = "$w2" ]
           ./dist/hello | grep -q "Hello again from the server!"
           echo "first build ${first}s, after one edit ${second}s"
           # --local still builds on this machine.

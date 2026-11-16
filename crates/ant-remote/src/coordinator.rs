@@ -99,9 +99,57 @@ struct Jobs {
     records: HashMap<String, JobRecord>,
     queue: VecDeque<String>,
     workers: HashMap<String, WorkerRecord>,
+    /// `<workspace key>/<action id>` -> the worker that last ran it, whose
+    /// kept workspace holds that action's incremental state (D-050).
+    affinity: HashMap<String, String>,
+}
+
+/// How long a job waits for the worker that holds its kept workspace
+/// before any worker may take it (D-050).
+const AFFINITY_WAIT_MS: u64 = 5_000;
+/// A worker that has not polled for this long is busy or gone.
+const WORKER_ALIVE_MS: u64 = 10_000;
+
+fn affinity_key(spec: &JobSpec) -> Option<String> {
+    spec.workspace_key
+        .as_ref()
+        .map(|key| format!("{key}/{}", spec.action.id))
 }
 
 impl Jobs {
+    /// The next queued job for `worker` at wall-clock `now_ms`: the oldest
+    /// one, except that a job whose kept workspace lives on another live
+    /// worker waits up to [`AFFINITY_WAIT_MS`] for that worker (D-050).
+    fn take_next(&mut self, worker: &str, now_ms: u64) -> Option<String> {
+        let position = self.queue.iter().position(|id| {
+            let Some(record) = self.records.get(id) else {
+                return true;
+            };
+            let Some(preferred) =
+                affinity_key(&record.spec).and_then(|key| self.affinity.get(&key))
+            else {
+                return true;
+            };
+            if preferred == worker {
+                return true;
+            }
+            let preferred_alive = self
+                .workers
+                .get(preferred)
+                .is_some_and(|record| now_ms.saturating_sub(record.last_seen_ms) < WORKER_ALIVE_MS);
+            !preferred_alive || now_ms.saturating_sub(record.submitted_ms) >= AFFINITY_WAIT_MS
+        })?;
+        let job_id = self.queue.remove(position)?;
+        if let Some(key) = self
+            .records
+            .get(&job_id)
+            .and_then(|record| affinity_key(&record.spec))
+        {
+            self.affinity.insert(key, worker.to_owned());
+        }
+        Some(job_id)
+    }
+
     /// Requeue or fail running jobs whose lease deadline passed.
     fn expire_leases(&mut self, now: Instant) {
         let mut requeue = Vec::new();
@@ -767,7 +815,7 @@ fn lease(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Reply
     worker.os = lease.os.clone();
     worker.last_seen_ms = seen;
     worker.current_job = None;
-    let Some(job_id) = jobs.queue.pop_front() else {
+    let Some(job_id) = jobs.take_next(&lease.worker_id, seen) else {
         return Ok((204, Vec::new(), "application/json"));
     };
     if let Some(worker) = jobs.workers.get_mut(&lease.worker_id) {
@@ -912,6 +960,52 @@ mod tests {
             log: String::new(),
             log_truncated: false,
         }
+    }
+
+    #[test]
+    fn kept_workspaces_prefer_their_worker_for_a_while() {
+        fn queue(jobs: &mut Jobs, id: &str, key: Option<&str>, submitted_ms: u64) {
+            let mut job = record(JobState::Queued);
+            job.lease = None;
+            job.submitted_ms = submitted_ms;
+            job.spec.workspace_key = key.map(str::to_owned);
+            jobs.records.insert(id.into(), job);
+            jobs.queue.push_back(id.into());
+        }
+        let key = Some("0123456789abcdef");
+        let mut jobs = Jobs::default();
+        for worker in ["w1", "w2"] {
+            jobs.workers.insert(
+                worker.into(),
+                WorkerRecord {
+                    os: "linux".into(),
+                    last_seen_ms: 1_000,
+                    current_job: None,
+                    jobs_reported: 0,
+                },
+            );
+        }
+        queue(&mut jobs, "first", key, 1_000);
+        assert_eq!(jobs.take_next("w1", 1_000).as_deref(), Some("first"));
+        // The project's next job waits for w1, whose workspace has its
+        // state; w2 meanwhile takes work without a kept workspace.
+        queue(&mut jobs, "again", key, 2_000);
+        queue(&mut jobs, "other", None, 2_000);
+        assert_eq!(jobs.take_next("w2", 2_000).as_deref(), Some("other"));
+        assert_eq!(jobs.take_next("w2", 2_000), None);
+        assert_eq!(jobs.take_next("w1", 2_000).as_deref(), Some("again"));
+        // After the wait anyone may take it (and becomes preferred).
+        queue(&mut jobs, "later", key, 3_000);
+        assert_eq!(jobs.take_next("w2", 2_999 + AFFINITY_WAIT_MS), None);
+        assert_eq!(
+            jobs.take_next("w2", 3_000 + AFFINITY_WAIT_MS).as_deref(),
+            Some("later")
+        );
+        // A preferred worker that stopped polling is not waited for.
+        let now = 50_000;
+        queue(&mut jobs, "stale", key, now);
+        jobs.workers.get_mut("w2").expect("w2").last_seen_ms = now - WORKER_ALIVE_MS;
+        assert_eq!(jobs.take_next("w1", now).as_deref(), Some("stale"));
     }
 
     #[test]
