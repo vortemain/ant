@@ -390,32 +390,6 @@ impl ServerProfile {
             .map_err(|error| format!("server profile {name} is damaged: {error}"))
     }
 
-    fn viewer_path(&self) -> Result<PathBuf, String> {
-        Ok(servers_dir()?.join(sealed_name(&format!("{}.viewer", self.name))))
-    }
-
-    /// The server's read-only viewer token, sealed like the client token.
-    fn save_viewer(&self, token: &str) -> Result<(), String> {
-        if token.len() < 32 {
-            return Err("the server's viewer token looks wrong".to_owned());
-        }
-        let path = self.viewer_path()?;
-        if let Ok(old) = std::fs::read(&path) {
-            crate::signing::forget_sealed(&old);
-        }
-        let _ = std::fs::remove_file(&path);
-        write_private(&path, &seal(token.as_bytes())?)
-    }
-
-    fn viewer_token(&self) -> Result<Option<String>, String> {
-        let Ok(blob) = std::fs::read(self.viewer_path()?) else {
-            return Ok(None);
-        };
-        let text = String::from_utf8(unseal(&blob)?)
-            .map_err(|_| "the stored viewer token is not text".to_owned())?;
-        Ok(Some(text))
-    }
-
     fn token(&self) -> Result<String, String> {
         let path = servers_dir()?.join(sealed_name(&format!("{}.token", self.name)));
         let blob = std::fs::read(&path)
@@ -685,9 +659,6 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
         return Err("the server's client token looks wrong; nothing was saved".to_owned());
     }
     profile.save(token)?;
-    // The read-only viewer token opens the server's web UI (`ant server ui`).
-    let viewer = profile.run(&format!("{sudo_prefix}cat /etc/ant/viewer.token"), None)?;
-    profile.save_viewer(viewer.trim())?;
 
     let (coordinator, _tunnel) = connect(&name)?;
     let health = health_and_workers(&coordinator)?;
@@ -705,6 +676,85 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
 pub(crate) fn status_line(name: &str) -> Result<String, String> {
     let (coordinator, _tunnel) = connect(name)?;
     health_and_workers(&coordinator)
+}
+
+/// A kept connection to a server for the dashboard's live view (D-065): one
+/// SSH tunnel per server, reused across polls and reopened after a failure.
+/// The token stays in this process; the browser only sees job data.
+struct LiveLink {
+    coordinator: ant_remote::http::Coordinator,
+    _tunnel: Tunnel,
+}
+
+static LIVE_LINKS: std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<LiveLink>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Run `read` against server `name` over its kept link, reconnecting once
+/// if the link went stale (tunnel closed, sign-in expired).
+fn with_live_link<T>(
+    name: &str,
+    read: impl Fn(&ant_remote::http::Coordinator) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut last_error = String::new();
+    for _ in 0..2 {
+        let existing = LIVE_LINKS
+            .lock()
+            .map_err(|_| "live link lock poisoned".to_owned())?
+            .get(name)
+            .cloned();
+        let link = match existing {
+            Some(link) => link,
+            None => {
+                let (coordinator, tunnel) = connect(name)?;
+                let link = std::sync::Arc::new(LiveLink {
+                    coordinator,
+                    _tunnel: tunnel,
+                });
+                LIVE_LINKS
+                    .lock()
+                    .map_err(|_| "live link lock poisoned".to_owned())?
+                    .insert(name.to_owned(), link.clone());
+                link
+            }
+        };
+        match read(&link.coordinator) {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = error;
+                if let Ok(mut links) = LIVE_LINKS.lock() {
+                    links.remove(name);
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// The dashboard's live view of one server: its workers and jobs.
+pub(crate) fn live_json(name: &str) -> Result<serde_json::Value, String> {
+    with_live_link(name, |coordinator| {
+        let workers: serde_json::Value = coordinator.get_json("/v1/workers", "listing workers")?;
+        let jobs: serde_json::Value = coordinator.get_json("/v1/jobs", "listing jobs")?;
+        Ok(serde_json::json!({ "workers": workers, "jobs": jobs }))
+    })
+}
+
+/// One job's output on a server, from byte offset `from`.
+pub(crate) fn live_log(name: &str, job: &str, from: u64) -> Result<serde_json::Value, String> {
+    let valid = !job.is_empty()
+        && job.len() <= 64
+        && job
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if !valid {
+        return Err("not a job id".to_owned());
+    }
+    with_live_link(name, |coordinator| {
+        coordinator.get_json(
+            &format!("/v1/jobs/{job}/log?from={from}"),
+            "reading the job log",
+        )
+    })
 }
 
 /// `ant server add NAME --url URL [--token-file FILE]` and `ant login URL
@@ -1095,12 +1145,10 @@ fn only_profile(name: Option<String>) -> Result<String, String> {
     }
 }
 
-/// `ant server ui [NAME] [--no-open]` (D-065): open the server's own web UI
-/// (jobs and workers) in the browser. A deployed server's coordinator stays
-/// on its loopback, so this keeps an SSH tunnel open until Ctrl+C and hands
-/// the page the read-only viewer token in the URL fragment, which browsers
-/// never send over the network; the page moves it to session storage and
-/// drops it from the address bar.
+/// `ant server ui [NAME] [--no-open]` (D-065): watch a server in the
+/// dashboard. Starts `ant dashboard` on the Servers page, where Ant reads the
+/// server's workers, jobs, and live job output through one kept SSH tunnel
+/// (or HTTPS for team servers); the token never reaches the browser.
 fn ui(args: impl Iterator<Item = String>) -> Result<u8, String> {
     let mut name = None;
     let mut open = true;
@@ -1108,53 +1156,15 @@ fn ui(args: impl Iterator<Item = String>) -> Result<u8, String> {
         match arg.as_str() {
             "--no-open" => open = false,
             other if !other.starts_with('-') && name.is_none() => name = Some(other.to_owned()),
-            other => {
-                return Err(format!(
-                    "unexpected argument '{other}'
-{USAGE}"
-                ));
-            }
+            other => return Err(format!("unexpected argument '{other}'\n{USAGE}")),
         }
     }
     let name = only_profile(name)?;
-    let profile = ServerProfile::load(&name)?;
-    if let Some(url) = &profile.url {
-        println!(
-            "{name} is a team server; open {}/ui and paste a viewer or client token from its administrator.",
-            url.trim_end_matches('/')
-        );
-        return Ok(0);
-    }
-    let viewer = profile.viewer_token()?.ok_or_else(|| {
-        format!(
-            "{name} was deployed before the web UI could be opened from here; redeploy once with: ant server deploy {} --name {name}",
-            profile.target
-        )
-    })?;
-    let tunnel = Tunnel::open(&profile)?;
-    let base = format!("http://127.0.0.1:{}/ui/", tunnel.local_port);
-    println!("{name}'s web UI (jobs and workers): {base}");
-    println!("Reached through SSH; it stays open until you press Ctrl+C.");
-    if open {
-        crate::dashboard::open_in_browser(&format!("{base}#token={}", viewer.trim()));
-    } else {
-        println!(
-            "The page asks for a token; without --no-open, Ant opens it already signed in (read-only)."
-        );
-    }
-    let cancellation = local_executor::CancellationToken::new();
-    crate::install_ctrl_c_handler(&cancellation);
-    let mut tunnel = tunnel;
-    while !cancellation.is_cancelled() {
-        if let Some(child) = &mut tunnel.child
-            && let Ok(Some(_)) = child.try_wait()
-        {
-            return Err(format!("the SSH tunnel to {} closed", profile.target));
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    println!("Closed the tunnel to {name}.");
-    Ok(0)
+    ServerProfile::load(&name)?;
+    println!(
+        "Watching {name}: its workers, jobs, and live output, on the dashboard's Servers page."
+    );
+    crate::dashboard::serve_dashboard(0, open, "servers")
 }
 
 pub fn server_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
@@ -1222,11 +1232,6 @@ pub fn server_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
                 crate::signing::forget_sealed(&blob);
             }
             let _ = std::fs::remove_file(&token);
-            let viewer = dir.join(sealed_name(&format!("{name}.viewer")));
-            if let Ok(blob) = std::fs::read(&viewer) {
-                crate::signing::forget_sealed(&blob);
-            }
-            let _ = std::fs::remove_file(&viewer);
             println!(
                 "Forgot {name} on this computer. The server itself still runs Ant; remove it there with: \
                  sudo systemctl disable --now 'ant-worker@*' ant-worker ant-coordinator"

@@ -152,23 +152,35 @@ jobs:
           target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci --toolchain rust
           [ "$before" = "$(sudo sha256sum /etc/ant/client.token)" ]
           target/release/ant server status ci
-      - name: ant server ui opens the web UI with the read-only viewer token (D-065)
+      - name: ant server ui shows the server live in the dashboard (D-065)
         env:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
+          ANT_CACHE_HOME: ${{ runner.temp }}/ant-cache
         run: |
           target/release/ant server ui ci --no-open > "$RUNNER_TEMP/ui.txt" &
           pid=$!
           for i in $(seq 40); do grep -q 'http://127.0.0.1' "$RUNNER_TEMP/ui.txt" && break; sleep 0.5; done
           cat "$RUNNER_TEMP/ui.txt"
-          url=$(grep -o 'http://127.0.0.1:[0-9]*/ui/' "$RUNNER_TEMP/ui.txt")
-          curl -fsS "$url" | grep -q 'app.js'
-          viewer=$(sudo cat /etc/ant/viewer.token)
-          api="${url%ui/}v1"
-          curl -fsS -H "Authorization: Bearer $viewer" "$api/jobs" | grep -q '"jobs"'
-          # Read-only: the viewer token may not submit or upload.
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $viewer" -d '{}' "$api/jobs")
-          [ "$code" = 403 ]
+          base=$(grep -o 'http://127.0.0.1:[0-9]*/[0-9a-f]*/' "$RUNNER_TEMP/ui.txt")
+          curl -fsS "${base}api/servers/ci/live" | tee "$RUNNER_TEMP/live.json"
+          python3 - "$RUNNER_TEMP/live.json" <<'PY'
+          import json, sys
+          answer = json.load(open(sys.argv[1]))
+          assert answer["ok"], answer
+          workers = answer["data"]["workers"]["workers"]
+          jobs = answer["data"]["jobs"]["jobs"]
+          assert len(workers) >= 1 and len(jobs) >= 1, answer
+          print(f"{len(workers)} workers, {len(jobs)} jobs")
+          PY
+          job=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['data']['jobs']['jobs'][0]['job_id'])" "$RUNNER_TEMP/live.json")
+          curl -fsS "${base}api/servers/ci/jobs/$job/log?from=0" | grep -q '"ok":true'
+          # The client token stays in Ant; the page and its API never carry it.
+          if curl -fsS "${base}api/servers/ci/live" | grep -q "$(sudo cat /etc/ant/client.token)"; then echo "token leaked" >&2; exit 1; fi
+          # A read-only viewer token exists for teammates without Ant.
           sudo stat -c '%a %U:%G %n' /etc/ant/viewer.token | grep -q '^640 root:ant'
+          viewer=$(sudo cat /etc/ant/viewer.token)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $viewer" -d '{}' http://127.0.0.1:8742/v1/jobs)
+          [ "$code" = 403 ]
           kill $pid
       - name: The coordinator is not reachable from outside the server
         run: |

@@ -19,17 +19,7 @@ function storeToken(value) {
     if (value) sessionStorage.setItem(TOKEN_KEY, value); else sessionStorage.removeItem(TOKEN_KEY);
   } catch { /* storage unavailable: token lives only in memory for this page */ }
 }
-// `ant server ui` hands the read-only viewer token over in the URL fragment
-// (never sent to any server). Keep it for this tab and drop it from the
-// address bar at once.
-function tokenFromFragment() {
-  const match = /^#token=([0-9a-f]{32,128})$/.exec(location.hash);
-  if (!match) return null;
-  history.replaceState(null, "", location.pathname + location.search);
-  storeToken(match[1]);
-  return match[1];
-}
-let memoryToken = tokenFromFragment() || storedToken();
+let memoryToken = storedToken();
 
 function setStatus(text, bad) {
   const el = $("status");

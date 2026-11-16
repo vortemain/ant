@@ -161,7 +161,7 @@ Ant runs entirely on your own machine. When you're ready, put your own server to
 ```bash
 ant server deploy root@your-server --toolchain rust --workers 3
 ant build --on your-server      # build there (same OS as your laptop), outputs come back to dist/
-ant server ui your-server       # the server's own web UI: jobs and workers, live
+ant server ui your-server       # watch it in the dashboard: workers, jobs, live output
 ant server status your-server
 ```
 

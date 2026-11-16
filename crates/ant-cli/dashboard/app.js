@@ -682,6 +682,51 @@ class LogView {
   }
 }
 
+// The output of a job on a server, read through Ant (D-065).
+class RemoteLogView extends LogView {
+  constructor(server, job) {
+    super(`server:${server}:${job}`);
+    this.remote = true;
+    this.server = server;
+    this.job = job;
+    this.pre.setAttribute("aria-label", `Output of ${job} on ${server}`);
+  }
+
+  async load() {
+    if (this.loading) return;
+    this.loading = true;
+    try {
+      for (let round = 0; round < 40; round += 1) {
+        const url = `api/servers/${encodeURIComponent(this.server)}/jobs/${encodeURIComponent(this.job)}/log?from=${this.next}`;
+        const answer = await (await fetch(url, { cache: "no-store" })).json();
+        if (!answer.ok) {
+          this.status.textContent = answer.error;
+          this.status.hidden = false;
+          break;
+        }
+        const data = answer.data;
+        if (data.text) this.append(data.text);
+        const moved = data.next !== this.next;
+        this.next = data.next;
+        this.status.textContent = this.next === 0 ? "No output yet." : "";
+        this.status.hidden = this.next > 0;
+        if (!moved || !data.text) break;
+      }
+    } catch (error) {
+      this.status.textContent = `Could not load the output: ${error.message}`;
+      this.status.hidden = false;
+    } finally {
+      this.loading = false;
+    }
+  }
+}
+
+function remoteLogView(server, job) {
+  const key = `server:${server}:${job}`;
+  if (!logViews.has(key)) logViews.set(key, new RemoteLogView(server, job));
+  return logViews.get(key);
+}
+
 const logViews = new Map();
 const openLogs = new Set();
 
@@ -911,7 +956,9 @@ const TITLES = { overview: "Overview", builds: "Builds", projects: "Projects", d
 
 // ---------- servers (D-053) ----------
 
-const servers = { list: [], loaded: false, checks: {} }; // checks: name -> { busy, ok, text }
+const servers = { list: [], loaded: false, live: {} }; // live: name -> { busy, ok, error, data }
+const SERVER_POLL_MS = 2000;
+let serverTimer = null;
 
 async function loadServers() {
   try {
@@ -923,22 +970,202 @@ async function loadServers() {
   }
   servers.loaded = true;
   $("nav-servers").textContent = servers.list.length ? String(servers.list.length) : "";
-  if (state.page === "servers") render();
+  if (state.page === "servers") {
+    render();
+    pollServers();
+  }
 }
 
-async function checkServer(name) {
-  servers.checks[name] = { busy: true, ok: false, text: "Checking…" };
-  render();
-  try {
-    const response = await fetch(`api/servers/${encodeURIComponent(name)}/status`, { cache: "no-store" });
-    const data = await response.json();
-    servers.checks[name] = data.ok
-      ? { busy: false, ok: true, text: data.summary }
-      : { busy: false, ok: false, text: data.error };
-  } catch (error) {
-    servers.checks[name] = { busy: false, ok: false, text: `Could not ask Ant: ${error.message}` };
+// While the Servers page is open, read each server's workers and jobs
+// through Ant (which keeps one SSH tunnel per server and never hands the
+// browser a token), and follow open job logs (D-065).
+async function pollServers() {
+  clearTimeout(serverTimer);
+  if (state.page !== "servers") return;
+  await Promise.all(servers.list.map((server) => loadServerLive(server.name)));
+  for (const [key, view] of logViews) {
+    if (view.remote && openLogs.has(key) && remoteJobActive(view)) view.load();
   }
-  render();
+  serverTimer = setTimeout(pollServers, SERVER_POLL_MS);
+}
+
+async function loadServerLive(name) {
+  const live = servers.live[name] || (servers.live[name] = { busy: false, ok: false, error: null, data: null });
+  if (live.busy) return;
+  live.busy = true;
+  try {
+    const response = await fetch(`api/servers/${encodeURIComponent(name)}/live`, { cache: "no-store" });
+    const answer = await response.json();
+    const before = liveSignature(live);
+    if (answer.ok) Object.assign(live, { ok: true, error: null, data: answer.data });
+    else Object.assign(live, { ok: false, error: answer.error });
+    // Redraw only when something visible changed: redrawing every poll
+    // would swallow clicks. Running jobs' timers tick in place.
+    if (liveSignature(live) !== before) render();
+    else tickServerTimers(name, live);
+  } catch (error) {
+    Object.assign(live, { ok: false, error: `Could not ask Ant: ${error.message}` });
+    render();
+  } finally {
+    live.busy = false;
+  }
+}
+
+function workerOnline(worker, now) {
+  // A busy worker does not poll for work, so it is online while it builds.
+  return Boolean(worker.current_job) || now - worker.last_seen_unix_ms < 10000;
+}
+
+function liveSignature(live) {
+  const data = live.data;
+  if (!data) return JSON.stringify([live.ok, live.error]);
+  const now = data.workers.now_unix_ms;
+  return JSON.stringify([
+    live.ok, live.error,
+    data.workers.workers.map((w) => [w.worker_id, w.current_job, w.jobs_reported, workerOnline(w, now)]),
+    data.jobs.jobs.map((j) => [j.job_id, j.state, j.succeeded, j.worker_id, j.finished_unix_ms]),
+    Math.floor(now / 60000), // relative times move once a minute
+  ]);
+}
+
+function tickServerTimers(name, live) {
+  const now = live.data?.workers?.now_unix_ms;
+  if (!now) return;
+  for (const cell of document.querySelectorAll("td.took[data-started]")) {
+    if (cell.dataset.server === name) cell.textContent = duration(now - Number(cell.dataset.started));
+  }
+}
+
+function remoteJobActive(view) {
+  const jobs = servers.live[view.server]?.data?.jobs?.jobs || [];
+  const job = jobs.find((j) => j.job_id === view.job);
+  return !job || job.state !== "completed" || view.next === 0;
+}
+
+function jobStatus(job) {
+  if (job.state === "queued") return el("span", "status queued", "Queued");
+  if (job.state === "running") return el("span", "status running", "Running");
+  if (job.reused) return el("span", "status reused", "Reused");
+  return job.succeeded ? el("span", "status built", "Succeeded") : el("span", "status failed", "Failed");
+}
+
+function serverTile(label, value, tone) {
+  const tile = el("div", `server-tile${tone ? ` ${tone}` : ""}`);
+  tile.append(el("span", "server-tile-value", String(value)), el("span", "server-tile-label", label));
+  return tile;
+}
+
+function renderServerLive(server) {
+  const live = servers.live[server.name];
+  const box = el("div", "server-live");
+  if (!live || (!live.data && !live.error)) {
+    box.append(el("p", "server-note", "Connecting over SSH…"));
+    return box;
+  }
+  if (live.error) {
+    box.append(el("p", "server-status bad", live.error));
+    if (!live.data) return box;
+  }
+  const now = live.data.workers.now_unix_ms;
+  const jobs = live.data.jobs.jobs;
+  const workers = live.data.workers.workers;
+  const online = workers.filter((w) => workerOnline(w, now));
+  const failed = jobs.filter((j) => j.state === "completed" && !j.succeeded).length;
+  const tiles = el("div", "server-tiles");
+  tiles.append(
+    serverTile("Workers online", online.length, online.length ? "ok" : "bad"),
+    serverTile("Running", jobs.filter((j) => j.state === "running").length, "brand"),
+    serverTile("Queued", jobs.filter((j) => j.state === "queued").length),
+    serverTile("Succeeded", jobs.filter((j) => j.state === "completed" && j.succeeded).length),
+    serverTile("Failed", failed, failed ? "bad" : ""),
+  );
+  box.append(tiles);
+
+  box.append(el("h3", "server-section", "Workers"));
+  const workerList = el("ul", "worker-list");
+  if (!workers.length) workerList.append(el("li", "none", "No worker has checked in yet."));
+  for (const worker of workers) {
+    const isOnline = workerOnline(worker, now);
+    const item = el("li", "worker");
+    const body = el("div", "file-body");
+    body.append(
+      el("span", "worker-name", worker.worker_id),
+      el("span", "file-meta", worker.current_job ? `Building ${worker.current_job}`
+        : isOnline ? "Idle, ready for work" : `Last seen ${ago(worker.last_seen_unix_ms, now)}`),
+    );
+    const badge = worker.current_job ? el("span", "status running", "Busy")
+      : isOnline ? el("span", "status built", "Online") : el("span", "status failed", "Offline");
+    item.append(body, el("span", "worker-count", `${worker.jobs_reported} done`), badge);
+    workerList.append(item);
+  }
+  box.append(workerList);
+
+  const jobsHead = el("div", "server-section-row");
+  jobsHead.append(el("h3", "server-section", "Jobs"),
+    el("span", "server-note", `Kept since the server started ${ago(live.data.jobs.coordinator_started_unix_ms, now)}`));
+  box.append(jobsHead);
+  if (!jobs.length) {
+    const empty = el("p", "server-empty");
+    empty.append(document.createTextNode("No jobs yet. Build here with "));
+    empty.append(el("code", "", `ant build --on ${server.name}`));
+    empty.append(document.createTextNode(" and every step shows up live."));
+    box.append(empty);
+    return box;
+  }
+  const wrap = el("div", "table-wrap server-jobs");
+  const table = el("table", "table");
+  const head = el("thead");
+  const headRow = el("tr");
+  for (const label of ["Step", "Status", "Worker", "Started", "Took", "Output"]) headRow.append(el("th", "", label));
+  head.append(headRow);
+  const body = el("tbody");
+  for (const job of jobs.slice(0, 50)) {
+    const key = `server:${server.name}:${job.job_id}`;
+    const row = el("tr", "row");
+    const step = el("td");
+    step.append(el("span", "job-action", job.action_id), el("span", "job-id", job.job_id));
+    const statusCell = el("td");
+    statusCell.append(jobStatus(job));
+    if (job.error) statusCell.append(el("span", "job-error", job.error));
+    const started = job.started_unix_ms || job.submitted_unix_ms;
+    const took = job.started_unix_ms ? (job.finished_unix_ms || now) - job.started_unix_ms : null;
+    const tookCell = el("td", "num took", took === null ? "—" : duration(took));
+    if (job.state === "running" && job.started_unix_ms) {
+      tookCell.dataset.server = server.name;
+      tookCell.dataset.started = String(job.started_unix_ms);
+    }
+    const outputCell = el("td");
+    const open = openLogs.has(key);
+    const toggle = el("button", "btn", open ? "Hide" : job.state === "running" ? "Watch live" : "Show");
+    toggle.type = "button";
+    toggle.dataset.log = key;
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.setAttribute("aria-label", `${open ? "Hide" : "Show"} the output of ${job.action_id}`);
+    toggle.addEventListener("click", () => {
+      if (openLogs.has(key)) openLogs.delete(key);
+      else {
+        openLogs.add(key);
+        remoteLogView(server.name, job.job_id).load();
+      }
+      render();
+    });
+    outputCell.append(toggle);
+    row.append(step, statusCell, el("td", "muted", job.worker_id || "—"), el("td", "muted", ago(started, now)),
+      tookCell, outputCell);
+    body.append(row);
+    if (open) {
+      const logRow = el("tr", "log-row");
+      const cell = el("td");
+      cell.colSpan = 6;
+      cell.append(remoteLogView(server.name, job.job_id).pre);
+      logRow.append(cell);
+      body.append(logRow);
+    }
+  }
+  table.append(head, body);
+  wrap.append(table);
+  box.append(wrap);
+  return box;
 }
 
 function renderServers() {
@@ -958,29 +1185,18 @@ function renderServers() {
   }
   for (const server of servers.list) {
     const item = el("li", "server");
+    const top = el("div", "server-top");
     const glyph = el("span", "server-icon");
     glyph.append(icon("M4 5h16v6H4zm0 8h16v6H4zm3-5h.01M7 16h.01"));
-    item.append(glyph);
     const body = el("div", "file-body");
     body.append(el("span", "file-name", server.name));
     const platform = [server.os, server.arch].filter(Boolean).join(" · ");
     body.append(el("span", "file-meta", `${server.target}${platform ? ` · ${platform}` : ""} · deployed ${ago(server.deployed_ms, state.now)}`));
-    const check = servers.checks[server.name];
-    if (check) {
-      const result = el("span", `server-status ${check.busy ? "" : check.ok ? "ok" : "bad"}`, check.text);
-      body.append(result);
-    }
-    const live = el("span", "sr-only");
-    live.setAttribute("aria-live", "polite");
-    live.textContent = check && !check.busy ? `${server.name}: ${check.text}` : "";
-    item.append(body, live);
-    const button = el("button", "btn", check && check.busy ? "Checking…" : "Check now");
-    button.type = "button";
-    button.dataset.server = server.name;
-    button.disabled = Boolean(check && check.busy);
-    button.setAttribute("aria-label", `Check ${server.name}`);
-    button.addEventListener("click", () => checkServer(server.name));
-    item.append(button);
+    const live = servers.live[server.name];
+    const badge = !live || (!live.data && !live.error) ? el("span", "status queued", "Connecting")
+      : live.ok ? el("span", "status built", "Connected") : el("span", "status failed", "Unreachable");
+    top.append(glyph, body, badge);
+    item.append(top, renderServerLive(server));
     list.append(item);
   }
 }

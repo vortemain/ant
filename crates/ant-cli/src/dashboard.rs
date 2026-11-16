@@ -57,6 +57,12 @@ pub fn dashboard_command(args: impl Iterator<Item = OsString>) -> Result<u8, Str
             other => return Err(format!("unexpected argument '{other}'\n{USAGE}")),
         }
     }
+    serve_dashboard(port, open, "")
+}
+
+/// Serve the dashboard on loopback until Ctrl+C; with `open`, show it in the
+/// browser at `page` (a hash route such as `servers`, or "" for Overview).
+pub(crate) fn serve_dashboard(port: u16, open: bool, page: &str) -> Result<u8, String> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .map_err(|error| format!("cannot listen on 127.0.0.1:{port}: {error}"))?;
     listener
@@ -68,7 +74,11 @@ pub fn dashboard_command(args: impl Iterator<Item = OsString>) -> Result<u8, Str
     println!("Ant dashboard: {url}");
     println!("Only this computer can open it. Press Ctrl+C to stop.");
     if open {
-        open_in_browser(&url);
+        if page.is_empty() {
+            open_in_browser(&url);
+        } else {
+            open_in_browser(&format!("{url}#{page}"));
+        }
     }
     let cancellation = CancellationToken::new();
     crate::install_ctrl_c_handler(&cancellation);
@@ -77,7 +87,7 @@ pub fn dashboard_command(args: impl Iterator<Item = OsString>) -> Result<u8, Str
     Ok(0)
 }
 
-pub(crate) fn open_in_browser(url: &str) {
+fn open_in_browser(url: &str) {
     // The URL is ours (address + hex token), so no shell quoting concerns.
     let result = if cfg!(windows) {
         std::process::Command::new("explorer").arg(url).spawn()
@@ -367,6 +377,46 @@ fn handle(
                 "",
                 body.as_bytes(),
             )
+        }
+        _ if route.starts_with("api/servers/") && !route.ends_with("/status") => {
+            // Live view (D-065): `api/servers/NAME/live` and
+            // `api/servers/NAME/jobs/ID/log?from=N`, answered on a thread
+            // because the first request opens an SSH tunnel.
+            let rest = route["api/servers/".len()..].to_owned();
+            std::thread::spawn(move || {
+                let (path, query) = rest.split_once('?').unwrap_or((rest.as_str(), ""));
+                let parts: Vec<&str> = path.split('/').collect();
+                let answer = match parts.as_slice() {
+                    [name, "live"] => Some(crate::server::live_json(name)),
+                    [name, "jobs", job, "log"] => {
+                        let from = query
+                            .split('&')
+                            .find_map(|pair| pair.strip_prefix("from="))
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(0);
+                        Some(crate::server::live_log(name, job, from))
+                    }
+                    _ => None,
+                };
+                let _ = match answer {
+                    Some(result) => {
+                        let body = match result {
+                            Ok(data) => serde_json::json!({ "ok": true, "data": data }),
+                            Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                        }
+                        .to_string();
+                        respond(
+                            &mut stream,
+                            "200 OK",
+                            "application/json",
+                            "",
+                            body.as_bytes(),
+                        )
+                    }
+                    None => respond(&mut stream, "404 Not Found", "text/plain", "", b"not found"),
+                };
+            });
+            Ok(())
         }
         _ if route.starts_with("api/servers/") && route.ends_with("/status") => {
             let name = route["api/servers/".len()..route.len() - "/status".len()].to_owned();
@@ -831,7 +881,7 @@ mod tests {
             older.id = "100-9".to_owned();
             older.started_ms = 100;
             older.deliverables = vec![PathBuf::from("dist/app.exe")];
-            for _ in 0..13 {
+            for _ in 0..16 {
                 let (stream, _) = listener.accept().expect("accept");
                 let records = vec![record.clone(), older.clone()];
                 let live = vec![history::RunningBuild {
@@ -919,6 +969,25 @@ mod tests {
         let (head, _) = get(address, &format!("/{token}/api/log/nope"), &host);
         assert!(head.starts_with("HTTP/1.1 404"), "{head}");
         let (head, _) = get(address, &format!("/{token}/files/nope/0"), &host);
+        assert!(head.starts_with("HTTP/1.1 404"), "{head}");
+        // Live server view (D-065): errors come back as JSON for the page,
+        // and job ids are checked before anything is asked of a server.
+        let (head, body) = get(
+            address,
+            &format!("/{token}/api/servers/bad!name/live"),
+            &host,
+        );
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let answer: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(answer["ok"], false, "{answer}");
+        let (_, body) = get(
+            address,
+            &format!("/{token}/api/servers/x/jobs/..%2Fetc/log?from=0"),
+            &host,
+        );
+        let answer: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(answer["error"], "not a job id", "{answer}");
+        let (head, _) = get(address, &format!("/{token}/api/servers/x/other"), &host);
         assert!(head.starts_with("HTTP/1.1 404"), "{head}");
         server.join().expect("server");
         let _ = std::fs::remove_dir_all(&project);
