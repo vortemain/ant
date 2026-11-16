@@ -143,15 +143,37 @@ fn execute_job(
         let workspace = workspace
             .canonicalize()
             .map_err(|error| error.to_string())?;
-        let prepared = local_executor::prepare_with_metadata(&workspace, &spec.action)
+        let mut prepared = local_executor::prepare_with_metadata(&workspace, &spec.action)
             .map_err(|error| error.to_string())?;
+        // Stream the tool's output to the coordinator while it runs, so the
+        // developer sees it live (D-049). The direct executor tees it; the
+        // sandboxed executor does not capture output yet.
+        let log = std::sync::Arc::new(JobLogSink::default());
+        prepared.output_capture = Some(local_executor::OutputCapture {
+            sink: log.clone(),
+            display_environment: Vec::new(),
+        });
         let cancellation = CancellationToken::new();
-        let executed = if config.sandbox {
-            local_executor::execute_sandboxed_prepared(&prepared, &cancellation)
-        } else {
-            local_executor::execute_prepared(&prepared, &cancellation)
-        }
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let executed = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(LOG_FLUSH_INTERVAL);
+                    log.flush(coordinator, config, job_id);
+                }
+            });
+            let executed = if config.sandbox {
+                local_executor::execute_sandboxed_prepared(&prepared, &cancellation)
+            } else {
+                local_executor::execute_prepared(&prepared, &cancellation)
+            };
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            executed
+        })
         .map_err(|error| error.to_string())?;
+        // Everything before the result, so a client that saw the job finish
+        // can read the complete output.
+        log.flush(coordinator, config, job_id);
         let mut outputs = Vec::new();
         if executed.success() {
             outputs = upload_outputs(coordinator, &workspace, &spec.action)?;
@@ -170,6 +192,60 @@ fn execute_job(
         let _ = std::fs::remove_dir_all(&workspace);
     }
     result.unwrap_or_else(|error| failure(config, error))
+}
+
+/// How often a running job's new output is sent to the coordinator.
+const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Collects a job's tool output between flushes (D-049).
+#[derive(Default)]
+struct JobLogSink {
+    pending: std::sync::Mutex<Vec<u8>>,
+    /// Bytes of an incomplete UTF-8 character held back for the next flush.
+    carry: std::sync::Mutex<Vec<u8>>,
+}
+
+impl local_executor::OutputSink for JobLogSink {
+    fn write(&self, bytes: &[u8]) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.extend_from_slice(bytes);
+        }
+    }
+}
+
+impl JobLogSink {
+    /// Send what arrived since the last flush. Best effort: output is a
+    /// convenience and must never fail the build.
+    fn flush(&self, coordinator: &Coordinator, config: &WorkerConfig, job_id: &str) {
+        let Ok(mut carry) = self.carry.lock() else {
+            return;
+        };
+        let fresh = match self.pending.lock() {
+            Ok(mut pending) => std::mem::take(&mut *pending),
+            Err(_) => return,
+        };
+        carry.extend_from_slice(&fresh);
+        if carry.is_empty() {
+            return;
+        }
+        // Hold back a trailing partial character (at most 3 bytes).
+        let complete = match std::str::from_utf8(&carry) {
+            Ok(_) => carry.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(_) => carry.len(),
+        };
+        let text = String::from_utf8_lossy(&carry[..complete]).into_owned();
+        carry.drain(..complete);
+        if text.is_empty() {
+            return;
+        }
+        let chunk = crate::protocol::LogChunk {
+            worker_id: config.worker_id.clone(),
+            text,
+        };
+        let path = format!("/v1/jobs/{job_id}/log");
+        let _ = coordinator.post_json::<_, serde_json::Value>(&path, &chunk, "job output");
+    }
 }
 
 /// Kept project workspaces per worker; the least recently used go first.

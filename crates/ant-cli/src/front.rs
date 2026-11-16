@@ -466,7 +466,7 @@ pub fn build_and_collect(
     };
     let results = build_adapter::user_cache_dir().map(|dir| dir.join("local-results"));
     let code = match &on {
-        Some(name) => run_on_server(name, &graph, &root)?,
+        Some(name) => run_on_server(name, &graph, &root, &build_log)?,
         None => scheduler::run_plan(
             &graph,
             &root,
@@ -581,7 +581,12 @@ fn check_server(name: &str, signed: bool) -> Result<(), String> {
 /// Run the plan on a deployed server through an SSH tunnel, in a workspace
 /// the server keeps for this project so rebuilds there are incremental
 /// (D-048). Outputs come back into the project like a local build's.
-fn run_on_server(name: &str, graph: &build_graph::BuildGraph, root: &Path) -> Result<u8, String> {
+fn run_on_server(
+    name: &str,
+    graph: &build_graph::BuildGraph,
+    root: &Path,
+    log: &crate::build_log::BuildLog,
+) -> Result<u8, String> {
     println!("Connecting to {name}…");
     let (coordinator, _tunnel) = crate::server::connect(name)?;
     let digest =
@@ -594,6 +599,16 @@ fn run_on_server(name: &str, graph: &build_graph::BuildGraph, root: &Path) -> Re
         root,
         std::time::Duration::from_millis(200),
         Some(key),
+        // The server's tool output, live in this terminal and in the
+        // dashboard's build log, like a local build's (D-049).
+        Some(&|text: &str| {
+            use local_executor::OutputSink as _;
+            use std::io::Write as _;
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(text.as_bytes());
+            let _ = stderr.flush();
+            log.write(text.as_bytes());
+        }),
     )
 }
 

@@ -708,6 +708,7 @@ fn kept_workspaces_preserve_incremental_state_between_jobs() {
             &workspace,
             std::time::Duration::from_millis(50),
             key,
+            None,
         )
         .expect("run");
         assert_eq!(code, 0);
@@ -733,7 +734,86 @@ fn kept_workspaces_preserve_incremental_state_between_jobs() {
         &workspace,
         std::time::Duration::from_millis(50),
         Some("../../escape"),
+        None,
     )
     .expect("run");
     assert_ne!(refused, 0, "an invalid key is refused by the worker");
+}
+
+/// D-049: a job's tool output streams from the worker through the
+/// coordinator to the client while the job runs, in order and complete.
+#[test]
+fn job_output_streams_to_the_client() {
+    let cluster = Cluster::start("live-output", true);
+    let project = TempDir::new("live-output-project");
+    let command = if cfg!(windows) {
+        "echo first line & ping -n 2 127.0.0.1 >nul & echo second line 1>&2 & echo done> out.txt"
+    } else {
+        "echo first line; sleep 1; echo second line >&2; echo done > out.txt"
+    };
+    let plan: build_graph::PlanFile = serde_json::from_value(json!({
+        "schema_version": 1,
+        "actions": [action(
+            "talk",
+            command,
+            json!([]),
+            json!([{ "path": "out.txt", "kind": "file" }]),
+            &[],
+        )]
+    }))
+    .expect("plan");
+    let graph = plan.to_graph().expect("graph");
+    let client = cluster.client(CLIENT_TOKEN);
+    let workspace = project.path().canonicalize().expect("workspace");
+    let seen = std::sync::Mutex::new(Vec::<String>::new());
+    let handler = |text: &str| seen.lock().expect("lock").push(text.to_owned());
+    let code = ant_remote::client::run_plan_in(
+        &client,
+        &graph,
+        &workspace,
+        std::time::Duration::from_millis(50),
+        None,
+        Some(&handler),
+    )
+    .expect("run");
+    assert_eq!(code, 0);
+    let chunks = seen.into_inner().expect("lock");
+    let all: String = chunks.concat();
+    let first = all
+        .find("first line")
+        .unwrap_or_else(|| panic!("first line in {all:?}"));
+    let second = all
+        .find("second line")
+        .unwrap_or_else(|| panic!("second line in {all:?}"));
+    assert!(first < second, "{all:?}");
+    assert!(
+        chunks.len() >= 2,
+        "output arrived while the job ran, not only at the end: {chunks:?}"
+    ); // Only the worker holding a running job's lease may add output; any
+    // reader may read it.
+    let jobs: ant_remote::protocol::JobList = client.get_json("/v1/jobs", "jobs").expect("jobs");
+    let job = &jobs.jobs[0].job_id;
+    let chunk = ant_remote::protocol::LogChunk {
+        worker_id: "intruder".into(),
+        text: "forged".into(),
+    };
+    let path = format!("/v1/jobs/{job}/log");
+    let error = client
+        .post_json::<_, serde_json::Value>(&path, &chunk, "log")
+        .expect_err("clients cannot write output");
+    assert!(error.contains("403"), "{error}");
+    let error = cluster
+        .client(WORKER_TOKEN)
+        .post_json::<_, serde_json::Value>(&path, &chunk, "log")
+        .expect_err("a finished job takes no more output");
+    assert!(error.contains("409"), "{error}");
+    let log: ant_remote::protocol::JobLog = cluster
+        .client(VIEWER_TOKEN)
+        .get_json(&format!("{path}?from=0"), "log")
+        .expect("viewers read output");
+    assert!(log.text.contains("second line") && !log.text.contains("forged"));
+    let error = client
+        .get_json::<ant_remote::protocol::JobLog>(&format!("{path}?from=x"), "log")
+        .expect_err("bad offset");
+    assert!(error.contains("400"), "{error}");
 }

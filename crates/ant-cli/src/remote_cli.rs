@@ -204,5 +204,15 @@ pub fn remote_command(mut args: impl Iterator<Item = OsString>) -> Result<u8, St
     }
     .canonicalize()
     .map_err(|error| format!("cannot access workspace: {error}"))?;
-    ant_remote::client::run_plan(&coordinator, &graph, &workspace, Duration::from_millis(200))
+    // The tool's own output streams to stderr as it runs (D-049); stdout
+    // keeps the machine-readable action lines.
+    let output = |text: &str| eprint!("{text}");
+    ant_remote::client::run_plan_in(
+        &coordinator,
+        &graph,
+        &workspace,
+        Duration::from_millis(200),
+        None,
+        Some(&output),
+    )
 }

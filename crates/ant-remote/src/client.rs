@@ -24,8 +24,11 @@ pub fn run_plan(
     workspace: &Path,
     poll: Duration,
 ) -> Result<u8, String> {
-    run_plan_in(coordinator, graph, workspace, poll, None)
+    run_plan_in(coordinator, graph, workspace, poll, None, None)
 }
+
+/// Receives a remote job's tool output as it arrives (D-049).
+pub type OutputHandler<'a> = &'a (dyn Fn(&str) + Sync);
 
 /// Like [`run_plan`], asking workers to keep this project's workspace
 /// between jobs when `workspace_key` is given (D-048).
@@ -35,6 +38,7 @@ pub fn run_plan_in(
     workspace: &Path,
     poll: Duration,
     workspace_key: Option<&str>,
+    output: Option<OutputHandler<'_>>,
 ) -> Result<u8, String> {
     let actions = graph.ordered_actions().map_err(|error| error.to_string())?;
     let mut remaining: Vec<&str> = actions.iter().map(|action| action.id.as_str()).collect();
@@ -52,7 +56,7 @@ pub fn run_plan_in(
         let submitted: SubmitResponse = coordinator
             .post_json("/v1/jobs", &spec, "job submission")?
             .ok_or("job submission returned no body")?;
-        let status = wait(coordinator, &submitted.job_id, action, poll)?;
+        let status = wait(coordinator, &submitted.job_id, action, poll, output)?;
         let code = report(coordinator, workspace, action, &status)?;
         if code != 0 {
             for id in &remaining {
@@ -166,15 +170,26 @@ fn wait(
     job_id: &str,
     action: &Action,
     poll: Duration,
+    output: Option<OutputHandler<'_>>,
 ) -> Result<JobStatus, String> {
     // Generous client-side bound: the action's own timeout plus queueing and
     // transfer; without a timeout the client waits until the job finishes.
     let deadline = action
         .timeout_ms
         .map(|ms| Instant::now() + Duration::from_millis(ms) + Duration::from_secs(600));
+    let mut log = output.map(|handler| LogFollower {
+        handler,
+        next: 0,
+        truncated: false,
+    });
     loop {
         let status: JobStatus =
             coordinator.get_json(&format!("/v1/jobs/{job_id}"), "job status")?;
+        if let Some(follower) = &mut log
+            && !follower.follow(coordinator, job_id)
+        {
+            log = None;
+        }
         if matches!(status.state, JobState::Completed | JobState::Failed) {
             return Ok(status);
         }
@@ -185,6 +200,35 @@ fn wait(
             ));
         }
         std::thread::sleep(poll);
+    }
+}
+
+/// Prints a job's output as it grows (D-049).
+struct LogFollower<'a> {
+    handler: OutputHandler<'a>,
+    next: u64,
+    truncated: bool,
+}
+
+impl LogFollower<'_> {
+    /// `false` when the coordinator cannot serve output (an older one):
+    /// stop asking, the build goes on.
+    fn follow(&mut self, coordinator: &Coordinator, job_id: &str) -> bool {
+        let Ok(log) = coordinator.get_json::<crate::protocol::JobLog>(
+            &format!("/v1/jobs/{job_id}/log?from={}", self.next),
+            "job output",
+        ) else {
+            return false;
+        };
+        if !log.text.is_empty() {
+            (self.handler)(&log.text);
+        }
+        if log.truncated && !self.truncated {
+            self.truncated = true;
+            (self.handler)("\n[ant: output truncated on the server; the build continues]\n");
+        }
+        self.next = log.next;
+        true
     }
 }
 

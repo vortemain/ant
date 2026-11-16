@@ -16,9 +16,9 @@ JSON documents over HTTP/1.1 under `/v1`. Every job and lease document carries `
 
 | Role | May call |
 |---|---|
-| client | blobs, `POST /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs`, `GET /v1/workers` |
-| viewer (optional, `--viewer-token-file`) | read-only: `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/workers` |
-| worker | blobs, `POST /v1/lease`, `POST /v1/jobs/{id}/result` (only for a job it holds the lease on) |
+| client | blobs, `POST /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/log`, `GET /v1/jobs`, `GET /v1/workers` |
+| viewer (optional, `--viewer-token-file`) | read-only: `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/log`, `GET /v1/workers` |
+| worker | blobs, `POST /v1/lease`, `POST /v1/jobs/{id}/log` and `POST /v1/jobs/{id}/result` (only for a running job it holds the lease on) |
 
 Missing/invalid token → 401; valid token, wrong role → 403. `GET /v1/health` is unauthenticated and returns `{"protocol_version":1}`.
 
@@ -56,6 +56,10 @@ The coordinator validates the action, the entries, and that every input blob is 
 
 `GET /v1/jobs/{id}` (client) → `{job_id, state: queued|running|completed|failed, attempts, result, error}`.
 
+## Job output (D-049)
+
+While a job runs, the worker holding its lease sends the tool's stdout and stderr, interleaved as they arrive, every 250 ms: `POST /v1/jobs/{id}/log` with `{worker_id, text}` (UTF-8; a character split across flushes is held back). The coordinator appends it (up to 4 MiB per job, then marks the log `truncated`) and refuses chunks from any other worker or for a job that is not running (409). Readers poll `GET /v1/jobs/{id}/log?from=N` → `{next, text, truncated}` with the bytes from offset `N`, and ask again with `from = next`. The worker flushes everything before it posts the result, so a reader that sees the job finished and reads once more has the complete output. Clients treat a coordinator without the route (404) as having no output and carry on.
+
 ## Worker execution
 
 Fresh workspace per job (`<work-dir>/<job-id>`, removed afterwards), plus an `.ant/tmp` staging directory; each input blob downloaded and verified before writing; the action runs with Ant's local executor (`prepare_with_metadata` + `execute_prepared`, or the restricted-token sandbox with `--sandbox`), which re-verifies inputs and checks declared outputs; on success every declared output file is uploaded (trees expanded).
@@ -92,7 +96,7 @@ On a hit the worker reports the stored outputs without executing (`JobResult.reu
 ## Known v1 limits
 
 - Jobs live in coordinator memory: a restart loses queued/running jobs (clients fail with 404); blobs persist.
-- No stdout/stderr transfer: action output appears on the worker's console only.
+- Tool output (D-049) is kept in coordinator memory only (up to 4 MiB per job, then truncated) and only the direct executor streams it; sandboxed workers do not capture output yet.
 - No cancellation propagation from client to worker; a client that gives up leaves the job to run.
 - No job routing by OS/toolchain, no fairness between clients, no blob garbage collection, single coordinator.
 - The client runs actions sequentially (no remote parallelism yet) and does not consult the local cache.

@@ -153,6 +153,28 @@ impl JobResult {
     }
 }
 
+/// A piece of a running job's tool output, sent by the worker holding the
+/// job's lease (`POST /v1/jobs/{id}/log`, D-049).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LogChunk {
+    pub worker_id: String,
+    pub text: String,
+}
+
+/// Output of a job from byte offset `from` (`GET /v1/jobs/{id}/log?from=N`,
+/// D-049). Ask again with `from = next` for what arrived since.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct JobLog {
+    pub next: u64,
+    pub text: String,
+    /// The coordinator stopped keeping output at [`MAX_JOB_LOG_BYTES`].
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// Output kept per job by the coordinator; more is dropped (D-049).
+pub const MAX_JOB_LOG_BYTES: usize = 4 << 20;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct JobStatus {
     pub job_id: String,

@@ -73,6 +73,10 @@ struct JobRecord {
     submitted_ms: u64,
     started_ms: Option<u64>,
     finished_ms: Option<u64>,
+    /// Tool output streamed by the worker (D-049), at most
+    /// `MAX_JOB_LOG_BYTES`.
+    log: String,
+    log_truncated: bool,
 }
 
 struct WorkerRecord {
@@ -375,6 +379,21 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         }
         (tiny_http::Method::Post, ["v1", "lease"]) => {
             require(role, Role::Worker).and_then(|_| lease(state, request))
+        }
+        (tiny_http::Method::Post, ["v1", "jobs", id, "log"]) => {
+            require(role, Role::Worker).and_then(|_| post_log(state, request, id))
+        }
+        (tiny_http::Method::Get, ["v1", "jobs", id, "log"]) => {
+            let from = request
+                .url()
+                .split_once('?')
+                .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix("from=")))
+                .map(|value| value.parse::<u64>())
+                .transpose()
+                .map_err(|_| error_reply(400, "from must be a byte offset"));
+            require_reader(role)
+                .and(from)
+                .and_then(|from| job_log(state, id, from.unwrap_or(0)))
         }
         (tiny_http::Method::Post, ["v1", "jobs", id, "result"]) => {
             require(role, Role::Worker).and_then(|_| post_result(state, request, id))
@@ -703,6 +722,8 @@ fn submit(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Repl
             submitted_ms: now_ms(),
             started_ms: None,
             finished_ms: None,
+            log: String::new(),
+            log_truncated: false,
         },
     );
     jobs.queue.push_back(job_id.clone());
@@ -765,6 +786,60 @@ fn lease(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Reply
     record.lease = Some((lease.worker_id, now + lease_for));
     let spec = record.spec.clone();
     Ok(json_reply(200, &LeaseResponse { job_id, spec }))
+}
+
+/// Append a running job's output; only the worker holding its lease may.
+fn post_log(state: &State, request: &mut tiny_http::Request, id: &str) -> Result<Reply, Reply> {
+    let body = read_body(state, request)?;
+    let chunk: crate::protocol::LogChunk = parse_json(&body)?;
+    let mut jobs = state.jobs.lock().expect("jobs lock");
+    let record = jobs
+        .records
+        .get_mut(id)
+        .ok_or_else(|| error_reply(404, "no such job"))?;
+    match &record.lease {
+        Some((holder, _)) if *holder == chunk.worker_id && record.state == JobState::Running => {}
+        _ => {
+            return Err(error_reply(
+                409,
+                "this worker does not hold the job's lease",
+            ));
+        }
+    }
+    let room = crate::protocol::MAX_JOB_LOG_BYTES.saturating_sub(record.log.len());
+    if chunk.text.len() <= room {
+        record.log.push_str(&chunk.text);
+    } else {
+        let mut cut = room;
+        while !chunk.text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        record.log.push_str(&chunk.text[..cut]);
+        record.log_truncated = true;
+    }
+    Ok((204, Vec::new(), "text/plain"))
+}
+
+fn job_log(state: &State, id: &str, from: u64) -> Result<Reply, Reply> {
+    let jobs = state.jobs.lock().expect("jobs lock");
+    let record = jobs
+        .records
+        .get(id)
+        .ok_or_else(|| error_reply(404, "no such job"))?;
+    let mut start = usize::try_from(from)
+        .unwrap_or(usize::MAX)
+        .min(record.log.len());
+    while !record.log.is_char_boundary(start) {
+        start -= 1;
+    }
+    Ok(json_reply(
+        200,
+        &crate::protocol::JobLog {
+            next: record.log.len() as u64,
+            text: record.log[start..].to_owned(),
+            truncated: record.log_truncated,
+        },
+    ))
 }
 
 fn post_result(state: &State, request: &mut tiny_http::Request, id: &str) -> Result<Reply, Reply> {
@@ -834,6 +909,8 @@ mod tests {
             submitted_ms: 1,
             started_ms: Some(2),
             finished_ms: None,
+            log: String::new(),
+            log_truncated: false,
         }
     }
 
