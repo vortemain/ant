@@ -1139,7 +1139,7 @@ fn ui(args: impl Iterator<Item = String>) -> Result<u8, String> {
         crate::dashboard::open_in_browser(&format!("{base}#token={}", viewer.trim()));
     } else {
         println!(
-            "Sign in on the page with the read-only token shown by: ant server ui {name} (or open it without --no-open)"
+            "The page asks for a token; without --no-open, Ant opens it already signed in (read-only)."
         );
     }
     let cancellation = local_executor::CancellationToken::new();
