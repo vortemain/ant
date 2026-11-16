@@ -133,6 +133,22 @@ pub fn run_plan_in(
                 failed.get_or_insert(code);
             }
         }
+        // Fail fast (D-054): stop what is still queued or running instead
+        // of letting it finish for nothing.
+        if failed.is_some() && !running.is_empty() {
+            for job in running.drain(..) {
+                let path = format!("/v1/jobs/{}/cancel", job.job_id);
+                let _ = coordinator.post_json::<_, serde_json::Value>(
+                    &path,
+                    &serde_json::json!({}),
+                    "cancel",
+                );
+                println!(
+                    "action={} status=cancelled remote_job={}",
+                    job.action.id, job.job_id
+                );
+            }
+        }
     }
     if let Some(code) = failed {
         for node in &pending {

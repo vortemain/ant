@@ -1,0 +1,55 @@
+# Signing passwords and server tokens in the system keyring (D-052): macOS
+# Keychain and Linux Secret Service, with the 0600-file fallback disallowed
+# (ANT_REQUIRE_KEYRING), then a real `ant signing` key round trip.
+name: verify-keyring
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["batch-*", "p4-*"]
+  pull_request:
+    paths:
+      - crates/ant-cli/src/signing.rs
+      - .github/workflows/verify-keyring.yml
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: An unlocked default keychain (as on a developer's Mac)
+        run: |
+          security create-keychain -p ci-pass ant-ci.keychain
+          security default-keychain -s ant-ci.keychain
+          security unlock-keychain -p ci-pass ant-ci.keychain
+          security set-keychain-settings ant-ci.keychain
+      - name: Keyring round trip (no fallback)
+        env:
+          ANT_REQUIRE_KEYRING: "1"
+        run: cargo test --locked -p ant-cli --bin ant sealed_secrets -- --nocapture
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Secret Service (gnome-keyring) and secret-tool
+        run: sudo apt-get update -q && sudo apt-get install -y -q gnome-keyring libsecret-tools dbus-x11
+      - name: Build the test first (outside the D-Bus session)
+        run: cargo test --locked -p ant-cli --bin ant --no-run
+      - name: Keyring round trip (no fallback)
+        env:
+          ANT_REQUIRE_KEYRING: "1"
+        run: |
+          dbus-run-session -- sh -c '
+            printf ci-pass | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            cargo test --locked -p ant-cli --bin ant sealed_secrets -- --nocapture
+          '

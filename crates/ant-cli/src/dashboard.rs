@@ -348,6 +348,36 @@ fn handle(
             "",
             APP_JS.as_bytes(),
         ),
+        "api/servers" => {
+            let body = servers_json();
+            respond(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                "",
+                body.as_bytes(),
+            )
+        }
+        _ if route.starts_with("api/servers/") && route.ends_with("/status") => {
+            let name = route["api/servers/".len()..route.len() - "/status".len()].to_owned();
+            // Reaching a server takes an SSH round trip (seconds); answer
+            // on a thread so the dashboard keeps serving meanwhile.
+            std::thread::spawn(move || {
+                let body = match crate::server::status_line(&name) {
+                    Ok(line) => serde_json::json!({ "ok": true, "summary": line }),
+                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                }
+                .to_string();
+                let _ = respond(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    "",
+                    body.as_bytes(),
+                );
+            });
+            Ok(())
+        }
         "api/builds" => {
             let body = builds_json(&builds(SHOWN), &running());
             respond(
@@ -462,14 +492,24 @@ fn builds_json(builds: &[BuildRecord], running: &[history::RunningBuild]) -> Str
                 .iter()
                 .enumerate()
                 .map(|(index, relative)| {
-                    let metadata = std::fs::metadata(build.project.join(relative)).ok();
+                    let full = build.project.join(relative);
+                    let metadata = std::fs::metadata(&full).ok();
                     let replaced = !collected.insert((build.project.clone(), relative.clone()));
+                    // A deliverable may be a whole folder (a web app, a
+                    // published .NET app, an iOS .app bundle; D-051).
+                    let folder = metadata.as_ref().is_some_and(|m| m.is_dir());
+                    let size = if folder {
+                        folder_size(&full)
+                    } else {
+                        metadata.as_ref().map(|m| m.len()).unwrap_or(0)
+                    };
                     serde_json::json!({
                         "replaced": replaced,
                         "name": relative.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                         "path": relative.to_string_lossy(),
-                        "exists": metadata.as_ref().is_some_and(|m| m.is_file()),
-                        "bytes": metadata.map(|m| m.len()).unwrap_or(0),
+                        "exists": metadata.as_ref().is_some_and(|m| m.is_file() || m.is_dir()),
+                        "folder": folder,
+                        "bytes": size,
                         "url": format!("files/{}/{index}", build.id),
                     })
                 })
@@ -489,6 +529,50 @@ fn builds_json(builds: &[BuildRecord], running: &[history::RunningBuild]) -> Str
         .collect();
     serde_json::json!({ "now_ms": history::now_ms(), "running": running, "builds": items })
         .to_string()
+}
+
+/// Total size of the files in a folder deliverable (bounded walk).
+fn folder_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![dir.to_path_buf()];
+    let mut visited = 0;
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > 100_000 {
+                return total;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(entry.path()),
+                Ok(kind) if kind.is_file() => {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
+/// The deployed servers this computer knows (D-053): names and addresses
+/// only; no tokens.
+fn servers_json() -> String {
+    let servers: Vec<serde_json::Value> = crate::server::all_profiles()
+        .into_iter()
+        .map(|profile| {
+            serde_json::json!({
+                "name": profile.name,
+                "target": profile.target,
+                "os": profile.os,
+                "arch": profile.arch,
+                "deployed_ms": profile.deployed_ms,
+            })
+        })
+        .collect();
+    serde_json::json!({ "servers": servers }).to_string()
 }
 
 /// `<build id>/<index>` → the deliverable's absolute path and file name,

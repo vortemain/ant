@@ -350,6 +350,7 @@ main { padding: 20px clamp(16px, 3vw, 32px) 40px; display: flex; flex-direction:
 .t-cmake { background: #064f8c; } .t-gradle { background: #02303a; } .t-flutter { background: #0468d7; }
 .t-xcode { background: #0a62cc; } .t-maven { background: #c71a36; } .t-python { background: #3776ab; }
 .t-tauri { background: #ffc131; color: #24292f; } .t-electron { background: #356a73; } .t-docker { background: #1d63ed; }
+.t-dotnet { background: #512bd4; }
 .t-other { background: #6b7280; }
 
 /* ---------- tables ---------- */
@@ -473,3 +474,13 @@ main { padding: 20px clamp(16px, 3vw, 32px) 40px; display: flex; flex-direction:
   .project-grid { grid-template-columns: 1fr; }
   .legend { display: none; }
 }
+
+/* Servers (D-053) and folder deliverables */
+.servers { list-style: none; margin: 0; padding: 0; }
+.server { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-top: 1px solid var(--border); }
+.server:first-child { border-top: 0; }
+.server .file-body { flex: 1; min-width: 0; }
+.server-status { display: block; margin-top: 4px; font-size: 0.8125rem; color: var(--muted); overflow-wrap: anywhere; }
+.server-status.ok { color: var(--ok); }
+.server-status.bad { color: var(--bad); }
+.file-note { color: var(--muted); font-size: 0.8125rem; white-space: nowrap; }

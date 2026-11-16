@@ -964,3 +964,107 @@ fn kept_workspaces_keep_other_actions_inputs() {
         assert_eq!(code, 0, "b still finds a's input in the kept workspace");
     }
 }
+
+/// D-054: when one action fails, the client cancels the rest: a running
+/// job is stopped on its worker and a queued one never starts, so a failed
+/// build does not keep the server busy.
+#[test]
+fn a_failure_cancels_the_other_remote_jobs() {
+    let mut cluster = Cluster::start("cancel", true);
+    cluster.add_worker("second-worker", "work-2");
+    let project = TempDir::new("cancel-project");
+    let (fail, slow) = if cfg!(windows) {
+        (
+            "ping -n 2 127.0.0.1 >nul & exit 1",
+            "ping -n 31 127.0.0.1 >nul & echo done> slow.txt",
+        )
+    } else {
+        ("sleep 1; exit 1", "sleep 30; echo done > slow.txt")
+    };
+    let out = |name: &str| json!([{ "path": name, "kind": "file" }]);
+    let plan: build_graph::PlanFile = serde_json::from_value(json!({
+        "schema_version": 1,
+        "actions": [
+            action("a-fail", fail, json!([]), out("never.txt"), &[]),
+            action("b-slow", slow, json!([]), out("slow.txt"), &[]),
+            action("c-slow", slow, json!([]), out("slow.txt"), &[]),
+        ]
+    }))
+    .expect("plan");
+    let graph = plan.to_graph().expect("graph");
+    let client = cluster.client(CLIENT_TOKEN);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let workers: serde_json::Value =
+            client.get_json("/v1/workers", "workers").expect("workers");
+        if workers["workers"].as_array().map_or(0, Vec::len) >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "workers never registered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let workspace = project.path().canonicalize().expect("workspace");
+    let started = std::time::Instant::now();
+    let code = ant_remote::client::run_plan_in(
+        &client,
+        &graph,
+        &workspace,
+        std::time::Duration::from_millis(50),
+        None,
+        None,
+    )
+    .expect("run");
+    assert_ne!(code, 0);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the client did not wait for the slow jobs: {:?}",
+        started.elapsed()
+    );
+    // Within a few seconds both slow jobs are over without succeeding: the
+    // running one stopped by its worker, the queued one never started.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let jobs: ant_remote::protocol::JobList =
+            client.get_json("/v1/jobs", "jobs").expect("jobs");
+        let slow: Vec<_> = jobs
+            .jobs
+            .iter()
+            .filter(|job| job.action_id.ends_with("-slow"))
+            .collect();
+        let over = slow.iter().all(|job| {
+            matches!(
+                job.state,
+                ant_remote::protocol::JobState::Completed | ant_remote::protocol::JobState::Failed
+            )
+        });
+        if slow.len() == 2 && over {
+            for job in &slow {
+                let status: ant_remote::protocol::JobStatus = client
+                    .get_json(&format!("/v1/jobs/{}", job.job_id), "status")
+                    .expect("status");
+                assert!(
+                    status
+                        .result
+                        .as_ref()
+                        .is_none_or(|result| !result.succeeded()),
+                    "{status:?}"
+                );
+            }
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "slow jobs still running: {:?}",
+            slow
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(25),
+        "cancelled well before the 30 s jobs would have finished"
+    );
+    assert!(!project.path().join("slow.txt").exists());
+}

@@ -77,6 +77,9 @@ struct JobRecord {
     /// `MAX_JOB_LOG_BYTES`.
     log: String,
     log_truncated: bool,
+    /// The client asked to stop this running job (D-054); the worker hears
+    /// it on its next output heartbeat.
+    cancel_requested: bool,
 }
 
 struct WorkerRecord {
@@ -428,6 +431,9 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         (tiny_http::Method::Post, ["v1", "lease"]) => {
             require(role, Role::Worker).and_then(|_| lease(state, request))
         }
+        (tiny_http::Method::Post, ["v1", "jobs", id, "cancel"]) => {
+            require(role, Role::Client).and_then(|_| cancel_job(state, id))
+        }
         (tiny_http::Method::Post, ["v1", "jobs", id, "log"]) => {
             require(role, Role::Worker).and_then(|_| post_log(state, request, id))
         }
@@ -772,6 +778,7 @@ fn submit(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Repl
             finished_ms: None,
             log: String::new(),
             log_truncated: false,
+            cancel_requested: false,
         },
     );
     jobs.queue.push_back(job_id.clone());
@@ -854,6 +861,8 @@ fn post_log(state: &State, request: &mut tiny_http::Request, id: &str) -> Result
             ));
         }
     }
+    // An empty chunk is a heartbeat; the answer says whether to stop.
+    let cancel = record.cancel_requested;
     let room = crate::protocol::MAX_JOB_LOG_BYTES.saturating_sub(record.log.len());
     if chunk.text.len() <= room {
         record.log.push_str(&chunk.text);
@@ -864,6 +873,30 @@ fn post_log(state: &State, request: &mut tiny_http::Request, id: &str) -> Result
         }
         record.log.push_str(&chunk.text[..cut]);
         record.log_truncated = true;
+    }
+    if cancel {
+        return Ok(json_reply(200, &serde_json::json!({ "cancel": true })));
+    }
+    Ok((204, Vec::new(), "text/plain"))
+}
+
+/// Stop a job (D-054): a queued job never starts; a running one is told to
+/// stop through its worker's next heartbeat. Finished jobs are left alone.
+fn cancel_job(state: &State, id: &str) -> Result<Reply, Reply> {
+    let mut jobs = state.jobs.lock().expect("jobs lock");
+    let record = jobs
+        .records
+        .get_mut(id)
+        .ok_or_else(|| error_reply(404, "no such job"))?;
+    match record.state {
+        JobState::Queued => {
+            record.state = JobState::Failed;
+            record.error = Some("cancelled before it started".to_owned());
+            record.finished_ms = Some(now_ms());
+            jobs.queue.retain(|queued| queued != id);
+        }
+        JobState::Running => record.cancel_requested = true,
+        JobState::Completed | JobState::Failed => {}
     }
     Ok((204, Vec::new(), "text/plain"))
 }
@@ -959,6 +992,7 @@ mod tests {
             finished_ms: None,
             log: String::new(),
             log_truncated: false,
+            cancel_requested: false,
         }
     }
 

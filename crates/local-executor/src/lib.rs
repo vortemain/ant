@@ -995,9 +995,42 @@ pub fn execute_sandboxed_prepared(
         .env_clear();
     command.envs(build_digest::local_runtime_environment());
     command.envs(spawn_environment(action, &inner_cwd));
+    // Output tee (D-045, D-049): sandboxed workers stream it too.
+    if let Some(capture) = &prepared.output_capture {
+        command.envs(capture.display_environment.iter().map(|(k, v)| (k, v)));
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+    }
     let mut child = command.spawn().map_err(ExecutionError::Spawn)?;
+    let pumps = prepared.output_capture.as_ref().map(|capture| {
+        let (done, finished) = std::sync::mpsc::channel();
+        let mut count = 0;
+        if let Some(stdout) = child.stdout.take() {
+            pump_output(
+                stdout,
+                false,
+                std::sync::Arc::clone(&capture.sink),
+                done.clone(),
+            );
+            count += 1;
+        }
+        if let Some(stderr) = child.stderr.take() {
+            pump_output(stderr, true, std::sync::Arc::clone(&capture.sink), done);
+            count += 1;
+        }
+        (finished, count)
+    });
     let timeout = action.timeout_ms.map(Duration::from_millis);
     let (status, cancelled, timed_out) = wait_for_child(&mut child, cancellation, timeout)?;
+    if let Some((finished, count)) = pumps {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        for _ in 0..count {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if finished.recv_timeout(left).is_err() {
+                break;
+            }
+        }
+    }
     let mut output_digests = Vec::new();
     if status.success() && !cancelled && !timed_out {
         output_digests = verify_inputs_and_digest_outputs(prepared)?;

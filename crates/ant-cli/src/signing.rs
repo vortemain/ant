@@ -109,13 +109,179 @@ pub(crate) fn sealed_name(base: &str) -> String {
     }
 }
 
-/// How passwords are protected at rest on this platform, in words.
-pub fn protection_description() -> &'static str {
+/// How a sealed secret is protected at rest, in words, from its stored
+/// form (D-052).
+pub fn protection_of(blob: &[u8]) -> &'static str {
     if cfg!(windows) {
         "encrypted with Windows DPAPI for your user account"
+    } else if keyring::reference(blob).is_some() {
+        if cfg!(target_os = "macos") {
+            "kept in your macOS Keychain"
+        } else {
+            "kept in your desktop keyring (Secret Service)"
+        }
     } else {
-        "readable only by your user (file mode 0600); not encrypted at rest yet"
+        "readable only by your user (file mode 0600); no system keyring was available to encrypt it"
     }
+}
+
+/// Remove a sealed secret's keyring entry, if it has one (best effort).
+pub(crate) fn forget_sealed(blob: &[u8]) {
+    #[cfg(not(windows))]
+    if let Some(id) = keyring::reference(blob) {
+        keyring::delete(id);
+    }
+    #[cfg(windows)]
+    let _ = blob;
+}
+
+/// The system keyring on macOS (Keychain, through `security`) and Linux
+/// (Secret Service, through `secret-tool`), D-052. Secrets travel to these
+/// tools on stdin, hex-encoded, never on a command line. The sealed file
+/// holds only `ant-keyring:v1:<id>`.
+mod keyring {
+    pub(super) const PREFIX: &str = "ant-keyring:v1:";
+
+    pub(super) fn reference(blob: &[u8]) -> Option<&str> {
+        let text = std::str::from_utf8(blob).ok()?;
+        let id = text.strip_prefix(PREFIX)?;
+        (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())).then_some(id)
+    }
+
+    #[cfg(not(windows))]
+    fn run(program: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>, String> {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("{program}: {error}"))?;
+        if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
+            pipe.write_all(bytes)
+                .map_err(|error| format!("{program}: {error}"))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("{program}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{program} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(output.stdout)
+    }
+
+    #[cfg(not(windows))]
+    fn service(id: &str) -> String {
+        format!("dev.ant.secret.{id}")
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn store(id: &str, hex: &str) -> Result<(), String> {
+        // `security -i` reads commands from stdin, keeping the secret off
+        // the command line; hex needs no quoting.
+        let command = format!(
+            "add-generic-password -U -a ant -s {} -l \"Ant secret\" -w {hex}\n",
+            service(id)
+        );
+        run("security", &["-i"], Some(command.as_bytes())).map(|_| ())?;
+        // `security -i` exits 0 even when a command fails: read it back.
+        match load(id) {
+            Ok(stored) if stored == hex => Ok(()),
+            _ => Err("the Keychain did not keep the secret".to_owned()),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn load(id: &str) -> Result<String, String> {
+        let output = run(
+            "security",
+            &[
+                "find-generic-password",
+                "-a",
+                "ant",
+                "-s",
+                &service(id),
+                "-w",
+            ],
+            None,
+        )?;
+        Ok(String::from_utf8_lossy(&output).trim().to_owned())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn delete(id: &str) {
+        let _ = run(
+            "security",
+            &["delete-generic-password", "-a", "ant", "-s", &service(id)],
+            None,
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(super) fn store(id: &str, hex: &str) -> Result<(), String> {
+        run(
+            "secret-tool",
+            &[
+                "store",
+                "--label",
+                "Ant secret",
+                "application",
+                "ant",
+                "id",
+                id,
+            ],
+            Some(hex.as_bytes()),
+        )
+        .map(|_| ())?;
+        match load(id) {
+            Ok(stored) if stored == hex => Ok(()),
+            _ => Err("the keyring did not keep the secret".to_owned()),
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(super) fn load(id: &str) -> Result<String, String> {
+        let output = run(
+            "secret-tool",
+            &["lookup", "application", "ant", "id", id],
+            None,
+        )?;
+        Ok(String::from_utf8_lossy(&output).trim().to_owned())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(super) fn delete(id: &str) {
+        let _ = run(
+            "secret-tool",
+            &["clear", "application", "ant", "id", id],
+            None,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(not(windows))]
+fn from_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(text.get(index..index + 2)?, 16).ok())
+        .collect()
 }
 
 #[cfg(windows)]
@@ -128,14 +294,30 @@ pub(crate) fn unseal(blob: &[u8]) -> Result<Vec<u8>, String> {
     ant_sandbox_win::secrets::unprotect_for_current_user(blob).map_err(|error| error.to_string())
 }
 
+/// Put the secret in the system keyring and return the reference to
+/// store; without a usable keyring, the secret itself (the file is 0600).
 #[cfg(not(windows))]
 pub(crate) fn seal(secret: &[u8]) -> Result<Vec<u8>, String> {
-    Ok(secret.to_vec())
+    let id = random_hex(16)?;
+    let hex = to_hex(secret);
+    match keyring::store(&id, &hex) {
+        Ok(()) => Ok(format!("{}{id}", keyring::PREFIX).into_bytes()),
+        Err(_) => Ok(secret.to_vec()),
+    }
 }
 
 #[cfg(not(windows))]
 pub(crate) fn unseal(blob: &[u8]) -> Result<Vec<u8>, String> {
-    Ok(blob.to_vec())
+    match keyring::reference(blob) {
+        Some(id) => {
+            let hex = keyring::load(id).map_err(|error| {
+                format!("cannot read the secret from the system keyring: {error}")
+            })?;
+            from_hex(&hex).ok_or_else(|| "the keyring entry is damaged".to_owned())
+        }
+        // Stored before D-052, or where no keyring was available.
+        None => Ok(blob.to_vec()),
+    }
 }
 
 /// Write a file only the current user can read (mode 0600 on Unix; the
@@ -382,6 +564,12 @@ impl AndroidKey {
         write_private(&dir.join(KEY_FILE), text.as_bytes())
     }
 
+    /// How this key's password is stored, in words (D-052).
+    pub fn protection(&self) -> &'static str {
+        let blob = fs::read(self.dir.join(sealed_name("store-password"))).unwrap_or_default();
+        protection_of(&blob)
+    }
+
     fn password(&self, base: &str) -> Result<Password, String> {
         let path = self.dir.join(sealed_name(base));
         let blob =
@@ -497,7 +685,7 @@ pub fn signing_command(args: impl Iterator<Item = OsString>) -> Result<u8, Strin
                     println!("{app_id}: upload key '{}'", key.alias);
                     println!("  certificate SHA-256  {}", key.cert_sha256);
                     println!("  stored in            {}", key.dir.display());
-                    println!("  password             {}", protection_description());
+                    println!("  password             {}", key.protection());
                     println!(
                         "  back it up with      ant signing export --out <folder outside the project>"
                     );
@@ -582,6 +770,24 @@ pub fn signing_command(args: impl Iterator<Item = OsString>) -> Result<u8, Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sealed_secrets_round_trip_through_the_keyring_when_required() {
+        let secret: &[u8] = b"correct horse battery staple";
+        let blob = seal(secret).expect("seal");
+        assert_eq!(unseal(&blob).expect("unseal"), secret);
+        // CI sets ANT_REQUIRE_KEYRING on macOS and Linux with a keyring
+        // running, so the keyring path cannot silently fall back (D-052).
+        if std::env::var_os("ANT_REQUIRE_KEYRING").is_some() {
+            assert!(
+                blob.starts_with(b"ant-keyring:v1:"),
+                "stored in the keyring, not the file"
+            );
+            assert!(!blob.windows(secret.len()).any(|window| window == secret));
+            forget_sealed(&blob);
+            assert!(unseal(&blob).is_err(), "forgotten secrets are gone");
+        }
+    }
+
     use super::*;
 
     #[test]

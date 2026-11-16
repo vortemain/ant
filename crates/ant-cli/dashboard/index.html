@@ -40,6 +40,11 @@
           <span>Deliverables</span>
           <span class="nav-count" id="nav-deliverables"></span>
         </a>
+        <a href="#servers" data-page="servers">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v6H4zm0 8h16v6H4zm3-5h.01M7 16h.01"/></svg>
+          <span>Servers</span>
+          <span class="nav-count" id="nav-servers"></span>
+        </a>
       </nav>
       <div class="sidebar-foot">
         <p class="foot-title">Build from a terminal</p>
@@ -183,6 +188,19 @@
               </div>
             </header>
             <ul class="files" id="files"></ul>
+          </article>
+        </section>
+
+        <!-- Servers (D-053) -->
+        <section class="page" id="page-servers" hidden aria-labelledby="page-title">
+          <article class="card">
+            <header class="card-head">
+              <div>
+                <h2>Your build servers</h2>
+                <p class="card-sub">Servers set up with <code>ant server deploy</code>. Build on one with <code>ant build --on NAME</code>.</p>
+              </div>
+            </header>
+            <ul class="servers" id="servers-list"></ul>
           </article>
         </section>
 

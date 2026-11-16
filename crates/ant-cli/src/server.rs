@@ -643,6 +643,13 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
     Ok(0)
 }
 
+/// Connect to a deployed server and describe it in one line (the
+/// dashboard's Servers page, D-053).
+pub(crate) fn status_line(name: &str) -> Result<String, String> {
+    let (coordinator, _tunnel) = connect(name)?;
+    health_and_workers(&coordinator)
+}
+
 /// One line about the coordinator and its workers.
 fn health_and_workers(coordinator: &ant_remote::http::Coordinator) -> Result<String, String> {
     let health: ant_remote::protocol::Health =
@@ -678,7 +685,7 @@ fn health_and_workers(coordinator: &ant_remote::http::Coordinator) -> Result<Str
     }
 }
 
-fn all_profiles() -> Vec<ServerProfile> {
+pub(crate) fn all_profiles() -> Vec<ServerProfile> {
     let Ok(dir) = servers_dir() else {
         return Vec::new();
     };
@@ -743,7 +750,11 @@ pub fn server_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
                 return Err(format!("no server named '{name}'"));
             }
             let _ = std::fs::remove_file(&profile);
-            let _ = std::fs::remove_file(dir.join(sealed_name(&format!("{name}.token"))));
+            let token = dir.join(sealed_name(&format!("{name}.token")));
+            if let Ok(blob) = std::fs::read(&token) {
+                crate::signing::forget_sealed(&blob);
+            }
+            let _ = std::fs::remove_file(&token);
             println!(
                 "Forgot {name} on this computer. The server itself still runs Ant; remove it there with: \
                  sudo systemctl disable --now 'ant-worker@*' ant-worker ant-coordinator"

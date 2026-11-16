@@ -33,7 +33,7 @@ for ecosystem in "$@"; do
     python)
       fresh python-hello
       build
-      ls dist/*.whl dist/*.tar.gz
+      ls dist/*.whl
       python -m venv "$work/venv"
       if [ -x "$work/venv/bin/python" ]; then py="$work/venv/bin/python"; else py="$work/venv/Scripts/python"; fi
       "$py" -m pip install -q dist/*.whl

@@ -445,9 +445,24 @@ fn ant_build_on_a_server_refuses_what_cannot_work() {
         stderr.contains("choose one of --on and --local"),
         "{stderr:?}"
     );
-    // `server` in ant.toml offloads by default; `--local` builds here.
+    // `server` in ant.toml is a team preference (D-055): when that server
+    // cannot take the build, Ant says why and builds here instead.
     write(&dir.path().join("ant.toml"), "server = \"other\"\n");
-    let (code, stderr) = run(&["build"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_ant"))
+        .current_dir(dir.path())
+        .env("ANT_CACHE_HOME", dir.path().join(".ant").join("cache-home"))
+        .env("ANT_DATA_HOME", &data)
+        .args(["build", "--dev"])
+        .output()
+        .expect("spawn ant");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("Building on this machine: other") && stdout.contains("Plan9"),
+        "{stdout}"
+    );
+    // An explicit --on still refuses; --local skips the server quietly.
+    let (code, stderr) = run(&["build", "--on", "other", "--dev"]);
     assert_eq!(code, 1);
     assert!(stderr.contains("other runs Plan9"), "{stderr:?}");
     let (code, stderr) = run(&["build", "--local", "--dev"]);

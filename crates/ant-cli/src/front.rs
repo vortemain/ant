@@ -309,13 +309,32 @@ pub fn build_and_collect(
     }
     // Offload to the developer's own server (D-048): `--on`, or `server` in
     // ant.toml unless `--local`.
-    let on = if local {
+    // `--on` is an order: refusals and connection failures are errors.
+    // `server` in ant.toml is a preference shared by a team (D-055): when
+    // that server cannot take this build (another OS, a signed release,
+    // unreachable right now), say why and build here.
+    let explicit = on.is_some();
+    let mut on = if local {
         None
     } else {
         on.or_else(|| config.server.clone())
     };
-    if let Some(name) = &on {
-        check_server(name, android && release)?;
+    let mut remote = None;
+    if let Some(name) = on.clone() {
+        let connected = check_server(&name, android && release).and_then(|()| {
+            println!("Connecting to {name}…");
+            crate::server::connect(&name)
+        });
+        match connected {
+            Ok(connection) => remote = Some(connection),
+            Err(error) if !explicit => {
+                println!(
+                    "Building on this machine: {name} (server in {CONFIG_FILE}) cannot take this build: {error}"
+                );
+                on = None;
+            }
+            Err(error) => return Err(error),
+        }
     }
     let (options, flavor) = build_options(adapter, &config.options, dev, release)?;
     let out_dir = safe_relative_dir(config.out_dir.as_deref().unwrap_or(DEFAULT_OUT_DIR))?;
@@ -367,7 +386,7 @@ pub fn build_and_collect(
                  Back it up now: ant signing export --out <a folder outside this project>",
                 key.cert_sha256,
                 key.dir.display(),
-                crate::signing::protection_description()
+                key.protection()
             );
         }
         for planned in &mut plan.actions {
@@ -466,7 +485,10 @@ pub fn build_and_collect(
     };
     let results = build_adapter::user_cache_dir().map(|dir| dir.join("local-results"));
     let code = match &on {
-        Some(name) => run_on_server(name, &graph, &root, &build_log)?,
+        Some(_) => {
+            let (coordinator, _tunnel) = remote.as_ref().ok_or("no server connection")?;
+            run_on_server(coordinator, &graph, &root, &build_log)?
+        }
         None => scheduler::run_plan(
             &graph,
             &root,
@@ -582,19 +604,17 @@ fn check_server(name: &str, signed: bool) -> Result<(), String> {
 /// the server keeps for this project so rebuilds there are incremental
 /// (D-048). Outputs come back into the project like a local build's.
 fn run_on_server(
-    name: &str,
+    coordinator: &ant_remote::http::Coordinator,
     graph: &build_graph::BuildGraph,
     root: &Path,
     log: &crate::build_log::BuildLog,
 ) -> Result<u8, String> {
-    println!("Connecting to {name}…");
-    let (coordinator, _tunnel) = crate::server::connect(name)?;
     let digest =
         build_digest::digest_bytes(format!("ant-remote-workspace\n{}", shown(root)).as_bytes())
             .to_string();
     let key = &digest[digest.len() - 32..];
     ant_remote::client::run_plan_in(
-        &coordinator,
+        coordinator,
         graph,
         root,
         std::time::Duration::from_millis(200),

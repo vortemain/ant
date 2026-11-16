@@ -131,7 +131,7 @@ fn execute_job(
     }
     let result = (|| -> Result<JobResult, String> {
         if caches_results(config) {
-            return run_cacheable(coordinator, config, &workspace, spec);
+            return run_cacheable(coordinator, config, &workspace, job_id, spec);
         }
         match sticky {
             Some(_) => {
@@ -145,35 +145,22 @@ fn execute_job(
             .map_err(|error| error.to_string())?;
         let mut prepared = local_executor::prepare_with_metadata(&workspace, &spec.action)
             .map_err(|error| error.to_string())?;
-        // Stream the tool's output to the coordinator while it runs, so the
-        // developer sees it live (D-049). The direct executor tees it; the
-        // sandboxed executor does not capture output yet.
-        let log = std::sync::Arc::new(JobLogSink::default());
-        prepared.output_capture = Some(local_executor::OutputCapture {
-            sink: log.clone(),
-            display_environment: Vec::new(),
-        });
         let cancellation = CancellationToken::new();
-        let done = std::sync::atomic::AtomicBool::new(false);
-        let executed = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(LOG_FLUSH_INTERVAL);
-                    log.flush(coordinator, config, job_id);
+        let executed = with_streamed_output(
+            coordinator,
+            config,
+            job_id,
+            &mut prepared,
+            &cancellation,
+            |prepared| {
+                if config.sandbox {
+                    local_executor::execute_sandboxed_prepared(prepared, &cancellation)
+                } else {
+                    local_executor::execute_prepared(prepared, &cancellation)
                 }
-            });
-            let executed = if config.sandbox {
-                local_executor::execute_sandboxed_prepared(&prepared, &cancellation)
-            } else {
-                local_executor::execute_prepared(&prepared, &cancellation)
-            };
-            done.store(true, std::sync::atomic::Ordering::Relaxed);
-            executed
-        })
+            },
+        )
         .map_err(|error| error.to_string())?;
-        // Everything before the result, so a client that saw the job finish
-        // can read the complete output.
-        log.flush(coordinator, config, job_id);
         let mut outputs = Vec::new();
         if executed.success() {
             outputs = upload_outputs(coordinator, &workspace, &spec.action)?;
@@ -192,6 +179,45 @@ fn execute_job(
         let _ = std::fs::remove_dir_all(&workspace);
     }
     result.unwrap_or_else(|error| failure(config, error))
+}
+
+/// Run `run` with the action's output streamed to the coordinator while it
+/// runs, so the developer sees it live (D-049); both the direct and the
+/// sandboxed executors tee it. Everything is flushed before returning, so a
+/// client that saw the job finish can read the complete output.
+fn with_streamed_output<T>(
+    coordinator: &Coordinator,
+    config: &WorkerConfig,
+    job_id: &str,
+    prepared: &mut local_executor::PreparedAction,
+    cancellation: &CancellationToken,
+    run: impl FnOnce(&mut local_executor::PreparedAction) -> T,
+) -> T {
+    let log = std::sync::Arc::new(JobLogSink::default());
+    prepared.output_capture = Some(local_executor::OutputCapture {
+        sink: log.clone(),
+        display_environment: Vec::new(),
+    });
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(LOG_FLUSH_INTERVAL);
+                // Every flush is also a heartbeat: the client may have
+                // cancelled the job after another action failed (D-054).
+                if log.flush(coordinator, config, job_id) {
+                    cancellation.cancel();
+                }
+            }
+        });
+        let result = run(prepared);
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        result
+    });
+    if log.flush(coordinator, config, job_id) {
+        cancellation.cancel();
+    }
+    result
 }
 
 /// How often a running job's new output is sent to the coordinator.
@@ -214,20 +240,18 @@ impl local_executor::OutputSink for JobLogSink {
 }
 
 impl JobLogSink {
-    /// Send what arrived since the last flush. Best effort: output is a
-    /// convenience and must never fail the build.
-    fn flush(&self, coordinator: &Coordinator, config: &WorkerConfig, job_id: &str) {
+    /// Send what arrived since the last flush (possibly nothing: then it is
+    /// a heartbeat). Returns whether the coordinator asked to stop the job.
+    /// Best effort: output is a convenience and must never fail the build.
+    fn flush(&self, coordinator: &Coordinator, config: &WorkerConfig, job_id: &str) -> bool {
         let Ok(mut carry) = self.carry.lock() else {
-            return;
+            return false;
         };
         let fresh = match self.pending.lock() {
             Ok(mut pending) => std::mem::take(&mut *pending),
-            Err(_) => return,
+            Err(_) => return false,
         };
         carry.extend_from_slice(&fresh);
-        if carry.is_empty() {
-            return;
-        }
         // Hold back a trailing partial character (at most 3 bytes).
         let complete = match std::str::from_utf8(&carry) {
             Ok(_) => carry.len(),
@@ -236,15 +260,15 @@ impl JobLogSink {
         };
         let text = String::from_utf8_lossy(&carry[..complete]).into_owned();
         carry.drain(..complete);
-        if text.is_empty() {
-            return;
-        }
         let chunk = crate::protocol::LogChunk {
             worker_id: config.worker_id.clone(),
             text,
         };
         let path = format!("/v1/jobs/{job_id}/log");
-        let _ = coordinator.post_json::<_, serde_json::Value>(&path, &chunk, "job output");
+        matches!(
+            coordinator.post_json::<_, serde_json::Value>(&path, &chunk, "job output"),
+            Ok(Some(answer)) if answer.get("cancel") == Some(&serde_json::Value::Bool(true))
+        )
     }
 }
 
@@ -483,9 +507,10 @@ fn execute_with_task_cache(
     config: &WorkerConfig,
     workspace: &Path,
     prepared: &mut local_executor::PreparedAction,
+    cancellation: &CancellationToken,
 ) -> Result<Result<local_executor::ExecutionResult, local_executor::ExecutionError>, String> {
     let run = |prepared: &local_executor::PreparedAction| {
-        local_executor::execute_sandboxed_prepared(prepared, &CancellationToken::new())
+        local_executor::execute_sandboxed_prepared(prepared, cancellation)
     };
     if !(config.task_cache && crate::gradle_cache::wants_task_cache(&prepared.action)) {
         return Ok(run(prepared));
@@ -569,6 +594,7 @@ fn run_cacheable(
     coordinator: &Coordinator,
     config: &WorkerConfig,
     workspace: &Path,
+    job_id: &str,
     spec: &JobSpec,
 ) -> Result<JobResult, String> {
     // Root-level files only (manifests, lock files, toolchain pins): enough
@@ -636,8 +662,18 @@ fn run_cacheable(
             key = None;
         }
     }
-    let executed = execute_with_task_cache(coordinator, config, &workspace, &mut prepared)?
-        .map_err(|error| error.to_string())?;
+    let cancellation = CancellationToken::new();
+    let executed = with_streamed_output(
+        coordinator,
+        config,
+        job_id,
+        &mut prepared,
+        &cancellation,
+        |prepared| {
+            execute_with_task_cache(coordinator, config, &workspace, prepared, &cancellation)
+        },
+    )?
+    .map_err(|error| error.to_string())?;
     let mut outputs = Vec::new();
     if executed.success() {
         outputs = upload_outputs(coordinator, &workspace, &spec.action)?;

@@ -86,7 +86,7 @@ const TOOL_LABELS = {
   cargo: ["Rs", "Rust · cargo"], go: ["Go", "Go"], npm: ["JS", "npm"], cmake: ["C", "CMake"],
   gradle: ["An", "Android · Gradle"], flutter: ["Fl", "Flutter"], xcode: ["iOS", "Xcode"],
   maven: ["Mv", "Maven"], python: ["Py", "Python"], tauri: ["Ta", "Tauri"],
-  electron: ["El", "Electron"], docker: ["Dk", "Docker"],
+  electron: ["El", "Electron"], docker: ["Dk", "Docker"], dotnet: ["NET", ".NET"],
 };
 
 function toolBadge(adapter, withLabel = true) {
@@ -350,7 +350,7 @@ function fileList(entries, compact = false) {
   for (const { file, build } of entries) {
     const item = el("li", compact ? "step" : "file");
     const extension = (file.name.split(".").pop() || "file").slice(0, 4);
-    if (!compact) item.append(el("span", "file-type", file.name.includes(".") ? extension : "bin"));
+    if (!compact) item.append(el("span", "file-type", file.folder ? "dir" : file.name.includes(".") ? extension : "bin"));
     const body = el("div", "file-body");
     body.append(el("span", compact ? "step-name" : "file-name", file.name));
     if (!compact) {
@@ -362,6 +362,9 @@ function fileList(entries, compact = false) {
       item.append(el("span", "file-gone", "Replaced by a newer build"));
     } else if (!file.exists) {
       item.append(el("span", "file-gone", "No longer on disk"));
+    } else if (file.folder) {
+      // A whole folder (a web app, a published app): open it from disk.
+      item.append(el("span", "file-note", compact ? `Folder · ${bytes(file.bytes)}` : `Folder in ${file.path.split(/[\\/]/)[0]}/`));
     } else {
       const link = el("a", compact ? "link" : "btn primary");
       link.href = file.url;
@@ -855,7 +858,80 @@ function showProject(path) {
 
 // ---------- shell ----------
 
-const TITLES = { overview: "Overview", builds: "Builds", projects: "Projects", deliverables: "Deliverables" };
+const TITLES = { overview: "Overview", builds: "Builds", projects: "Projects", deliverables: "Deliverables", servers: "Servers" };
+
+// ---------- servers (D-053) ----------
+
+const servers = { list: [], loaded: false, checks: {} }; // checks: name -> { busy, ok, text }
+
+async function loadServers() {
+  try {
+    const response = await fetch("api/servers", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    servers.list = (await response.json()).servers;
+  } catch {
+    servers.list = [];
+  }
+  servers.loaded = true;
+  $("nav-servers").textContent = servers.list.length ? String(servers.list.length) : "";
+  if (state.page === "servers") render();
+}
+
+async function checkServer(name) {
+  servers.checks[name] = { busy: true, ok: false, text: "Checking…" };
+  render();
+  try {
+    const response = await fetch(`api/servers/${encodeURIComponent(name)}/status`, { cache: "no-store" });
+    const data = await response.json();
+    servers.checks[name] = data.ok
+      ? { busy: false, ok: true, text: data.summary }
+      : { busy: false, ok: false, text: data.error };
+  } catch (error) {
+    servers.checks[name] = { busy: false, ok: false, text: `Could not ask Ant: ${error.message}` };
+  }
+  render();
+}
+
+function renderServers() {
+  const list = $("servers-list");
+  list.replaceChildren();
+  if (!servers.loaded) {
+    list.append(el("li", "none", "Loading…"));
+    return;
+  }
+  if (!servers.list.length) {
+    const item = el("li", "none");
+    item.append(document.createTextNode("No servers yet. Have a Linux server? Run "));
+    item.append(el("code", "", "ant server deploy you@your-server"));
+    item.append(document.createTextNode(" in a terminal: it installs Ant there over SSH, and nothing is exposed to the internet."));
+    list.append(item);
+    return;
+  }
+  for (const server of servers.list) {
+    const item = el("li", "server");
+    const body = el("div", "file-body");
+    body.append(el("span", "file-name", server.name));
+    const platform = [server.os, server.arch].filter(Boolean).join(" · ");
+    body.append(el("span", "file-meta", `${server.target}${platform ? ` · ${platform}` : ""} · deployed ${ago(server.deployed_ms, state.now)}`));
+    const check = servers.checks[server.name];
+    if (check) {
+      const result = el("span", `server-status ${check.busy ? "" : check.ok ? "ok" : "bad"}`, check.text);
+      body.append(result);
+    }
+    const live = el("span", "sr-only");
+    live.setAttribute("aria-live", "polite");
+    live.textContent = check && !check.busy ? `${server.name}: ${check.text}` : "";
+    item.append(body, live);
+    const button = el("button", "btn", check && check.busy ? "Checking…" : "Check now");
+    button.type = "button";
+    button.dataset.server = server.name;
+    button.disabled = Boolean(check && check.busy);
+    button.setAttribute("aria-label", `Check ${server.name}`);
+    button.addEventListener("click", () => checkServer(server.name));
+    item.append(button);
+    list.append(item);
+  }
+}
 
 // Re-rendering replaces elements; keep keyboard focus on the "same" control
 // (identified by its id, data attributes, or label) across renders.
@@ -864,6 +940,7 @@ function focusKey(node) {
   return node.id ? `#${node.id}`
     : node.dataset.build ? `[data-build="${CSS.escape(node.dataset.build)}"]`
     : node.dataset.log ? `[data-log="${CSS.escape(node.dataset.log)}"]`
+    : node.dataset.server ? `[data-server="${CSS.escape(node.dataset.server)}"]`
     : node.dataset.share ? `[data-share="${CSS.escape(node.dataset.share)}"]`
     : node.getAttribute("aria-label") ? `[aria-label="${CSS.escape(node.getAttribute("aria-label"))}"]`
       : node.dataset.filter ? `[data-filter="${node.dataset.filter}"]`
@@ -895,9 +972,11 @@ function renderPage() {
   $("nav-deliverables").textContent = fileCount ? String(fileCount) : "";
 
   renderRunning();
-  const empty = state.loaded && state.builds.length === 0 && state.running.length === 0;
+  // The Servers page does not depend on build history.
+  const empty = page !== "servers" && state.loaded && state.builds.length === 0 && state.running.length === 0;
   $("empty").hidden = !empty;
   for (const name of Object.keys(TITLES)) $(`page-${name}`).hidden = empty || name !== page;
+  if (page === "servers") renderServers();
   if (empty) return;
   if (page === "overview") renderOverview(builds);
   if (page === "builds") renderBuilds(builds);
@@ -909,6 +988,7 @@ function route() {
   const page = location.hash.replace("#", "");
   state.page = TITLES[page] ? page : "overview";
   closeMenu();
+  if (state.page === "servers") loadServers();
   render();
 }
 
