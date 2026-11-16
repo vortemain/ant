@@ -1,0 +1,22 @@
+# XcodeGen spec: `xcodegen generate` writes Hello.xcodeproj, which Ant builds.
+name: Hello
+options:
+  bundleIdPrefix: dev.ant.examples
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  Hello:
+    type: application
+    platform: iOS
+    sources: [Hello]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+schemes:
+  Hello:
+    build:
+      targets:
+        Hello: all

@@ -1,0 +1,67 @@
+# Real builds of every example (examples/) through `ant build`, on the OSes
+# where each toolchain exists, running what lands in dist/ (P5/P6, D-051).
+name: verify-adapters
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["batch-*", "p5-*", "p6-*"]
+  pull_request:
+    paths:
+      - crates/build-adapter/**
+      - crates/ant-cli/src/front.rs
+      - examples/**
+      - scripts/verify-adapters.sh
+      - .github/workflows/verify-adapters.yml
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build ant (release)
+        run: cargo build --release --locked -p ant-cli
+      - name: Python build frontend
+        run: python -m pip install --quiet build
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Maven, Python, Docker, .NET, Flutter
+        run: sh scripts/verify-adapters.sh target/release/ant maven python docker dotnet flutter
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build ant (release)
+        run: cargo build --release --locked -p ant-cli
+      - name: Python build frontend
+        run: python -m pip install --quiet build
+      - name: Maven, Python, .NET
+        run: sh scripts/verify-adapters.sh target/release/ant.exe maven python dotnet
+
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build ant (release)
+        run: cargo build --release --locked -p ant-cli
+      - name: XcodeGen
+        run: brew install xcodegen
+      - name: iOS app for the simulator
+        run: sh scripts/verify-adapters.sh target/release/ant ios

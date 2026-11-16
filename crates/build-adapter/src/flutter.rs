@@ -11,7 +11,7 @@
 //! Honest limits (decision D-010, recorded in the module tests):
 //!
 //! - Only the `web` target is supported in this phase. Its output layout
-//!   (`build/web/index.html`, `build/web/main.dart.js`) is deterministic and
+//!   (the `build/web/` directory, declared whole) is deterministic and
 //!   portable, so the declared outputs are real. Other targets (`apk`, `ios`,
 //!   desktop) have platform-SDK-dependent layouts and arrive in a later phase;
 //!   `--option target=` anything but `web` fails closed.
@@ -132,6 +132,16 @@ impl BuildAdapter for FlutterAdapter {
         OPTIONS
     }
 
+    /// The web app directory, collected whole into `dist/web/`.
+    fn built_artifacts(&self, project_root: &Path, _plan: &PlanFile) -> Vec<PathBuf> {
+        let web = PathBuf::from("build").join("web");
+        if project_root.join(&web).is_dir() {
+            vec![web]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn detect(&self, project_root: &Path) -> Result<Detection, AdapterError> {
         let pubspec = project_root.join("pubspec.yaml");
         if !pubspec.is_file() {
@@ -225,12 +235,11 @@ fn declare_inputs(root: &Path) -> BTreeMap<PathBuf, InputKind> {
     inputs
 }
 
-/// The deterministic web output files `flutter build web --<mode>` produces.
+/// The web app `flutter build web --<mode>` produces: the whole
+/// `build/web/` directory (`index.html` and `main.dart.js` alone do not run;
+/// the bootstrap scripts, assets, and CanvasKit are part of the app).
 fn web_outputs() -> Vec<PathBuf> {
-    vec![
-        PathBuf::from("build/web/index.html"),
-        PathBuf::from("build/web/main.dart.js"),
-    ]
+    vec![PathBuf::from("build/web")]
 }
 
 /// `flutter build web --<mode>`, wrapped in the Windows batch launcher
@@ -286,7 +295,7 @@ fn build_action(
             .into_iter()
             .map(|path| Output {
                 path,
-                kind: OutputKind::File,
+                kind: OutputKind::Tree,
             })
             .collect(),
         environment: staging_environment(),
@@ -501,10 +510,8 @@ mod tests {
     }
 
     #[test]
-    fn web_outputs_are_the_deterministic_files() {
-        let outputs = web_outputs();
-        assert!(outputs.contains(&PathBuf::from("build/web/index.html")));
-        assert!(outputs.contains(&PathBuf::from("build/web/main.dart.js")));
+    fn web_outputs_are_the_whole_web_app() {
+        assert_eq!(web_outputs(), vec![PathBuf::from("build/web")]);
     }
 
     #[test]
@@ -570,7 +577,7 @@ mod tests {
             action
                 .outputs
                 .iter()
-                .any(|out| out.path == Path::new("build/web/index.html"))
+                .any(|out| out.path == Path::new("build/web") && out.kind == OutputKind::Tree)
         );
         assert_eq!(
             action.toolchain.as_ref().expect("toolchain").name,

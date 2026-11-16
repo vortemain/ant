@@ -94,6 +94,32 @@ impl BuildAdapter for MavenAdapter {
         }
     }
 
+    /// The packaged archive(s) Maven wrote to `target/`: `*.jar`, `*.war`,
+    /// `*.ear`, without the side artifacts (`-sources`, `-javadoc`,
+    /// `-tests`) and the shade plugin's `original-*` copy.
+    fn built_artifacts(&self, project_root: &Path, _plan: &PlanFile) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(project_root.join("target")) else {
+            return Vec::new();
+        };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                let archive = [".jar", ".war", ".ear"]
+                    .iter()
+                    .any(|extension| name.ends_with(extension));
+                let side = ["-sources.", "-javadoc.", "-tests."]
+                    .iter()
+                    .any(|marker| name.contains(marker));
+                archive && !side && !name.starts_with("original-")
+            })
+            .map(|name| PathBuf::from("target").join(name))
+            .collect();
+        found.sort();
+        found
+    }
+
     fn generate(
         &self,
         project_root: &Path,
@@ -564,5 +590,36 @@ mod tests {
         assert_eq!(plan.actions.len(), 1);
         assert_eq!(plan.actions[0].action.id, "maven-package");
         assert!(plan.actions[0].dependencies.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+
+    #[test]
+    fn built_artifacts_are_the_packaged_archives_only() {
+        let dir = std::env::temp_dir().join(format!("ant-maven-artifacts-{}", std::process::id()));
+        let target = dir.join("target");
+        std::fs::create_dir_all(target.join("classes")).expect("dirs");
+        for name in [
+            "app-1.0.jar",
+            "app-1.0-sources.jar",
+            "app-1.0-javadoc.jar",
+            "original-app-1.0.jar",
+            "web.war",
+            "notes.txt",
+        ] {
+            std::fs::write(target.join(name), b"x").expect("file");
+        }
+        let found = MavenAdapter.built_artifacts(&dir, &PlanFile::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            found,
+            vec![
+                PathBuf::from("target").join("app-1.0.jar"),
+                PathBuf::from("target").join("web.war")
+            ]
+        );
     }
 }

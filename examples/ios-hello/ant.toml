@@ -1,0 +1,3 @@
+# A simulator build needs no signing identity.
+[options]
+sdk = "iphonesimulator"

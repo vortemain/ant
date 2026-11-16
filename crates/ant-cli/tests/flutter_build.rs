@@ -171,8 +171,9 @@ fn ant_in(dir: &Path, args: &[&str]) -> (i32, String, String) {
 fn flutter_build_runs_a_web_release_and_reuses_it_locally() {
     let dir = TempDir::new("build");
     flutter_project(dir.path());
-    let index = dir.path().join("dist").join("index.html");
-    let main_js = dir.path().join("dist").join("main.dart.js");
+    // The whole web app is the deliverable (D-051): dist/web/.
+    let index = dir.path().join("dist").join("web").join("index.html");
+    let main_js = dir.path().join("dist").join("web").join("main.dart.js");
     let source = dir.path().join("lib").join("main.dart");
 
     // The first build runs the stub and collects the declared web files.

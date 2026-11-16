@@ -165,11 +165,31 @@ impl BuildAdapter for XcodeAdapter {
         }
     }
 
-    /// The `.app` product name is not known without parsing the project, so —
-    /// like CMake — no deliverable is claimed. The build directory is the only
-    /// declared output.
+    /// The `.app` product name is not known without parsing the project, so
+    /// no deliverable is claimed before the build. The build directory is the
+    /// only declared output.
     fn artifacts(&self, _plan: &PlanFile) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    /// After the build: the `.app` bundles xcodebuild wrote for this
+    /// configuration and SDK, collected whole into `dist/`.
+    fn built_artifacts(&self, project_root: &Path, plan: &PlanFile) -> Vec<PathBuf> {
+        let Some(action) = plan.actions.first().map(|planned| &planned.action) else {
+            return Vec::new();
+        };
+        let value = |flag: &str| {
+            action
+                .argv
+                .iter()
+                .position(|arg| arg == flag)
+                .and_then(|index| action.argv.get(index + 1))
+                .cloned()
+        };
+        let (Some(configuration), Some(sdk)) = (value("-configuration"), value("-sdk")) else {
+            return Vec::new();
+        };
+        products(project_root, &configuration, &sdk)
     }
 
     fn generate(
@@ -208,8 +228,15 @@ impl BuildAdapter for XcodeAdapter {
         // side effect.
         file.to_graph()?;
         let toolchain = xcode_toolchain(&root)?;
+        // `-derivedDataPath` needs a scheme; use the project's own when it
+        // has exactly one (or one named like the project).
+        let scheme = match scheme {
+            Some(scheme) => scheme,
+            None => default_scheme(&root, &project)?,
+        };
         for entry in &mut file.actions {
             entry.action.toolchain = Some(toolchain.clone());
+            entry.action.argv = xcodebuild_argv(&project, Some(&scheme), configuration, sdk);
         }
         file.to_graph()?;
         std::fs::create_dir_all(root.join(".ant").join("tmp"))?;
@@ -225,6 +252,30 @@ impl BuildAdapter for XcodeAdapter {
 fn declare_inputs(root: &Path, project: &Path) -> BTreeMap<PathBuf, InputKind> {
     let mut inputs = BTreeMap::new();
     inputs.insert(project.to_owned(), InputKind::Tree);
+    // Everything else at the top level too: Xcode's default layout keeps
+    // sources in a folder named after the app, which no fixed list covers.
+    // Left out: hidden entries (`.ant`, `.git`), build products (`build`,
+    // `DerivedData`, `dist`), and other project packages.
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.')
+                || matches!(name.as_str(), "build" | "DerivedData" | "dist")
+                || name.ends_with(".xcodeproj")
+                || name.ends_with(".xcworkspace")
+            {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                inputs.insert(PathBuf::from(&name), InputKind::Tree);
+            } else if kind.is_file() {
+                inputs.insert(PathBuf::from(&name), InputKind::File);
+            }
+        }
+    }
     if root.join("Package.swift").is_file() {
         inputs.insert(PathBuf::from("Package.swift"), InputKind::File);
     }
@@ -256,7 +307,7 @@ fn xcodebuild_argv(
         argv.push("-scheme".to_owned());
         argv.push(scheme.to_owned());
     }
-    argv.push("-project".to_owned());
+    argv.push(project_flag(project).to_owned());
     argv.push(project.to_string_lossy().into_owned());
     argv.push("-configuration".to_owned());
     argv.push(configuration.as_str().to_owned());
@@ -318,6 +369,92 @@ fn build_action(
         resources: None,
         background_services: false,
     }
+}
+
+/// `-workspace` for a `*.xcworkspace`, `-project` for a `*.xcodeproj`.
+fn project_flag(project: &Path) -> &'static str {
+    if project
+        .extension()
+        .is_some_and(|extension| extension == "xcworkspace")
+    {
+        "-workspace"
+    } else {
+        "-project"
+    }
+}
+
+/// The scheme to build when none is configured: the only one, or the one
+/// named like the project; otherwise ask for `scheme` in ant.toml.
+fn default_scheme(root: &Path, project: &Path) -> Result<String, AdapterError> {
+    let output = std::process::Command::new("xcodebuild")
+        .args(["-list", "-json", project_flag(project)])
+        .arg(project)
+        .current_dir(root)
+        .output()
+        .map_err(|error| {
+            AdapterError::Toolchain(format!("cannot run xcodebuild -list: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(AdapterError::Toolchain(format!(
+            "xcodebuild -list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let listing: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        AdapterError::Toolchain(format!("cannot parse xcodebuild -list: {error}"))
+    })?;
+    let schemes: Vec<String> = ["project", "workspace"]
+        .iter()
+        .filter_map(|key| listing.get(key)?.get("schemes")?.as_array().cloned())
+        .flatten()
+        .filter_map(|scheme| scheme.as_str().map(str::to_owned))
+        .collect();
+    choose_scheme(&schemes, project)
+}
+
+fn choose_scheme(schemes: &[String], project: &Path) -> Result<String, AdapterError> {
+    let stem = project
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match schemes {
+        [] => Err(AdapterError::Project(format!(
+            "{} has no schemes; open it in Xcode once (or share a scheme) so xcodebuild can build it",
+            project.display()
+        ))),
+        [only] => Ok(only.clone()),
+        several => several
+            .iter()
+            .find(|scheme| **scheme == stem)
+            .cloned()
+            .ok_or_else(|| {
+                AdapterError::Option(format!(
+                    "{} has several schemes ({}); choose one with scheme = \"...\" under [options] in ant.toml",
+                    project.display(),
+                    several.join(", ")
+                ))
+            }),
+    }
+}
+
+/// `.app` bundles under `.ant/build/Build/Products/<configuration>-<sdk>/`.
+fn products(root: &Path, configuration: &str, sdk: &str) -> Vec<PathBuf> {
+    let relative = PathBuf::from(BUILD_DIR)
+        .join("Build")
+        .join("Products")
+        .join(format!("{configuration}-{sdk}"));
+    let Ok(entries) = std::fs::read_dir(root.join(&relative)) else {
+        return Vec::new();
+    };
+    let mut apps: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".app"))
+        .map(|name| relative.join(name))
+        .filter(|path| root.join(path).is_dir())
+        .collect();
+    apps.sort();
+    apps
 }
 
 /// Truthful Xcode toolchain identity: the version from `xcodebuild -version`
@@ -611,5 +748,63 @@ mod tests {
         assert_eq!(action.cache_policy, CachePolicy::Local);
         // No scheme option passed, so -scheme is absent.
         assert!(!action.argv.iter().any(|arg| arg == "-scheme"));
+    }
+
+    #[test]
+    fn workspaces_use_the_workspace_flag() {
+        assert_eq!(project_flag(Path::new("App.xcworkspace")), "-workspace");
+        assert_eq!(project_flag(Path::new("App.xcodeproj")), "-project");
+    }
+
+    #[test]
+    fn the_default_scheme_is_the_only_one_or_the_projects_namesake() {
+        let project = Path::new("Hello.xcodeproj");
+        let one = vec!["Hello".to_owned()];
+        assert_eq!(choose_scheme(&one, project).expect("one"), "Hello");
+        let two = vec!["Hello".to_owned(), "HelloTests".to_owned()];
+        assert_eq!(choose_scheme(&two, project).expect("namesake"), "Hello");
+        let other = vec!["A".to_owned(), "B".to_owned()];
+        assert!(matches!(
+            choose_scheme(&other, project),
+            Err(AdapterError::Option(_))
+        ));
+        assert!(choose_scheme(&[], project).is_err());
+    }
+
+    #[test]
+    fn built_products_are_the_app_bundles_for_the_configuration_and_sdk() {
+        let dir = std::env::temp_dir().join(format!("ant-xcode-products-{}", std::process::id()));
+        let products_dir = dir.join(".ant/build/Build/Products");
+        std::fs::create_dir_all(products_dir.join("Release-iphonesimulator/Hello.app"))
+            .expect("app");
+        std::fs::create_dir_all(products_dir.join("Debug-iphonesimulator/Old.app")).expect("other");
+        std::fs::write(
+            products_dir.join("Release-iphonesimulator/Hello.swiftmodule"),
+            "",
+        )
+        .expect("file");
+        let found = products(&dir, "Release", "iphonesimulator");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            found,
+            vec![PathBuf::from(
+                ".ant/build/Build/Products/Release-iphonesimulator/Hello.app"
+            )]
+        );
+    }
+
+    #[test]
+    fn inputs_cover_sources_in_a_folder_named_after_the_app() {
+        let dir = std::env::temp_dir().join(format!("ant-xcode-inputs-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Hello.xcodeproj")).expect("project");
+        std::fs::create_dir_all(dir.join("Hello")).expect("sources");
+        std::fs::create_dir_all(dir.join(".ant")).expect("ant");
+        std::fs::create_dir_all(dir.join("build")).expect("build");
+        std::fs::write(dir.join("Hello/App.swift"), "").expect("swift");
+        let inputs = declare_inputs(&dir, Path::new("Hello.xcodeproj"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(inputs.get(Path::new("Hello")), Some(&InputKind::Tree));
+        assert!(!inputs.contains_key(Path::new(".ant")));
+        assert!(!inputs.contains_key(Path::new("build")));
     }
 }

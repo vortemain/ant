@@ -206,8 +206,25 @@ fn declare_inputs(root: &Path) -> BTreeMap<PathBuf, InputKind> {
     if root.join("requirements.txt").is_file() {
         inputs.insert(PathBuf::from("requirements.txt"), InputKind::File);
     }
-    if root.join("src").is_dir() {
-        inputs.insert(PathBuf::from("src"), InputKind::Tree);
+    // `src/` entry by entry, leaving out what the build itself writes
+    // there: setuptools creates `src/<name>.egg-info` while it builds, which
+    // would otherwise look like a source edit mid-build and fail it.
+    if let Ok(entries) = std::fs::read_dir(root.join("src")) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".egg-info") || name == "__pycache__" {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = PathBuf::from("src").join(&name);
+            if kind.is_dir() {
+                inputs.insert(path, InputKind::Tree);
+            } else if kind.is_file() {
+                inputs.insert(path, InputKind::File);
+            }
+        }
     }
     inputs
 }
@@ -472,7 +489,18 @@ mod tests {
             inputs.get(&PathBuf::from("setup.cfg")),
             Some(&InputKind::File)
         );
-        assert_eq!(inputs.get(&PathBuf::from("src")), Some(&InputKind::Tree));
+        assert_eq!(
+            inputs.get(&PathBuf::from("src/example")),
+            Some(&InputKind::Tree)
+        );
+        // What setuptools writes during the build is not a source.
+        write(&dir.path().join("src/example.egg-info/PKG-INFO"), "");
+        let inputs = declare_inputs(dir.path());
+        assert!(
+            !inputs
+                .keys()
+                .any(|path| path.to_string_lossy().contains("egg-info"))
+        );
     }
 
     #[test]

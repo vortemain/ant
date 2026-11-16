@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hello-ant"
+version = "1.0.0"
+description = "A tiny package built by Ant"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+where = ["src"]

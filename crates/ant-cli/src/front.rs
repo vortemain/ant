@@ -89,7 +89,7 @@ fn choose_adapter(
             names[0]
         ),
         build_adapter::SelectionError::NoMatch(_) => format!(
-            "no supported project found in {} (Ant currently builds Cargo, Go, npm, CMake, Gradle/Android, Flutter, Xcode, Maven, Python, Tauri, Electron, and Docker projects;\
+            "no supported project found in {} (Ant currently builds Cargo, Go, npm, CMake, Gradle/Android, Flutter, Xcode, Maven, Python, .NET, Tauri, Electron, and Docker projects;\
              see docs/vision.md for what is coming)",
             shown(root)
         ),
@@ -674,7 +674,13 @@ fn install_artifacts(
         for name in previous.lines().filter(|line| !line.is_empty()) {
             let stale = Path::new(name);
             if stale.components().count() == 1 {
-                let _ = std::fs::remove_file(out.join(stale));
+                let stale = out.join(stale);
+                // A deliverable may be a whole directory (a web app).
+                if stale.is_dir() && !stale.is_symlink() {
+                    let _ = std::fs::remove_dir_all(&stale);
+                } else {
+                    let _ = std::fs::remove_file(&stale);
+                }
             }
         }
     }
@@ -692,8 +698,13 @@ fn install_artifacts(
                 out_dir.display()
             ));
         }
-        std::fs::copy(root.join(artifact), out.join(name))
-            .map_err(|error| format!("cannot collect {}: {error}", artifact.display()))?;
+        let source = root.join(artifact);
+        let collected = if source.is_dir() {
+            copy_tree(&source, &out.join(name))
+        } else {
+            std::fs::copy(&source, out.join(name)).map(|_| ())
+        };
+        collected.map_err(|error| format!("cannot collect {}: {error}", artifact.display()))?;
         installed.push(out_dir.join(name));
     }
     let listing: String = seen
@@ -702,6 +713,23 @@ fn install_artifacts(
         .collect();
     std::fs::write(&marker, listing).map_err(|error| error.to_string())?;
     Ok(installed)
+}
+
+/// Copy a deliverable directory (a web app) into `dist/`. Symbolic links
+/// are skipped: a deliverable must not point outside itself.
+fn copy_tree(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let to = target.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Renders engine events as short human progress lines, and keeps each

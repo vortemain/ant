@@ -38,6 +38,7 @@
 pub mod cargo;
 pub mod cmake;
 pub mod docker;
+pub mod dotnet;
 pub mod electron;
 pub mod flutter;
 pub mod go;
@@ -363,6 +364,7 @@ pub fn available() -> Vec<&'static dyn BuildAdapter> {
         &tauri::TauriAdapter,
         &electron::ElectronAdapter,
         &docker::DockerAdapter,
+        &dotnet::DotnetAdapter,
     ]
 }
 
@@ -845,7 +847,7 @@ mod tests {
             names,
             vec![
                 "cargo", "npm", "cmake", "gradle", "go", "flutter", "xcode", "maven", "python",
-                "tauri", "electron", "docker"
+                "tauri", "electron", "docker", "dotnet"
             ],
             "one reason per registered adapter"
         );
