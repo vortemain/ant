@@ -99,7 +99,9 @@ Stop workers, stop the coordinator, replace the binary, start the coordinator, t
 
 ## Dashboard and viewer token
 
-Create a third token for read-only access and start the coordinator with `--viewer-token-file /etc/ant/viewer.token`. Open `https://build.example.com/ui` and paste the viewer token: the page shows job counts, every job (state, worker, attempts, submitted time, duration, exit code/error), and the workers seen since the coordinator started. The viewer token can read the control plane only — it cannot upload, submit, or lease. Share it with people who need visibility; keep client and worker tokens for machines. The dashboard is served by the coordinator itself (same origin as the API), so the reverse proxy needs no extra configuration.
+**Servers set up with `ant server deploy`:** run `ant server ui NAME`. Deploy creates a read-only viewer token (`/etc/ant/viewer.token`) and keeps a sealed copy on your computer; `ant server ui` opens an SSH tunnel to the coordinator (which listens only on the server's loopback), opens `http://127.0.0.1:PORT/ui/` in your browser with the viewer token in the URL fragment (never sent over the network; the page moves it into session storage and clears it from the address bar), and keeps the tunnel open until Ctrl+C. `--no-open` only prints the address. Servers deployed before this existed: redeploy once.
+
+**Team servers behind HTTPS:** Create a third token for read-only access and start the coordinator with `--viewer-token-file /etc/ant/viewer.token`. Open `https://build.example.com/ui` and paste the viewer token: the page shows job counts, every job (state, worker, attempts, submitted time, duration, exit code/error), and the workers seen since the coordinator started. The viewer token can read the control plane only — it cannot upload, submit, or lease. Share it with people who need visibility; keep client and worker tokens for machines. The dashboard is served by the coordinator itself (same origin as the API), so the reverse proxy needs no extra configuration.
 
 ## Monitoring and limits
 

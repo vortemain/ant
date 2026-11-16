@@ -7,16 +7,17 @@
 
 ### Stop waiting on builds.
 
-**One command builds anything: Rust, Android, JavaScript, C/C++.**
+**One command builds anything: Rust, Android, JavaScript, Go, Python, Java, .NET, C/C++, Flutter, iOS.**
 **Ant remembers every build it has proven, so the rebuild that used to cost you minutes comes back in under a second.**
 
 [![CI](https://github.com/vortemain/ant/actions/workflows/ci.yml/badge.svg)](https://github.com/vortemain/ant/actions/workflows/ci.yml)
 [![Android benchmark](https://github.com/vortemain/ant/actions/workflows/bench-android.yml/badge.svg)](https://github.com/vortemain/ant/actions/workflows/bench-android.yml)
 [![Rust 1.95](https://img.shields.io/badge/rust-1.95-orange?logo=rust)](rust-toolchain.toml)
-[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-0d1117)](#what-works-today)
+[![Release](https://img.shields.io/github/v/release/vortemain/ant?label=download&color=ff8a1f)](https://github.com/vortemain/ant/releases/latest)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-0d1117)](#download)
 [![Status](https://img.shields.io/badge/status-early%20preview-ff8a1f)](docs/plan.md)
 
-[Quick start](#quick-start) · [Benchmarks](#measured-not-promised) · [How it works](#how-it-works) · [Teams & servers](#bring-your-team-and-your-servers) · [Roadmap](#roadmap) · [Docs](#documentation)
+[Download](#download) · [Quick start](#quick-start) · [Benchmarks](#measured-not-promised) · [How it works](#how-it-works) · [Teams & servers](#bring-your-team-and-your-servers) · [Roadmap](#roadmap) · [Docs](#documentation)
 
 </div>
 
@@ -66,9 +67,9 @@ A "fresh checkout" is a new clone or branch folder, or a teammate's copy. Native
 - **🚀 Grows with you.** Got a teammate, a CI pipeline, or a spare server? Point them at Ant and they get the same instant rebuilds, on infrastructure you own.
 - **📏 Proof, not marketing.** Every number on this page links to a public CI run with the raw data, including the cases where Ant doesn't win yet.
 
-## Quick start
+## Download
 
-Ant is a single executable. Install it with one command:
+Ant is a single executable with no dependencies. Install it with one command:
 
 ```powershell
 # Windows (PowerShell)
@@ -80,7 +81,22 @@ irm https://raw.githubusercontent.com/vortemain/ant/main/scripts/install/install
 curl -fsSL https://raw.githubusercontent.com/vortemain/ant/main/scripts/install/install.sh | sh
 ```
 
-The installer picks the right build for your machine, verifies its checksum, and adds it to your PATH; `ant upgrade` keeps it current. Prebuilt binaries cover Windows (x64, Arm64), macOS (Apple Silicon, Intel), and Linux (x64, Arm64, static). Ant is in early preview, and the first release has not been published yet: until it is, build from source (Rust 1.95, pinned in `rust-toolchain.toml`) with `git clone https://github.com/vortemain/ant.git && cd ant && cargo install --path crates/ant-cli`.
+The installer picks the right build for your machine, verifies its SHA-256 checksum, and adds it to your PATH. `ant upgrade` keeps it current.
+
+Or download the file yourself from the [latest release](https://github.com/vortemain/ant/releases/latest):
+
+| System | Download |
+|---|---|
+| Windows x64 | [ant-x86_64-pc-windows-msvc.exe](https://github.com/vortemain/ant/releases/latest/download/ant-x86_64-pc-windows-msvc.exe) |
+| Windows Arm64 | [ant-aarch64-pc-windows-msvc.exe](https://github.com/vortemain/ant/releases/latest/download/ant-aarch64-pc-windows-msvc.exe) |
+| macOS Apple Silicon | [ant-aarch64-apple-darwin](https://github.com/vortemain/ant/releases/latest/download/ant-aarch64-apple-darwin) |
+| macOS Intel | [ant-x86_64-apple-darwin](https://github.com/vortemain/ant/releases/latest/download/ant-x86_64-apple-darwin) |
+| Linux x64 (static) | [ant-x86_64-unknown-linux-musl](https://github.com/vortemain/ant/releases/latest/download/ant-x86_64-unknown-linux-musl) |
+| Linux Arm64 (static) | [ant-aarch64-unknown-linux-musl](https://github.com/vortemain/ant/releases/latest/download/ant-aarch64-unknown-linux-musl) |
+
+Checksums are in [SHA256SUMS](https://github.com/vortemain/ant/releases/latest/download/SHA256SUMS). Rename the file to `ant` (`ant.exe` on Windows) and put it on your PATH. To build from source instead (Rust 1.95, pinned in `rust-toolchain.toml`): `cargo install --git https://github.com/vortemain/ant ant-cli`.
+
+## Quick start
 
 Then, in any supported project:
 
@@ -88,25 +104,37 @@ Then, in any supported project:
 ant build          # release build, deliverables in dist/
 ant build --dev    # debug build
 ant init           # optional: write ant.toml so every machine builds the same way
+ant dashboard      # your builds, logs, and deliverables in the browser
+ant install        # put the Android app on your phone (USB, or scan a QR code)
+ant preview        # live preview on your phone and browser; updates on every save
 ```
 
 See [Getting started](docs/getting-started.md).
 
 ## What works today
 
-| Ecosystem | `ant build` | Proven result reuse (cache engine) |
+| Ecosystem | `ant build` delivers | Reuses unchanged results |
 |---|---|---|
-| Rust / Cargo (incl. workspaces) | ✅ binaries into `dist/`; reuses its own earlier builds | ✅ measured, with vendored dependencies |
-| JavaScript / TypeScript / npm (incl. workspaces) | ✅ | not yet (`node_modules` is undeclared) |
-| C / C++ / CMake | ✅ | not yet |
-| Android / Gradle | via `ant adapt` (P3 brings it to `ant build`) | ✅ measured on JetNews, plus Gradle's own task cache |
-| iOS, web bundlers, desktop installers, containers | roadmap | roadmap |
+| Rust / Cargo (incl. workspaces) | binaries | ✅ |
+| Android / Gradle | debug APKs; signed release APK + AAB with `--release` | ✅ (warm Gradle daemon kept) |
+| JavaScript / TypeScript / npm (Vite, Next, workspaces) | build output folders | ✅ with a lockfile |
+| Go | executables | ✅ |
+| Python | wheels | |
+| Java / Maven | jars | |
+| .NET | published app folders | |
+| C / C++ / CMake | executables and libraries | |
+| Flutter (web) | `build/web` | |
+| iOS / Xcode | `.app` bundles (unsigned) | |
+| Docker | images, or an image tarball | |
+| Tauri, Electron | desktop app bundles (not yet verified in CI) | |
+
+Real builds of the Maven, Python, .NET, Docker, Flutter and iOS examples in [`examples/`](examples/) run in CI on Linux, Windows and macOS. Ship with `ant publish android` (Google Play), share with `ant install`/`ant preview`, and watch everything in `ant dashboard`.
 
 | Platform | Status |
 |---|---|
-| Linux | bubblewrap sandbox with no network; proven results are cached |
-| Windows | restricted-token sandbox, job objects, memory caps, network-isolated account |
-| macOS | not yet (needed for iOS) |
+| Windows | ✅ builds, restricted-token sandbox, job objects, memory caps, keys sealed with DPAPI |
+| Linux | ✅ builds, bubblewrap sandbox with no network, keys in Secret Service |
+| macOS | ✅ builds (incl. iOS), keys in the Keychain |
 
 ## How it works
 
@@ -128,21 +156,16 @@ flowchart LR
 
 ## Bring your team and your servers
 
-Ant runs entirely on your own machine. When you're ready, it scales out: send builds to a VPS or a spare machine, and share every proven result with your team and CI:
+Ant runs entirely on your own machine. When you're ready, put your own server to work with one command (any Linux VPS with systemd, reached over SSH):
 
 ```bash
-# On your server
-ant coordinator --data-dir /var/lib/ant --client-token-file client.token --worker-token-file worker.token
-
-# On each build machine (Linux)
-ant worker --coordinator https://builds.example.com --token-file worker.token --work-dir /var/tmp/ant --sandbox
-
-# From your laptop or CI
-ant adapt --out plan.json
-ant remote run --coordinator https://builds.example.com --token-file client.token --plan plan.json
+ant server deploy root@your-server --toolchain rust --workers 3
+ant build --on your-server      # build there (same OS as your laptop), outputs come back to dist/
+ant server ui your-server       # the server's own web UI: jobs and workers, live
+ant server status your-server
 ```
 
-The coordinator also serves a read-only dashboard at `/ui` (viewer token). See [operations](docs/remote/operations.md) and [protocol v1](docs/remote/protocol-v1.md). A one-command `ant server deploy` is planned for P8.
+The server's coordinator listens only on the server itself; Ant reaches it through SSH, with keys, never passwords. Teams can run one behind HTTPS and sign in with their identity provider (`ant login https://builds.example.com --sso`). See [operations](docs/remote/operations.md) and [protocol v1](docs/remote/protocol-v1.md).
 
 ## Roadmap
 
@@ -150,13 +173,13 @@ The coordinator also serves a read-only dashboard at `/ui` (viewer token). See [
 |---|---|---|
 | P1 Front door | `ant build`, `ant init`, zero config | ✅ shipped |
 | P2 Speed engine | proven result cache, measured on Rust and Android | ✅ shipped |
-| P3 Local-first speed | all of that inside plain `ant build` on a laptop, with no server: cache on by default, fast change detection, a fast edit loop | 🚧 next |
-| P4 Android | Gradle builds, signing, install-by-QR | 🚧 builds and caches APKs, Gradle task cache shipped |
-| P5 iOS | Xcode builds on your Mac workers | planned |
-| P6 Everything else | web, desktop, containers, more languages | planned |
-| P7 Dashboard | Expo-quality UI: builds, logs, artifacts, QR installs | seeded (`/ui`) |
-| P8 Optional servers | `ant server deploy`, offload to your VPS, team-wide cache | engine exists, one-command setup planned |
-| P9 Ship | store submission, live preview | planned |
+| P3 Local-first speed | reuse on a laptop with no server, fast edit loops | ✅ shipped |
+| P4 Android | Gradle builds, signing, install over USB or QR | ✅ shipped |
+| P5 iOS | Xcode builds; signing and App Store upload | 🚧 unsigned builds shipped |
+| P6 Everything else | Go, Python, Java, .NET, Flutter, Docker, desktop apps | ✅ shipped |
+| P7 Dashboard | builds, live logs, deliverables, QR installs | ✅ shipped |
+| P8 Optional servers | `ant server deploy`, offload, several workers, team servers | ✅ shipped |
+| P9 Ship | Google Play upload, live preview, single sign-on | ✅ shipped; App Store next |
 
 The full plan, acceptance criteria, and decision log are in [`docs/plan.md`](docs/plan.md). The product vision is in [`docs/vision.md`](docs/vision.md).
 
@@ -165,9 +188,9 @@ The full plan, acceptance criteria, and decision log are in [`docs/plan.md`](doc
 | | |
 |---|---|
 | [Getting started](docs/getting-started.md) | `ant build` and `ant init` |
-| [Build adapters](docs/cli/adapters.md) | Cargo, npm, CMake, Gradle: what's declared and the honest limits |
+| [Build adapters](docs/cli/adapters.md) | every ecosystem: what's declared and the honest limits |
 | [Cache keys](docs/cli/cache-and-keys.md) | what goes into a key and why results are reused |
-| [Teams & servers](docs/remote/operations.md) | coordinator, workers, tokens, dashboard |
+| [Teams & servers](docs/remote/operations.md) | `ant server deploy`, workers, tokens, single sign-on, the server UI |
 | [Architecture](docs/architecture.md) | crates, contracts, trust boundaries |
 | [Security model](docs/security/threat-model.md) | what's protected, from whom, and what isn't yet |
 | [Benchmarks](docs/benchmarks/) | methodology and every recorded run |

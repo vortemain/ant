@@ -77,7 +77,7 @@ pub fn dashboard_command(args: impl Iterator<Item = OsString>) -> Result<u8, Str
     Ok(0)
 }
 
-fn open_in_browser(url: &str) {
+pub(crate) fn open_in_browser(url: &str) {
     // The URL is ours (address + hex token), so no shell quoting concerns.
     let result = if cfg!(windows) {
         std::process::Command::new("explorer").arg(url).spawn()

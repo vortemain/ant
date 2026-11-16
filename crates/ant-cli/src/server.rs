@@ -43,6 +43,7 @@ pub const REMOTE_PORT: u16 = 8742;
 const USAGE: &str = "usage: ant server deploy USER@HOST [--name NAME] [--port N] [--identity FILE] [--binary PATH] [--sandbox] [--toolchain rust] [--workers N]
        ant server add NAME --url https://HOST [--token-file FILE]
        ant server status [NAME]
+       ant server ui [NAME] [--no-open]
        ant server audit [NAME]
        ant server list
        ant server forget NAME";
@@ -81,7 +82,7 @@ getent group ant >/dev/null || groupadd --system ant
 id -u ant >/dev/null 2>&1 || useradd --system --gid ant --home-dir /var/lib/ant --no-create-home --shell /usr/sbin/nologin ant
 install -d -m 0750 -o root -g ant /etc/ant
 install -d -m 0750 -o ant -g ant /var/lib/ant /var/lib/ant/coordinator /var/lib/ant/worker
-for name in client worker; do
+for name in client worker viewer; do
   f=/etc/ant/$name.token
   if [ ! -s "$f" ]; then (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f"); fi
   chown root:ant "$f"; chmod 0640 "$f"
@@ -118,7 +119,7 @@ After=network-online.target
 [Service]
 User=ant
 Group=ant
-ExecStart=/usr/local/bin/ant coordinator --listen 127.0.0.1:$PORT --data-dir /var/lib/ant/coordinator --client-token-file /etc/ant/client.token --worker-token-file /etc/ant/worker.token --max-body-mb 512
+ExecStart=/usr/local/bin/ant coordinator --listen 127.0.0.1:$PORT --data-dir /var/lib/ant/coordinator --client-token-file /etc/ant/client.token --worker-token-file /etc/ant/worker.token --viewer-token-file /etc/ant/viewer.token --max-body-mb 512
 Restart=on-failure
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -387,6 +388,32 @@ impl ServerProfile {
         })?;
         serde_json::from_str(&text)
             .map_err(|error| format!("server profile {name} is damaged: {error}"))
+    }
+
+    fn viewer_path(&self) -> Result<PathBuf, String> {
+        Ok(servers_dir()?.join(sealed_name(&format!("{}.viewer", self.name))))
+    }
+
+    /// The server's read-only viewer token, sealed like the client token.
+    fn save_viewer(&self, token: &str) -> Result<(), String> {
+        if token.len() < 32 {
+            return Err("the server's viewer token looks wrong".to_owned());
+        }
+        let path = self.viewer_path()?;
+        if let Ok(old) = std::fs::read(&path) {
+            crate::signing::forget_sealed(&old);
+        }
+        let _ = std::fs::remove_file(&path);
+        write_private(&path, &seal(token.as_bytes())?)
+    }
+
+    fn viewer_token(&self) -> Result<Option<String>, String> {
+        let Ok(blob) = std::fs::read(self.viewer_path()?) else {
+            return Ok(None);
+        };
+        let text = String::from_utf8(unseal(&blob)?)
+            .map_err(|_| "the stored viewer token is not text".to_owned())?;
+        Ok(Some(text))
     }
 
     fn token(&self) -> Result<String, String> {
@@ -658,6 +685,9 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
         return Err("the server's client token looks wrong; nothing was saved".to_owned());
     }
     profile.save(token)?;
+    // The read-only viewer token opens the server's web UI (`ant server ui`).
+    let viewer = profile.run(&format!("{sudo_prefix}cat /etc/ant/viewer.token"), None)?;
+    profile.save_viewer(viewer.trim())?;
 
     let (coordinator, _tunnel) = connect(&name)?;
     let health = health_and_workers(&coordinator)?;
@@ -666,6 +696,7 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
     println!("  The coordinator listens only on the server itself; Ant reaches it through SSH.");
     println!("  Build there:  ant build --on {name}   (or server = \"{name}\" in ant.toml)");
     println!("  Check it:     ant server status {name}");
+    println!("  Watch it:     ant server ui {name}");
     Ok(0)
 }
 
@@ -1064,6 +1095,68 @@ fn only_profile(name: Option<String>) -> Result<String, String> {
     }
 }
 
+/// `ant server ui [NAME] [--no-open]` (D-065): open the server's own web UI
+/// (jobs and workers) in the browser. A deployed server's coordinator stays
+/// on its loopback, so this keeps an SSH tunnel open until Ctrl+C and hands
+/// the page the read-only viewer token in the URL fragment, which browsers
+/// never send over the network; the page moves it to session storage and
+/// drops it from the address bar.
+fn ui(args: impl Iterator<Item = String>) -> Result<u8, String> {
+    let mut name = None;
+    let mut open = true;
+    for arg in args {
+        match arg.as_str() {
+            "--no-open" => open = false,
+            other if !other.starts_with('-') && name.is_none() => name = Some(other.to_owned()),
+            other => {
+                return Err(format!(
+                    "unexpected argument '{other}'
+{USAGE}"
+                ));
+            }
+        }
+    }
+    let name = only_profile(name)?;
+    let profile = ServerProfile::load(&name)?;
+    if let Some(url) = &profile.url {
+        println!(
+            "{name} is a team server; open {}/ui and paste a viewer or client token from its administrator.",
+            url.trim_end_matches('/')
+        );
+        return Ok(0);
+    }
+    let viewer = profile.viewer_token()?.ok_or_else(|| {
+        format!(
+            "{name} was deployed before the web UI could be opened from here; redeploy once with: ant server deploy {} --name {name}",
+            profile.target
+        )
+    })?;
+    let tunnel = Tunnel::open(&profile)?;
+    let base = format!("http://127.0.0.1:{}/ui/", tunnel.local_port);
+    println!("{name}'s web UI (jobs and workers): {base}");
+    println!("Reached through SSH; it stays open until you press Ctrl+C.");
+    if open {
+        crate::dashboard::open_in_browser(&format!("{base}#token={}", viewer.trim()));
+    } else {
+        println!(
+            "Sign in on the page with the read-only token shown by: ant server ui {name} (or open it without --no-open)"
+        );
+    }
+    let cancellation = local_executor::CancellationToken::new();
+    crate::install_ctrl_c_handler(&cancellation);
+    let mut tunnel = tunnel;
+    while !cancellation.is_cancelled() {
+        if let Some(child) = &mut tunnel.child
+            && let Ok(Some(_)) = child.try_wait()
+        {
+            return Err(format!("the SSH tunnel to {} closed", profile.target));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    println!("Closed the tunnel to {name}.");
+    Ok(0)
+}
+
 pub fn server_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
     match args.next().as_deref() {
@@ -1096,6 +1189,7 @@ pub fn server_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
             }
             Ok(0)
         }
+        Some("ui") => ui(args),
         Some("status") => {
             let name = only_profile(args.next())?;
             let profile = ServerProfile::load(&name)?;
@@ -1128,6 +1222,11 @@ pub fn server_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
                 crate::signing::forget_sealed(&blob);
             }
             let _ = std::fs::remove_file(&token);
+            let viewer = dir.join(sealed_name(&format!("{name}.viewer")));
+            if let Ok(blob) = std::fs::read(&viewer) {
+                crate::signing::forget_sealed(&blob);
+            }
+            let _ = std::fs::remove_file(&viewer);
             println!(
                 "Forgot {name} on this computer. The server itself still runs Ant; remove it there with: \
                  sudo systemctl disable --now 'ant-worker@*' ant-worker ant-coordinator"

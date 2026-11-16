@@ -152,6 +152,24 @@ jobs:
           target/release/ant server deploy runner@127.0.0.1 --binary target/release/ant --name ci --toolchain rust
           [ "$before" = "$(sudo sha256sum /etc/ant/client.token)" ]
           target/release/ant server status ci
+      - name: ant server ui opens the web UI with the read-only viewer token (D-065)
+        env:
+          ANT_DATA_HOME: ${{ runner.temp }}/ant-data
+        run: |
+          target/release/ant server ui ci --no-open > "$RUNNER_TEMP/ui.txt" &
+          pid=$!
+          for i in $(seq 40); do grep -q 'http://127.0.0.1' "$RUNNER_TEMP/ui.txt" && break; sleep 0.5; done
+          cat "$RUNNER_TEMP/ui.txt"
+          url=$(grep -o 'http://127.0.0.1:[0-9]*/ui/' "$RUNNER_TEMP/ui.txt")
+          curl -fsS "$url" | grep -q 'app.js'
+          viewer=$(sudo cat /etc/ant/viewer.token)
+          api="${url%ui/}v1"
+          curl -fsS -H "Authorization: Bearer $viewer" "$api/jobs" | grep -q '"jobs"'
+          # Read-only: the viewer token may not submit or upload.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $viewer" -d '{}' "$api/jobs")
+          [ "$code" = 403 ]
+          sudo stat -c '%a %U:%G %n' /etc/ant/viewer.token | grep -q '^640 root:ant'
+          kill $pid
       - name: The coordinator is not reachable from outside the server
         run: |
           addr=$(hostname -I | awk '{print $1}')
