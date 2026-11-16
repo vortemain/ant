@@ -424,6 +424,17 @@ pub fn build_and_collect(
             key.short_fingerprint()
         );
     }
+    // npm/pnpm/Yarn: credentials an `.npmrc` refers to (`${NPM_TOKEN}`) or
+    // set as `npm_config_*_authToken` reach the tool at spawn time only,
+    // never the plan or keys (D-066).
+    if adapter.name() == "npm" && secrets.is_none() {
+        let values = npm_secret_environment(&root, &plan);
+        if !values.is_empty() {
+            secrets = Some(&*Box::leak(Box::new(
+                local_executor::SecretEnvironment::new(values),
+            )));
+        }
+    }
     let graph = plan.to_graph().map_err(|error| error.to_string())?;
     let plan_json = serde_json::to_string_pretty(&plan).map_err(|error| error.to_string())?;
     let ant_dir = root.join(".ant");
@@ -657,6 +668,61 @@ fn run_on_server(
 /// Spawn-time variables that keep a tool's terminal display when its output
 /// is teed through a pipe (D-045). Only display settings: they cannot change
 /// what a build produces, so they stay out of actions and keys.
+/// Variables an npm/pnpm/Yarn build needs but that must never be declared
+/// (D-066): each `${NAME}` the project's or the user's `.npmrc` refers to
+/// and that the plan does not already set, plus credential-looking
+/// `npm_config_*` variables. Only set variables are returned.
+fn npm_secret_environment(root: &Path, plan: &build_graph::PlanFile) -> Vec<(String, String)> {
+    let declared: std::collections::BTreeSet<String> = plan
+        .actions
+        .iter()
+        .flat_map(|planned| planned.action.environment.iter())
+        .map(|(name, _)| name.to_ascii_uppercase())
+        .collect();
+    let mut files = vec![root.join(".npmrc")];
+    if let Some(home) = build_adapter::home_dir() {
+        files.push(home.join(".npmrc"));
+    }
+    if let Some(user_config) = std::env::var_os("NPM_CONFIG_USERCONFIG") {
+        files.push(PathBuf::from(user_config));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find("${") {
+            rest = &rest[start + 2..];
+            if let Some(end) = rest.find('}') {
+                let name = &rest[..end];
+                if !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                {
+                    names.insert(name.to_owned());
+                }
+                rest = &rest[end + 1..];
+            }
+        }
+    }
+    let mut values = Vec::new();
+    for (name, value) in std::env::vars() {
+        let upper = name.to_ascii_uppercase();
+        let referenced = names
+            .iter()
+            .any(|wanted| wanted.eq_ignore_ascii_case(&name));
+        let credential =
+            upper.starts_with("NPM_CONFIG_") && build_adapter::npm::is_secret_name(&name);
+        if !value.is_empty() && !declared.contains(&upper) && (referenced || credential) {
+            values.push((name, value));
+        }
+    }
+    values.sort();
+    values
+}
+
 fn display_environment(adapter: &str) -> Vec<(String, String)> {
     use std::io::IsTerminal as _;
     let mut environment = Vec::new();
@@ -1033,7 +1099,10 @@ mod tests {
         assert_eq!(options.get("config"), Some("Release"));
         let npm = build_adapter::adapter("npm").expect("npm");
         let (options, flavor) = build_options(npm, &BTreeMap::new(), true, false).expect("options");
-        assert!(options.is_empty());
+        // npm has no release/debug notion; `ant build` only asks for the
+        // developer's own user folders and package-manager config (D-066).
+        assert_eq!(options.get("home"), Some("user"));
+        assert_eq!(options.get("profile"), None);
         assert_eq!(flavor, "default");
     }
 }

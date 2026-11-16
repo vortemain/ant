@@ -397,6 +397,12 @@ declared in `pyproject.toml`'s `[build-system]` (or the legacy
 - **Workspace-relative scratch:** `TMP`/`TEMP` (plus `TMPDIR` off Windows)
   point at `.ant/tmp`, the staging pattern shared with the other adapters.
 
+## npm, pnpm, and Yarn under `ant build` (D-066)
+
+`ant build` passes `home=user` to the npm adapter. The plan then declares the developer's own user folders and package-manager settings, because the executor clears the child environment and npm, pnpm, and Yarn find their config (an `.npmrc` written with `${APPDATA}` or `${HOME}`), cache, and store through them: on Windows `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `USERNAME`, `ProgramData`, `ALLUSERSPROFILE`, `COMSPEC`; elsewhere `HOME`, `USER`, `XDG_*_HOME`; everywhere `PNPM_HOME`, `COREPACK_HOME`, `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `NODE_ENV`, `LANG`, `LC_ALL`, `LC_CTYPE`, and every `NPM_CONFIG_*`, `PNPM_CONFIG_*`, `YARN_*`, `COREPACK_*` variable. These values are machine-specific, so reused results stay on this machine. Credential-looking names (`TOKEN`, `AUTH`, `PASSWORD`, `SECRET`, `_KEY`, `CREDENTIAL`) are never declared: `ant build` reads the `${NAME}` references in the project's and the user's `.npmrc` (and `NPM_CONFIG_USERCONFIG`) and injects those variables, plus credential-looking `npm_config_*` ones, at spawn time through `SecretEnvironment`, masked in build logs and absent from plans and keys.
+
+The build runs with the project's own package manager: `pnpm run build` with a `pnpm-lock.yaml`, `yarn run build` with a `yarn.lock` (when that tool is on PATH), else `npm run build`. `pnpm-lock.yaml` and `yarn.lock` are declared inputs and pin `node_modules` for local reuse like `package-lock.json`. `ant adapt` keeps `home=project` by default.
+
 ## npm framework outputs (P6, D-040)
 
 The npm adapter declares a framework's output directory automatically when it

@@ -235,6 +235,51 @@ fn ant_build_runs_an_npm_project_without_configuration() {
     assert!(dir.path().join("dist").join("main.js").is_file());
 }
 
+/// D-066: npm sees the developer's user folders (an `.npmrc` written with
+/// `${APPDATA}`/`${HOME}` works), and a token an `.npmrc` refers to reaches
+/// the build without ever entering the plan or the build log.
+#[test]
+fn ant_build_gives_npm_its_user_config_and_referenced_tokens() {
+    let dir = TempDir::new("npm-home");
+    let home = if cfg!(windows) { "APPDATA" } else { "HOME" };
+    write(
+        &dir.path().join("package.json"),
+        "{\"name\":\"cfg\",\"version\":\"1.0.0\",\"scripts\":{\"build\":\"node build.js\"}}",
+    );
+    write(
+        &dir.path().join(".npmrc"),
+        &format!("cache=${{{home}}}/ant-test-npm-cache\n//registry.example.test/:_authToken=${{ANT_TEST_NPM_TOKEN}}\n"),
+    );
+    write(
+        &dir.path().join("build.js"),
+        &format!(
+            "const fs=require('fs');fs.mkdirSync('dist',{{recursive:true}});\
+             fs.writeFileSync('dist/seen.txt',(process.env.{home}?'home ':'nohome ')+(process.env.ANT_TEST_NPM_TOKEN==='t0k3n-value'?'token':'notoken'));\
+             console.log('token is '+process.env.ANT_TEST_NPM_TOKEN);\n"
+        ),
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_ant"))
+        .current_dir(dir.path())
+        .env("ANT_CACHE_HOME", dir.path().join(".ant").join("cache-home"))
+        .env("ANT_TEST_NPM_TOKEN", "t0k3n-value")
+        .arg("build")
+        .output()
+        .expect("spawn ant");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("dist").join("seen.txt")).expect("seen"),
+        "home token"
+    );
+    let plan = fs::read_to_string(dir.path().join(".ant").join("plan.json")).expect("plan");
+    assert!(!plan.contains("t0k3n-value"), "token in the plan");
+    assert!(plan.contains(home), "user folder not declared: {plan}");
+}
+
 fn run_artifact(dir: &Path) -> String {
     let output = Command::new(dir.join("dist").join(exe("greeter")))
         .output()

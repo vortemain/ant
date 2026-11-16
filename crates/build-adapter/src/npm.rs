@@ -78,11 +78,26 @@ use crate::{
 
 pub struct NpmAdapter;
 
-const OPTIONS: &[OptionSpec] = &[OptionSpec {
-    key: "outputs",
-    values: "none|entry-points",
-    description: "entry-points declares each package's main/types/bin entries as build outputs (user assertion, executor-verified)",
-}];
+const OPTIONS: &[OptionSpec] = &[
+    OptionSpec {
+        key: "outputs",
+        values: "none|entry-points",
+        description: "entry-points declares each package's main/types/bin entries as build outputs (user assertion, executor-verified)",
+    },
+    OptionSpec {
+        key: "home",
+        values: "project|user",
+        description: "user passes the developer's own user folders and npm/pnpm/yarn settings (as `ant build` does), so the package manager finds its config, cache, and store",
+    },
+];
+
+/// Lockfiles that pin `node_modules`, for each package manager.
+const LOCKFILES: &[&str] = &[
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OutputsMode {
@@ -128,6 +143,15 @@ impl BuildAdapter for NpmAdapter {
         // Options are validated before any side effect.
         check_option_keys(self, options)?;
         let mode = outputs_mode(options)?;
+        let user_home = match options.get("home") {
+            None | Some("project") => false,
+            Some("user") => true,
+            Some(other) => {
+                return Err(AdapterError::Option(format!(
+                    "npm home '{other}' is not supported (supported: project, user)"
+                )));
+            }
+        };
         let root = canonical_root(project_root)?;
         let package = read_package_json(&root, Path::new(""))?;
 
@@ -139,8 +163,18 @@ impl BuildAdapter for NpmAdapter {
         // toolchain digest and before any side effect.
         file.to_graph()?;
         let toolchain = node_toolchain(&root)?;
+        let manager = package_manager(&root);
+        let extra = if user_home {
+            user_environment()
+        } else {
+            Vec::new()
+        };
         for entry in &mut file.actions {
             entry.action.toolchain = Some(toolchain.clone());
+            entry.action.argv = build_argv(manager);
+            entry.action.environment.extend(extra.iter().cloned());
+            entry.action.environment.sort();
+            entry.action.environment.dedup_by(|a, b| a.0 == b.0);
         }
         // Re-validate the final plan through the canonical graph conversion;
         // an adapter must never emit an invalid plan.
@@ -231,16 +265,108 @@ fn build_script<'a>(
     Ok(Some(script))
 }
 
-fn npm_build_argv() -> Vec<String> {
-    // `npm` is `npm.cmd` (a batch shim) on Windows and cannot be launched
-    // directly by CreateProcess; `cmd /C` resolves it. Elsewhere `npm` is on
-    // PATH as an executable script.
-    let argv: &[&str] = if cfg!(windows) {
-        &["cmd", "/C", "npm", "run", "build"]
-    } else {
-        &["npm", "run", "build"]
+/// The package manager the project is locked with: pnpm (`pnpm-lock.yaml`)
+/// or Yarn (`yarn.lock`) when that tool is on PATH, else npm. Its own `run
+/// build` honors its workspace and config files (`pnpm-workspace.yaml`,
+/// `.yarnrc.yml`), which `npm run` would not.
+fn package_manager(root: &Path) -> &'static str {
+    let on_path = |name: &str| {
+        if cfg!(windows) {
+            [".cmd", ".exe", ".bat"]
+                .iter()
+                .any(|suffix| locate_executable(&format!("{name}{suffix}")).is_ok())
+        } else {
+            locate_executable(name).is_ok()
+        }
     };
-    argv.iter().map(|arg| (*arg).to_owned()).collect()
+    if root.join("pnpm-lock.yaml").is_file() && on_path("pnpm") {
+        "pnpm"
+    } else if root.join("yarn.lock").is_file() && on_path("yarn") {
+        "yarn"
+    } else {
+        "npm"
+    }
+}
+
+fn build_argv(manager: &str) -> Vec<String> {
+    // npm/pnpm/yarn are batch shims on Windows (`npm.cmd`), which
+    // CreateProcess cannot launch directly; `cmd /C` resolves them.
+    let mut argv: Vec<String> = if cfg!(windows) {
+        vec!["cmd".to_owned(), "/C".to_owned()]
+    } else {
+        Vec::new()
+    };
+    argv.extend([manager.to_owned(), "run".to_owned(), "build".to_owned()]);
+    argv
+}
+
+/// Names of variables that carry credentials: never declared in a plan
+/// (they would reach plan files and keys); `ant build` injects the ones a
+/// `.npmrc` refers to at spawn time instead.
+pub fn is_secret_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["TOKEN", "AUTH", "PASSWORD", "SECRET", "_KEY", "CREDENTIAL"]
+        .iter()
+        .any(|marker| upper.contains(marker))
+}
+
+/// `home=user`: the developer's own user folders and package-manager
+/// settings. The executor clears the child environment, and npm, pnpm, and
+/// Yarn find their config (`.npmrc`, often written with `${APPDATA}`),
+/// cache, and store through these. Values are machine-specific key
+/// material, so such results stay machine-local (like Gradle's D-032).
+/// Credential-looking variables are left out (see [`is_secret_name`]).
+fn user_environment() -> Vec<(String, String)> {
+    let fixed: &[&str] = if cfg!(windows) {
+        &[
+            "APPDATA",
+            "LOCALAPPDATA",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "USERNAME",
+            "ProgramData",
+            "ALLUSERSPROFILE",
+            "COMSPEC",
+        ]
+    } else {
+        &[
+            "HOME",
+            "USER",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ]
+    };
+    let shared: &[&str] = &[
+        "PNPM_HOME",
+        "COREPACK_HOME",
+        "NODE_OPTIONS",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_ENV",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+    ];
+    let prefixes = ["NPM_CONFIG_", "PNPM_CONFIG_", "YARN_", "COREPACK_"];
+    let mut environment: Vec<(String, String)> = Vec::new();
+    for (name, value) in std::env::vars() {
+        if value.is_empty() || is_secret_name(&name) {
+            continue;
+        }
+        let upper = name.to_ascii_uppercase();
+        let wanted = fixed
+            .iter()
+            .chain(shared)
+            .any(|key| key.eq_ignore_ascii_case(&name))
+            || prefixes.iter().any(|prefix| upper.starts_with(prefix));
+        if wanted {
+            environment.push((name, value));
+        }
+    }
+    environment.sort();
+    environment
 }
 
 /// `TMP`/`TEMP` (plus `TMPDIR` off Windows) pointing at `.ant/tmp` relative
@@ -332,7 +458,8 @@ fn build_action(
     Action {
         schema_version: 1,
         id,
-        argv: npm_build_argv(),
+        // Replaced by `generate` with the project's package manager.
+        argv: build_argv("npm"),
         working_directory,
         inputs: inputs
             .into_iter()
@@ -388,8 +515,10 @@ fn single_package_plan(
     }
     let mut inputs: BTreeMap<PathBuf, InputKind> = BTreeMap::new();
     inputs.insert(PathBuf::from("package.json"), InputKind::File);
-    if root.join("package-lock.json").is_file() {
-        inputs.insert(PathBuf::from("package-lock.json"), InputKind::File);
+    for lockfile in LOCKFILES {
+        if root.join(lockfile).is_file() {
+            inputs.insert(PathBuf::from(lockfile), InputKind::File);
+        }
     }
     declare_package_inputs(root, Path::new(""), &mut inputs);
     let outputs = match mode {
@@ -403,9 +532,7 @@ fn single_package_plan(
     // outputs to restore, this machine may reuse its own result, but only
     // with the whole project declared (Vite reads index.html, vite.config.*,
     // public/, .env* — not just src/). Never shared.
-    let lockfile = ["package-lock.json", "npm-shrinkwrap.json"]
-        .iter()
-        .any(|name| root.join(name).is_file());
+    let lockfile = LOCKFILES.iter().any(|name| root.join(name).is_file());
     let restorable = framework.is_some() || !outputs.is_empty();
     let mut reusable = false;
     if lockfile && restorable {
@@ -510,15 +637,14 @@ fn workspace_plan(
         ));
     }
 
-    let root_inputs: Vec<PathBuf> = ["package.json", "package-lock.json", "tsconfig.json"]
+    let root_inputs: Vec<PathBuf> = ["package.json", "tsconfig.json"]
         .iter()
+        .chain(LOCKFILES)
         .map(PathBuf::from)
         .filter(|path| root.join(path).is_file())
         .collect();
 
-    let root_locked = ["package-lock.json", "npm-shrinkwrap.json"]
-        .iter()
-        .any(|name| root.join(name).is_file());
+    let root_locked = LOCKFILES.iter().any(|name| root.join(name).is_file());
     let mut file = PlanFile::new();
     let mut staging_dirs = Vec::new();
     for (name, package) in &packages {
@@ -1596,6 +1722,99 @@ mod tests {
         }
         assert!(!paths.iter().any(|path| path.starts_with("node_modules")));
         assert!(!paths.contains(&PathBuf::from("packages/app/dist")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn credential_names_are_recognized() {
+        for name in [
+            "NPM_TOKEN",
+            "NODE_AUTH_TOKEN",
+            "npm_config__authToken",
+            "GITHUB_PASSWORD",
+            "AWS_SECRET_ACCESS_KEY",
+            "API_KEY",
+        ] {
+            assert!(is_secret_name(name), "{name}");
+        }
+        for name in [
+            "APPDATA",
+            "LOCALAPPDATA",
+            "PNPM_HOME",
+            "NODE_OPTIONS",
+            "npm_config_registry",
+            "HOME",
+        ] {
+            assert!(!is_secret_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn build_argv_uses_the_package_manager() {
+        let argv = build_argv("pnpm");
+        assert_eq!(&argv[argv.len() - 3..], ["pnpm", "run", "build"]);
+        if cfg!(windows) {
+            assert_eq!(&argv[..2], ["cmd", "/C"]);
+        }
+    }
+
+    #[test]
+    fn home_user_passes_user_folders_but_never_credentials() {
+        let environment = user_environment();
+        let names: Vec<&str> = environment.iter().map(|(name, _)| name.as_str()).collect();
+        let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        if std::env::var_os(home).is_some() {
+            assert!(
+                names.iter().any(|name| name.eq_ignore_ascii_case(home)),
+                "{names:?}"
+            );
+        }
+        if cfg!(windows) && std::env::var_os("APPDATA").is_some() {
+            assert!(
+                names
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case("APPDATA")),
+                "{names:?}"
+            );
+        }
+        assert!(!names.iter().any(|name| is_secret_name(name)), "{names:?}");
+        assert!(!names.iter().any(|name| name.eq_ignore_ascii_case("PATH")));
+    }
+
+    #[test]
+    fn pnpm_lockfile_is_declared_and_makes_builds_reusable() {
+        let dir = std::env::temp_dir().join(format!("ant-npm-pnpm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (path, text) in [
+            (
+                "package.json",
+                r#"{"name":"site","scripts":{"build":"vite build"},"devDependencies":{"vite":"6"}}"#,
+            ),
+            ("pnpm-lock.yaml", "lockfileVersion: '9.0'"),
+            ("index.html", ""),
+            ("src/main.ts", ""),
+        ] {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, text).expect("write");
+        }
+        let package = read_package_json(&dir, Path::new("")).expect("package");
+        let (plan, _) = single_package_plan(&dir, &package, OutputsMode::None).expect("plan");
+        let action = &plan.actions[0].action;
+        assert!(paths(action).contains(&PathBuf::from("pnpm-lock.yaml")));
+        assert_eq!(action.cache_policy, CachePolicy::Local);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unknown_home_mode_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("ant-npm-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"build":"tsc"}}"#).expect("write");
+        let error = NpmAdapter
+            .generate(&dir, &options(&[("home", "elsewhere")]))
+            .expect_err("bad home");
+        assert!(matches!(error, AdapterError::Option(_)), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

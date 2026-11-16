@@ -333,7 +333,7 @@ pub fn environment_probe(prefixes: &[&str]) -> Vec<String> {
 }
 
 /// The user's home directory, when known.
-pub(crate) fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)

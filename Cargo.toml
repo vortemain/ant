@@ -4,7 +4,7 @@ members = ["crates/ant-cli", "crates/ant-remote", "crates/ant-sandbox-win", "cra
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.1.1"
 rust-version = "1.95"
 
 [workspace.dependencies]

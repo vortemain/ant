@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ant-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ant-remote",
  "ant-sandbox-win",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "ant-remote"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "build-action",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "ant-sandbox-win"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sha2",
  "win32job",
@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "build-action"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "build-adapter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "build-action",
  "build-digest",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "build-cache"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "build-action",
  "build-digest",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "build-digest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "build-action",
  "os_info",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "build-events"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "build-graph"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "build-action",
  "serde",
@@ -349,7 +349,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "local-executor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ant-sandbox-win",
  "build-action",
