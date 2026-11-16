@@ -280,10 +280,14 @@ impl BuildAdapter for GradleAdapter {
         std::fs::create_dir_all(root.join(".ant").join("tmp")).map_err(AdapterError::from)?;
         let staging = PathBuf::from(".ant");
         let rel = |path: PathBuf| path.to_string_lossy().into_owned();
-        let mut environment = vec![
-            ("TMP".to_owned(), rel(staging.join("tmp"))),
-            ("TEMP".to_owned(), rel(staging.join("tmp"))),
-        ];
+        let mut environment: Vec<(String, String)> = Vec::new();
+        if !user_home {
+            environment.push(("TMP".to_owned(), rel(staging.join("tmp"))));
+            environment.push(("TEMP".to_owned(), rel(staging.join("tmp"))));
+            if cfg!(not(windows)) {
+                environment.push(("TMPDIR".to_owned(), rel(staging.join("tmp"))));
+            }
+        }
         if user_home {
             // Local builds (`ant build`): the developer's own Gradle and
             // Android homes, named explicitly because the child environment
@@ -301,9 +305,6 @@ impl BuildAdapter for GradleAdapter {
                 "ANDROID_USER_HOME".to_owned(),
                 rel(staging.join("android-home")),
             ));
-        }
-        if cfg!(not(windows)) {
-            environment.push(("TMPDIR".to_owned(), rel(staging.join("tmp"))));
         }
         if dependency_cache {
             environment.push((
@@ -422,6 +423,16 @@ fn user_homes(root: &Path) -> Result<Vec<(String, String)>, AdapterError> {
     ];
     if let Some(java_home) = env("JAVA_HOME") {
         environment.push(("JAVA_HOME".to_owned(), java_home));
+    }
+    // What Gradle compares to reuse a daemon the developer already has warm
+    // (D-057): the JVM options, and the locale (file.encoding, user.language
+    // come from it). The developer's own temp directory (java.io.tmpdir)
+    // reaches the child unchanged because user-home plans no longer
+    // redirect TMP/TEMP/TMPDIR into `.ant/tmp`.
+    for name in ["GRADLE_OPTS", "JAVA_OPTS", "LANG", "LC_ALL", "LC_CTYPE"] {
+        if let Some(value) = env(name) {
+            environment.push((name.to_owned(), value));
+        }
     }
     let sdk_in_properties = std::fs::read_to_string(root.join("local.properties"))
         .is_ok_and(|text| text.lines().any(|line| line.trim().starts_with("sdk.dir")));

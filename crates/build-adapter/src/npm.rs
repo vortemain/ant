@@ -281,6 +281,34 @@ fn declare_package_inputs(
     }
 }
 
+/// Directories under an npm package that are never its sources: installed
+/// dependencies, VCS and Ant state, build outputs, and tool caches (D-056).
+const NOT_SOURCES: &[&str] = &[
+    "node_modules",
+    ".git",
+    ".ant",
+    "dist",
+    ".next",
+    ".turbo",
+    ".cache",
+    "coverage",
+];
+
+/// Declare everything under `dir` except [`NOT_SOURCES`] and `outputs`;
+/// `Ok(true)` when a symlink was skipped (then nothing may be reused).
+fn declare_whole_package(
+    root: &Path,
+    dir: &Path,
+    outputs: &[PathBuf],
+    inputs: &mut BTreeMap<PathBuf, InputKind>,
+) -> Result<bool, AdapterError> {
+    let mut excluded: Vec<PathBuf> = NOT_SOURCES.iter().map(|name| dir.join(name)).collect();
+    excluded.extend(outputs.iter().cloned());
+    let mut has_symlink = false;
+    crate::cargo::declare_project(root, dir, &excluded, inputs, &mut has_symlink)?;
+    Ok(has_symlink)
+}
+
 fn build_action(
     id: String,
     working_directory: PathBuf,
@@ -381,19 +409,7 @@ fn single_package_plan(
     let restorable = framework.is_some() || !outputs.is_empty();
     let mut reusable = false;
     if lockfile && restorable {
-        let mut excluded: Vec<PathBuf> = [
-            "node_modules",
-            ".git",
-            ".ant",
-            "dist",
-            ".next",
-            ".turbo",
-            ".cache",
-            "coverage",
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+        let mut excluded: Vec<PathBuf> = NOT_SOURCES.iter().map(PathBuf::from).collect();
         excluded.extend(framework.clone());
         excluded.extend(outputs.iter().cloned());
         let mut whole: BTreeMap<PathBuf, InputKind> = BTreeMap::new();
@@ -500,6 +516,9 @@ fn workspace_plan(
         .filter(|path| root.join(path).is_file())
         .collect();
 
+    let root_locked = ["package-lock.json", "npm-shrinkwrap.json"]
+        .iter()
+        .any(|name| root.join(name).is_file());
     let mut file = PlanFile::new();
     let mut staging_dirs = Vec::new();
     for (name, package) in &packages {
@@ -546,15 +565,64 @@ fn workspace_plan(
             )?,
         };
         let framework = detect_framework(&package.manifest).map(|d| package.dir.join(d));
+        // Local reuse for workspace packages (D-056): with the root lockfile
+        // and outputs to restore, declare what the build can read: the
+        // root's own files (configuration, lockfile), the package's folder,
+        // and the folders of every workspace package it uses (sources and,
+        // for building ones, their outputs, which exist before this runs).
+        let restorable = framework.is_some() || !outputs.is_empty();
+        let mut reusable = false;
+        if root_locked && restorable {
+            let mut whole: BTreeMap<PathBuf, InputKind> = BTreeMap::new();
+            let mut has_symlink = false;
+            for entry in std::fs::read_dir(root)
+                .map_err(AdapterError::from)?
+                .flatten()
+            {
+                let kind = entry.file_type().map_err(AdapterError::from)?;
+                if kind.is_symlink() {
+                    has_symlink = true;
+                } else if kind.is_file() {
+                    whole.insert(PathBuf::from(entry.file_name()), InputKind::File);
+                }
+            }
+            let own_outputs: Vec<PathBuf> = framework
+                .iter()
+                .cloned()
+                .chain(outputs.iter().cloned())
+                .collect();
+            has_symlink |= declare_whole_package(root, &package.dir, &own_outputs, &mut whole)?;
+            for dep in seen.iter().copied() {
+                let dep_dir = &packages[dep].dir;
+                let mut dep_inputs = BTreeMap::new();
+                has_symlink |= declare_whole_package(root, dep_dir, &[], &mut dep_inputs)?;
+                // A building dependency's outputs are inputs here.
+                if let Some(dep_output) = detect_framework(&packages[dep].manifest) {
+                    let path = dep_dir.join(dep_output);
+                    if root.join(&path).exists() || packages[dep].builds {
+                        dep_inputs.insert(path, InputKind::Tree);
+                    }
+                }
+                whole.extend(dep_inputs);
+            }
+            if !has_symlink {
+                inputs = whole;
+                reusable = true;
+            }
+        }
         staging_dirs.push(package.dir.join(".ant").join("tmp"));
+        let mut action = build_action(
+            name.clone(),
+            package.dir.clone(),
+            inputs,
+            outputs,
+            framework,
+        );
+        if reusable {
+            action.cache_policy = CachePolicy::Local;
+        }
         file.actions.push(PlanAction {
-            action: build_action(
-                name.clone(),
-                package.dir.clone(),
-                inputs,
-                outputs,
-                framework,
-            ),
+            action,
             dependencies: edges.into_iter().collect(),
         });
     }
@@ -1467,6 +1535,67 @@ mod tests {
         std::fs::remove_file(dir.join("package-lock.json")).expect("remove");
         let (plan, _) = single_package_plan(&dir, &package, OutputsMode::None).expect("plan");
         assert_eq!(plan.actions[0].action.cache_policy, CachePolicy::Never);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locked_workspace_packages_are_reusable_with_their_dependencies_declared() {
+        let dir = std::env::temp_dir().join(format!("ant-npm-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (path, text) in [
+            (
+                "package.json",
+                r#"{"name":"mono","private":true,"workspaces":["packages/*"]}"#,
+            ),
+            ("package-lock.json", "{}"),
+            ("tsconfig.base.json", "{}"),
+            ("node_modules/vite/package.json", "{}"),
+            (
+                "packages/lib/package.json",
+                r#"{"name":"lib","scripts":{"build":"vite build"},"devDependencies":{"vite":"6"}}"#,
+            ),
+            ("packages/lib/src/index.ts", ""),
+            ("packages/lib/dist/index.js", ""),
+            (
+                "packages/app/package.json",
+                r#"{"name":"app","scripts":{"build":"vite build"},"dependencies":{"lib":"*"},"devDependencies":{"vite":"6"}}"#,
+            ),
+            ("packages/app/index.html", ""),
+            ("packages/app/src/main.ts", ""),
+        ] {
+            let full = dir.join(path);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("dir");
+            std::fs::write(full, text).expect("write");
+        }
+        let patterns = serde_json::json!(["packages/*"]);
+        let (plan, _) = workspace_plan(&dir, &patterns, OutputsMode::None).expect("plan");
+        let app = plan
+            .actions
+            .iter()
+            .find(|planned| planned.action.id == "app")
+            .expect("app");
+        assert_eq!(app.action.cache_policy, CachePolicy::Local);
+        let paths: Vec<PathBuf> = app
+            .action
+            .inputs
+            .iter()
+            .map(|input| input.path.clone())
+            .collect();
+        for wanted in [
+            "package-lock.json",
+            "tsconfig.base.json",
+            "packages/app/index.html",
+            "packages/app/src",
+            "packages/lib/src",
+            "packages/lib/dist",
+        ] {
+            assert!(
+                paths.contains(&PathBuf::from(wanted)),
+                "{wanted} in {paths:?}"
+            );
+        }
+        assert!(!paths.iter().any(|path| path.starts_with("node_modules")));
+        assert!(!paths.contains(&PathBuf::from("packages/app/dist")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

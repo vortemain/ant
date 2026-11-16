@@ -40,6 +40,27 @@ pub fn run_plan_in(
     workspace_key: Option<&str>,
     output: Option<OutputHandler<'_>>,
 ) -> Result<u8, String> {
+    run_plan_across(
+        &[coordinator],
+        graph,
+        workspace,
+        poll,
+        workspace_key,
+        output,
+    )
+}
+
+/// Like [`run_plan_in`], spreading ready actions over several servers
+/// (D-060): each goes to the server with the fewest of this build's jobs in
+/// flight; every server's own workers then build in parallel.
+pub fn run_plan_across(
+    coordinators: &[&Coordinator],
+    graph: &BuildGraph,
+    workspace: &Path,
+    poll: Duration,
+    workspace_key: Option<&str>,
+    output: Option<OutputHandler<'_>>,
+) -> Result<u8, String> {
     // Every action whose dependencies are done is submitted at once; the
     // coordinator queues them and each worker leases one at a time, so with
     // N workers up to N actions run in parallel (D-050). Fail-fast: after a
@@ -67,6 +88,11 @@ pub fn run_plan_in(
                 let action = &node.action;
                 println!("action={} status=started remote=true", action.id);
                 let inputs = collect_inputs(workspace, action)?;
+                // The least busy server takes the next ready action (D-060).
+                let server = (0..coordinators.len())
+                    .min_by_key(|index| running.iter().filter(|job| job.server == *index).count())
+                    .ok_or("no servers to build on")?;
+                let coordinator = coordinators[server];
                 upload_missing(coordinator, workspace, &inputs)?;
                 let spec = JobSpec {
                     protocol_version: PROTOCOL_VERSION,
@@ -78,6 +104,7 @@ pub fn run_plan_in(
                     .post_json("/v1/jobs", &spec, "job submission")?
                     .ok_or("job submission returned no body")?;
                 running.push(RunningJob {
+                    server,
                     action,
                     job_id: submitted.job_id,
                     // Generous client-side bound: the action's own timeout
@@ -102,6 +129,7 @@ pub fn run_plan_in(
         let mut index = 0;
         while index < running.len() {
             let job = &mut running[index];
+            let coordinator = coordinators[job.server];
             let status: JobStatus =
                 coordinator.get_json(&format!("/v1/jobs/{}", job.job_id), "job status")?;
             if let Some(follower) = &mut job.log
@@ -126,7 +154,7 @@ pub fn run_plan_in(
             if let Some(mut follower) = job.log {
                 follower.finish();
             }
-            let code = report(coordinator, workspace, job.action, &status)?;
+            let code = report(coordinators[job.server], workspace, job.action, &status)?;
             if code == 0 {
                 done.insert(job.action.id.as_str());
             } else {
@@ -138,7 +166,7 @@ pub fn run_plan_in(
         if failed.is_some() && !running.is_empty() {
             for job in running.drain(..) {
                 let path = format!("/v1/jobs/{}/cancel", job.job_id);
-                let _ = coordinator.post_json::<_, serde_json::Value>(
+                let _ = coordinators[job.server].post_json::<_, serde_json::Value>(
                     &path,
                     &serde_json::json!({}),
                     "cancel",
@@ -167,6 +195,8 @@ pub fn run_plan_in(
 
 /// A submitted job the client is waiting for.
 struct RunningJob<'a> {
+    /// Index into the servers this build uses.
+    server: usize,
     action: &'a Action,
     job_id: String,
     deadline: Option<Instant>,

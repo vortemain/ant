@@ -1068,3 +1068,166 @@ fn a_failure_cancels_the_other_remote_jobs() {
     );
     assert!(!project.path().join("slow.txt").exists());
 }
+
+/// D-058: `ant login` remembers a team coordinator reached directly (HTTPS
+/// in production; plain HTTP is accepted only on loopback, as here), and
+/// `ant build --on` builds there with deliverables coming back into dist/.
+#[test]
+fn login_then_build_on_a_team_server() {
+    let cluster = Cluster::start("login", true);
+    let data = TempDir::new("login-data");
+    let project = TempDir::new("login-project");
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"teamhello\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("manifest");
+    fs::create_dir_all(project.path().join("src")).expect("src");
+    fs::write(
+        project.path().join("src/main.rs"),
+        "fn main() { println!(\"built for the team\"); }\n",
+    )
+    .expect("main");
+    let ant = |dir: &Path, args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ant"))
+            .current_dir(dir)
+            .env("ANT_DATA_HOME", data.path())
+            .env("ANT_CACHE_HOME", data.path().join("cache"))
+            .args(args)
+            .output()
+            .expect("spawn ant");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let token_file = cluster.dir.path().join("client.token");
+    let token_arg = token_file.to_string_lossy().into_owned();
+    // A wrong token is refused before anything is saved.
+    let wrong = data.path().join("wrong.token");
+    fs::write(&wrong, "not-the-right-token-0123456789abcdefghijkl").expect("token");
+    let (code, _, stderr) = ant(
+        project.path(),
+        &[
+            "login",
+            &cluster.url,
+            "--name",
+            "team",
+            "--token-file",
+            &wrong.to_string_lossy(),
+        ],
+    );
+    assert_ne!(code, 0, "{stderr}");
+    let (code, stdout, stderr) = ant(
+        project.path(),
+        &[
+            "login",
+            &cluster.url,
+            "--name",
+            "team",
+            "--token-file",
+            &token_arg,
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("Added team") && stdout.contains("worker"),
+        "{stdout}"
+    );
+    let (code, stdout, _) = ant(project.path(), &["server", "list"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("team") && stdout.contains(&cluster.url),
+        "{stdout}"
+    );
+    let (code, stdout, stderr) = ant(project.path(), &["build", "--on", "team", "--dev"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("on team"), "{stdout}");
+    let binary = project
+        .path()
+        .join("dist")
+        .join(format!("teamhello{}", std::env::consts::EXE_SUFFIX));
+    let run = Command::new(&binary).output().expect("run the deliverable");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "built for the team"
+    );
+    // D-059: the coordinator's audit trail recorded the failed login, the
+    // submission, the lease, and the result; no token appears in it.
+    let (code, stdout, stderr) = ant(project.path(), &["server", "audit", "team"]);
+    assert_eq!(code, 0, "{stderr}");
+    for event in ["auth_failed", "job_submitted", "job_leased", "job_finished"] {
+        assert!(stdout.contains(event), "{event} in {stdout}");
+    }
+    let raw = fs::read_to_string(cluster.dir.path().join("coord").join("audit.jsonl"))
+        .expect("audit file");
+    assert!(!raw.contains(CLIENT_TOKEN) && !raw.contains("not-the-right-token"));
+}
+
+/// D-060: one build across two servers (each its own coordinator and
+/// worker): independent actions go to different servers and overlap.
+#[test]
+fn one_build_spreads_over_several_servers() {
+    let first = Cluster::start("multi-a", true);
+    let second = Cluster::start("multi-b", true);
+    let project = TempDir::new("multi-project");
+    let slow = |name: &str| {
+        if cfg!(windows) {
+            format!("ping -n 4 127.0.0.1 >nul & echo {name}> {name}.txt")
+        } else {
+            format!("sleep 3; echo {name} > {name}.txt")
+        }
+    };
+    let plan: build_graph::PlanFile = serde_json::from_value(json!({
+        "schema_version": 1,
+        "actions": [
+            action("a", &slow("a"), json!([]), json!([{ "path": "a.txt", "kind": "file" }]), &[]),
+            action("b", &slow("b"), json!([]), json!([{ "path": "b.txt", "kind": "file" }]), &[]),
+        ]
+    }))
+    .expect("plan");
+    let graph = plan.to_graph().expect("graph");
+    let clients = [first.client(CLIENT_TOKEN), second.client(CLIENT_TOKEN)];
+    for client in &clients {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let workers: serde_json::Value =
+                client.get_json("/v1/workers", "workers").expect("workers");
+            if workers["workers"].as_array().map_or(0, Vec::len) >= 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker never registered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    let workspace = project.path().canonicalize().expect("workspace");
+    let started = std::time::Instant::now();
+    let code = ant_remote::client::run_plan_across(
+        &[&clients[0], &clients[1]],
+        &graph,
+        &workspace,
+        std::time::Duration::from_millis(50),
+        None,
+        None,
+    )
+    .expect("run");
+    assert_eq!(code, 0);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(5500),
+        "a and b overlapped: {:?}",
+        started.elapsed()
+    );
+    for name in ["a", "b"] {
+        let text = fs::read_to_string(project.path().join(format!("{name}.txt"))).expect("output");
+        assert_eq!(text.trim(), name);
+    }
+    for client in &clients {
+        let jobs: ant_remote::protocol::JobList =
+            client.get_json("/v1/jobs", "jobs").expect("jobs");
+        assert_eq!(jobs.jobs.len(), 1, "each server built one action");
+    }
+}

@@ -3,7 +3,9 @@
 //!
 //! ```text
 //! ant server deploy USER@HOST [--name NAME] [--port N] [--identity FILE] [--binary PATH] [--sandbox]
+//! ant server add NAME --url https://HOST [--token-file FILE]   (also: ant login URL)
 //! ant server status [NAME]
+//! ant server audit [NAME]
 //! ant server list
 //! ant server forget NAME
 //! ant remote run --server NAME --plan PLAN.json
@@ -39,7 +41,9 @@ use std::time::{Duration, Instant};
 pub const REMOTE_PORT: u16 = 8742;
 
 const USAGE: &str = "usage: ant server deploy USER@HOST [--name NAME] [--port N] [--identity FILE] [--binary PATH] [--sandbox] [--toolchain rust] [--workers N]
+       ant server add NAME --url https://HOST [--token-file FILE]
        ant server status [NAME]
+       ant server audit [NAME]
        ant server list
        ant server forget NAME";
 
@@ -220,6 +224,10 @@ pub struct ServerProfile {
     pub os: Option<String>,
     #[serde(default)]
     pub arch: Option<String>,
+    /// A team coordinator reached over HTTPS directly (D-058) instead of an
+    /// SSH tunnel; `target` then repeats the URL for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 fn servers_dir() -> Result<PathBuf, String> {
@@ -390,14 +398,17 @@ impl ServerProfile {
 /// An SSH tunnel from a free local port to the coordinator on the server.
 /// Dropping it closes the tunnel.
 pub struct Tunnel {
-    child: Child,
+    /// `None` for HTTPS servers (D-058): nothing to close.
+    child: Option<Child>,
     pub local_port: u16,
 }
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -428,7 +439,10 @@ impl Tunnel {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if TcpStream::connect((Ipv4Addr::LOCALHOST, local_port)).is_ok() {
-                return Ok(Self { child, local_port });
+                return Ok(Self {
+                    child: Some(child),
+                    local_port,
+                });
             }
             if let Ok(Some(_)) = child.try_wait() {
                 let mut message = String::new();
@@ -459,6 +473,14 @@ impl Tunnel {
 pub fn connect(name: &str) -> Result<(ant_remote::http::Coordinator, Tunnel), String> {
     let profile = ServerProfile::load(name)?;
     let token = ant_remote::auth::Token::new(profile.token()?.trim())?;
+    if let Some(url) = &profile.url {
+        let coordinator = ant_remote::http::Coordinator::new(url, token, false)?;
+        let tunnel = Tunnel {
+            child: None,
+            local_port: 0,
+        };
+        return Ok((coordinator, tunnel));
+    }
     let tunnel = Tunnel::open(&profile)?;
     let coordinator = ant_remote::http::Coordinator::new(
         &format!("http://127.0.0.1:{}", tunnel.local_port),
@@ -532,6 +554,7 @@ fn deploy(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
         deployed_ms: crate::history::now_ms(),
         os: None,
         arch: None,
+        url: None,
     };
 
     println!("Checking {target}…");
@@ -650,6 +673,103 @@ pub(crate) fn status_line(name: &str) -> Result<String, String> {
     health_and_workers(&coordinator)
 }
 
+/// `ant server add NAME --url URL [--token-file FILE]` and `ant login URL
+/// [--name NAME] [--token-file FILE]` (D-058): remember a team coordinator
+/// served over HTTPS (behind a TLS reverse proxy; plain HTTP only on
+/// loopback), check it answers, and record its workers' OS for `ant build
+/// --on`. The client token comes from a file or stdin, never the command
+/// line, and is sealed like a deployed server's (D-052).
+fn add(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
+    let name = args.next().ok_or(ADD_USAGE)?;
+    let mut url = None;
+    let mut token_file = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--url" => url = Some(args.next().ok_or(ADD_USAGE)?),
+            "--token-file" => token_file = Some(PathBuf::from(args.next().ok_or(ADD_USAGE)?)),
+            other => return Err(format!("unexpected argument '{other}'\n{ADD_USAGE}")),
+        }
+    }
+    let url = url.ok_or(ADD_USAGE)?;
+    register(&name, &url, token_file.as_deref())
+}
+
+const ADD_USAGE: &str = "usage: ant server add NAME --url https://HOST [--token-file FILE]   (the token is read from stdin without --token-file)";
+const LOGIN_USAGE: &str = "usage: ant login https://HOST [--name NAME] [--token-file FILE]   (the token is read from stdin without --token-file)";
+
+/// `ant login URL`: [`add`] with the name taken from the host.
+pub fn login_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
+    let mut url = None;
+    let mut name = None;
+    let mut token_file = None;
+    let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--name" => name = Some(args.next().ok_or(LOGIN_USAGE)?),
+            "--token-file" => token_file = Some(PathBuf::from(args.next().ok_or(LOGIN_USAGE)?)),
+            other if url.is_none() && !other.starts_with('-') => url = Some(other.to_owned()),
+            other => return Err(format!("unexpected argument '{other}'\n{LOGIN_USAGE}")),
+        }
+    }
+    let url = url.ok_or(LOGIN_USAGE)?;
+    let name = match name {
+        Some(name) => name,
+        None => {
+            let host = url
+                .split("://")
+                .nth(1)
+                .and_then(|rest| rest.split(['/', ':']).next())
+                .unwrap_or("team");
+            host.split('.').next().unwrap_or("team").to_owned()
+        }
+    };
+    register(&name, &url, token_file.as_deref())
+}
+
+fn register(name: &str, url: &str, token_file: Option<&std::path::Path>) -> Result<u8, String> {
+    valid_name(name)?;
+    let url = url.trim_end_matches('/').to_owned();
+    ant_remote::http::check_transport(&url, false)?;
+    let token = match token_file {
+        Some(path) => std::fs::read_to_string(path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?,
+        None => {
+            use std::io::Read as _;
+            eprintln!(
+                "Paste the client token for {url} and press Enter (Ctrl+D/Ctrl+Z to finish):"
+            );
+            let mut text = String::new();
+            std::io::stdin()
+                .read_to_string(&mut text)
+                .map_err(|error| format!("cannot read the token: {error}"))?;
+            text
+        }
+    };
+    let token = token.trim().to_owned();
+    let coordinator =
+        ant_remote::http::Coordinator::new(&url, ant_remote::auth::Token::new(&token)?, false)?;
+    let summary = health_and_workers(&coordinator)
+        .map_err(|error| format!("{url} did not answer as an Ant coordinator: {error}"))?;
+    let workers: ant_remote::protocol::WorkerList =
+        coordinator.get_json("/v1/workers", "worker list")?;
+    let os = workers.workers.first().map(|worker| worker.os.clone());
+    let profile = ServerProfile {
+        name: name.to_owned(),
+        target: url.clone(),
+        ssh_port: None,
+        identity: None,
+        remote_port: 0,
+        deployed_ms: crate::history::now_ms(),
+        os,
+        arch: None,
+        url: Some(url.clone()),
+    };
+    profile.save(&token)?;
+    println!("Added {name} ({url}): {summary}");
+    println!("  Build there:  ant build --on {name}   (or server = \"{name}\" in ant.toml)");
+    Ok(0)
+}
+
 /// One line about the coordinator and its workers.
 fn health_and_workers(coordinator: &ant_remote::http::Coordinator) -> Result<String, String> {
     let health: ant_remote::protocol::Health =
@@ -723,6 +843,34 @@ pub fn server_command(args: impl Iterator<Item = OsString>) -> Result<u8, String
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
     match args.next().as_deref() {
         Some("deploy") => deploy(args),
+        Some("add") => add(args),
+        Some("audit") => {
+            let name = only_profile(args.next())?;
+            let (coordinator, _tunnel) = connect(&name)?;
+            let audit: serde_json::Value = coordinator.get_json("/v1/audit", "audit log")?;
+            let events = audit["events"].as_array().cloned().unwrap_or_default();
+            if events.is_empty() {
+                println!("{name}: no audit events yet.");
+            }
+            for event in events {
+                let text = |key: &str| event[key].as_str().unwrap_or("").to_owned();
+                let mut line = format!(
+                    "{}  {:<20}",
+                    event["time_ms"].as_u64().unwrap_or(0),
+                    text("event")
+                );
+                for key in ["job", "action", "worker", "role", "from", "path"] {
+                    if !text(key).is_empty() {
+                        line.push_str(&format!(" {key}={}", text(key)));
+                    }
+                }
+                if let Some(succeeded) = event["succeeded"].as_bool() {
+                    line.push_str(&format!(" succeeded={succeeded}"));
+                }
+                println!("{line}");
+            }
+            Ok(0)
+        }
         Some("status") => {
             let name = only_profile(args.next())?;
             let profile = ServerProfile::load(&name)?;

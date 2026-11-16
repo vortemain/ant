@@ -458,7 +458,9 @@ fn ant_build_on_a_server_refuses_what_cannot_work() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
-        stdout.contains("Building on this machine: other") && stdout.contains("Plan9"),
+        stdout.contains("Building without other")
+            && stdout.contains("Plan9")
+            && stdout.contains("Building on this machine."),
         "{stdout}"
     );
     // An explicit --on still refuses; --local skips the server quietly.

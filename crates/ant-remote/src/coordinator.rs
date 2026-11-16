@@ -239,6 +239,41 @@ struct State {
     blobs: BlobStore,
     jobs: Mutex<Jobs>,
     started_ms: u64,
+    /// Append-only audit trail, `<data dir>/audit.jsonl` (D-059).
+    audit: Mutex<Option<std::fs::File>>,
+}
+
+/// Lines `GET /v1/audit` returns at most (the newest).
+const AUDIT_TAIL: usize = 1000;
+
+/// Record one audit event: who (role, worker id, address) did what to
+/// which job, when. Never tokens, environment values, or file contents.
+fn audit(state: &State, mut event: serde_json::Value) {
+    use std::io::Write as _;
+    if let Some(fields) = event.as_object_mut() {
+        fields.insert("time_ms".to_owned(), serde_json::json!(now_ms()));
+    }
+    let Ok(mut file) = state.audit.lock() else {
+        return;
+    };
+    if let Some(file) = file.as_mut() {
+        let _ = writeln!(file, "{event}");
+    }
+}
+
+fn audit_tail(state: &State) -> Result<Reply, Reply> {
+    let text =
+        std::fs::read_to_string(state.config.data_dir.join("audit.jsonl")).unwrap_or_default();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .rev()
+        .take(AUDIT_TAIL)
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Ok(json_reply(200, &serde_json::json!({ "events": lines })))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -282,12 +317,22 @@ pub fn serve(config: CoordinatorConfig, on_bound: impl FnOnce(SocketAddr)) -> Re
         .to_ip()
         .ok_or("listener has no IP address")?;
     let threads = config.threads.max(1);
+    let audit_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(config.data_dir.join("audit.jsonl"))
+        .map_err(|error| format!("cannot open the audit log: {error}"))?;
     let state = Arc::new(State {
         config,
         blobs,
         jobs: Mutex::new(Jobs::default()),
         started_ms: now_ms(),
+        audit: Mutex::new(Some(audit_file)),
     });
+    audit(
+        &state,
+        serde_json::json!({ "event": "coordinator_started", "listen": bound.to_string() }),
+    );
     let server = Arc::new(server);
     on_bound(bound);
     let mut handles = Vec::new();
@@ -397,6 +442,15 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         );
     }
     let Some(role) = authenticate(state, request) else {
+        audit(
+            state,
+            serde_json::json!({
+                "event": "auth_failed",
+                "method": method.as_str(),
+                "path": path,
+                "from": request.remote_addr().map(|address| address.ip().to_string()),
+            }),
+        );
         return error_reply(401, "missing or invalid bearer token");
     };
     let result = match (&method, segments.as_slice()) {
@@ -430,6 +484,9 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         }
         (tiny_http::Method::Post, ["v1", "lease"]) => {
             require(role, Role::Worker).and_then(|_| lease(state, request))
+        }
+        (tiny_http::Method::Get, ["v1", "audit"]) => {
+            require_reader(role).and_then(|_| audit_tail(state))
         }
         (tiny_http::Method::Post, ["v1", "jobs", id, "cancel"]) => {
             require(role, Role::Client).and_then(|_| cancel_job(state, id))
@@ -782,6 +839,18 @@ fn submit(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Repl
         },
     );
     jobs.queue.push_back(job_id.clone());
+    let action = jobs.records[&job_id].spec.action.id.clone();
+    drop(jobs);
+    audit(
+        state,
+        serde_json::json!({
+            "event": "job_submitted",
+            "job": job_id,
+            "action": action,
+            "role": "client",
+            "from": request.remote_addr().map(|address| address.ip().to_string()),
+        }),
+    );
     Ok(json_reply(201, &SubmitResponse { job_id }))
 }
 
@@ -838,8 +907,18 @@ fn lease(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Reply
     record.state = JobState::Running;
     record.attempts += 1;
     record.started_ms = Some(seen);
-    record.lease = Some((lease.worker_id, now + lease_for));
+    record.lease = Some((lease.worker_id.clone(), now + lease_for));
     let spec = record.spec.clone();
+    drop(jobs);
+    audit(
+        state,
+        serde_json::json!({
+            "event": "job_leased",
+            "job": job_id,
+            "action": spec.action.id,
+            "worker": lease.worker_id,
+        }),
+    );
     Ok(json_reply(200, &LeaseResponse { job_id, spec }))
 }
 
@@ -888,6 +967,7 @@ fn cancel_job(state: &State, id: &str) -> Result<Reply, Reply> {
         .records
         .get_mut(id)
         .ok_or_else(|| error_reply(404, "no such job"))?;
+    let action = record.spec.action.id.clone();
     match record.state {
         JobState::Queued => {
             record.state = JobState::Failed;
@@ -898,6 +978,11 @@ fn cancel_job(state: &State, id: &str) -> Result<Reply, Reply> {
         JobState::Running => record.cancel_requested = true,
         JobState::Completed | JobState::Failed => {}
     }
+    drop(jobs);
+    audit(
+        state,
+        serde_json::json!({ "event": "job_cancelled", "job": id, "action": action, "role": "client" }),
+    );
     Ok((204, Vec::new(), "text/plain"))
 }
 
@@ -957,11 +1042,27 @@ fn post_result(state: &State, request: &mut tiny_http::Request, id: &str) -> Res
     record.finished_ms = Some(finished);
     let worker_id = result.worker_id.clone();
     record.result = Some(result);
+    let succeeded = record
+        .result
+        .as_ref()
+        .is_some_and(|result| result.succeeded());
+    let action = record.spec.action.id.clone();
     if let Some(worker) = jobs.workers.get_mut(&worker_id) {
         worker.last_seen_ms = finished;
         worker.current_job = None;
         worker.jobs_reported += 1;
     }
+    drop(jobs);
+    audit(
+        state,
+        serde_json::json!({
+            "event": "job_finished",
+            "job": id,
+            "action": action,
+            "worker": worker_id,
+            "succeeded": succeeded,
+        }),
+    );
     Ok(json_reply(200, &serde_json::json!({ "accepted": id })))
 }
 

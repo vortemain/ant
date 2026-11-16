@@ -319,21 +319,40 @@ pub fn build_and_collect(
     } else {
         on.or_else(|| config.server.clone())
     };
-    let mut remote = None;
-    if let Some(name) = on.clone() {
-        let connected = check_server(&name, android && release).and_then(|()| {
-            println!("Connecting to {name}…");
-            crate::server::connect(&name)
-        });
-        match connected {
-            Ok(connection) => remote = Some(connection),
-            Err(error) if !explicit => {
-                println!(
-                    "Building on this machine: {name} (server in {CONFIG_FILE}) cannot take this build: {error}"
-                );
-                on = None;
+    // Several servers, comma-separated (D-060): ready actions spread over
+    // them. From ant.toml, servers that cannot take the build are skipped
+    // (and the build stays here when none can); `--on` insists on all.
+    let mut remote = Vec::new();
+    if let Some(names) = on.clone() {
+        let mut usable = Vec::new();
+        for name in names
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            let connected = check_server(name, android && release).and_then(|()| {
+                println!("Connecting to {name}…");
+                crate::server::connect(name)
+            });
+            match connected {
+                Ok(connection) => {
+                    remote.push(connection);
+                    usable.push(name.to_owned());
+                }
+                Err(error) if !explicit => println!(
+                    "Building without {name} (server in {CONFIG_FILE}), which cannot take this build: {error}"
+                ),
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
+        }
+        if usable.is_empty() {
+            if explicit {
+                return Err("--on needs at least one server name".to_owned());
+            }
+            println!("Building on this machine.");
+            on = None;
+        } else {
+            on = Some(usable.join(", "));
         }
     }
     let (options, flavor) = build_options(adapter, &config.options, dev, release)?;
@@ -486,8 +505,11 @@ pub fn build_and_collect(
     let results = build_adapter::user_cache_dir().map(|dir| dir.join("local-results"));
     let code = match &on {
         Some(_) => {
-            let (coordinator, _tunnel) = remote.as_ref().ok_or("no server connection")?;
-            run_on_server(coordinator, &graph, &root, &build_log)?
+            let coordinators: Vec<&ant_remote::http::Coordinator> = remote
+                .iter()
+                .map(|(coordinator, _tunnel)| coordinator)
+                .collect();
+            run_on_server(&coordinators, &graph, &root, &build_log)?
         }
         None => scheduler::run_plan(
             &graph,
@@ -604,7 +626,7 @@ fn check_server(name: &str, signed: bool) -> Result<(), String> {
 /// the server keeps for this project so rebuilds there are incremental
 /// (D-048). Outputs come back into the project like a local build's.
 fn run_on_server(
-    coordinator: &ant_remote::http::Coordinator,
+    coordinators: &[&ant_remote::http::Coordinator],
     graph: &build_graph::BuildGraph,
     root: &Path,
     log: &crate::build_log::BuildLog,
@@ -613,8 +635,8 @@ fn run_on_server(
         build_digest::digest_bytes(format!("ant-remote-workspace\n{}", shown(root)).as_bytes())
             .to_string();
     let key = &digest[digest.len() - 32..];
-    ant_remote::client::run_plan_in(
-        coordinator,
+    ant_remote::client::run_plan_across(
+        coordinators,
         graph,
         root,
         std::time::Duration::from_millis(200),
