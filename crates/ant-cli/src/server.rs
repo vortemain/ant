@@ -140,7 +140,7 @@ User=ant
 Group=ant
 Environment=HOME=/var/lib/ant
 Environment=PATH=/var/lib/ant/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/usr/local/bin/ant worker --coordinator http://127.0.0.1:$PORT --token-file /etc/ant/worker.token --work-dir /var/lib/ant/worker$SANDBOX_FLAG
+ExecStart=/usr/local/bin/ant worker --coordinator http://127.0.0.1:$PORT --token-file /etc/ant/worker.token --work-dir /var/lib/ant/worker --id %H-1$SANDBOX_FLAG
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
