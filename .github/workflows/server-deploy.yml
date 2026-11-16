@@ -157,6 +157,8 @@ jobs:
           ANT_DATA_HOME: ${{ runner.temp }}/ant-data
           ANT_CACHE_HOME: ${{ runner.temp }}/ant-cache
         run: |
+          # The redeploy above restarted the coordinator (jobs live in memory): run one.
+          (cd "$RUNNER_TEMP/project" && "$GITHUB_WORKSPACE/target/release/ant" remote run --server ci --plan plan.json --workspace .)
           target/release/ant server ui ci --no-open > "$RUNNER_TEMP/ui.txt" &
           pid=$!
           for i in $(seq 40); do grep -q 'http://127.0.0.1' "$RUNNER_TEMP/ui.txt" && break; sleep 0.5; done
