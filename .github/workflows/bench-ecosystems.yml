@@ -1,0 +1,52 @@
+# Local-first benchmark (P3) for npm and Android: plain `ant build` vs the
+# native tool on a GitHub Linux runner, no server. Raw results are uploaded
+# and summarized; compare tools within one run (runner CPUs vary).
+name: bench-ecosystems
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["batch-*", "p3-*"]
+    paths:
+      - benchmarks/ecosystems/**
+      - .github/workflows/bench-ecosystems.yml
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        subject: [npm, android]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        if: matrix.subject == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build ant (release)
+        run: cargo build --release --locked -p ant-cli
+      - name: Run the benchmark
+        env:
+          ANT: ${{ github.workspace }}/target/release/ant
+        run: bash benchmarks/ecosystems/run.sh ${{ matrix.subject }}
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '## ${{ matrix.subject }} (raw)'
+            echo '```'
+            cat benchmarks/ecosystems/out/environment.txt || true
+            echo
+            column -s, -t benchmarks/ecosystems/out/results.csv || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ecosystems-${{ matrix.subject }}
+          path: benchmarks/ecosystems/out
