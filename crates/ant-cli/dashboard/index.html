@@ -11,13 +11,14 @@
 </head>
 <body>
   <a class="skip" href="#content">Skip to content</a>
+  <div class="backdrop" aria-hidden="true"></div>
   <div class="shell">
     <aside class="sidebar" id="sidebar" aria-label="Main">
       <div class="sidebar-brand">
         <img src="logo.svg" alt="" width="32" height="32">
         <div class="brand-text">
           <span class="brand-name">Ant</span>
-          <span class="brand-scope">Local · this computer</span>
+          <span class="brand-scope">This computer</span>
         </div>
       </div>
       <nav class="nav">
@@ -69,7 +70,7 @@
             <span class="sr-only">Search projects and toolchains</span>
             <input id="search" type="search" placeholder="Search projects, toolchains…" autocomplete="off">
           </label>
-          <p class="live" id="live" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="live-text">Connecting…</span></p>
+          <p class="live" id="live" role="status" aria-live="polite"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 10 17 19 7.5"/></svg><span id="live-text">Connecting…</span></p>
           <button type="button" class="icon-button" id="theme" aria-label="Switch color theme">
             <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4V2m0 20v-2m8-8h2M2 12h2m13.66-5.66 1.41-1.41M4.93 19.07l1.41-1.41m0-11.32L4.93 4.93m14.14 14.14-1.41-1.41M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z"/></svg>
             <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
@@ -83,7 +84,7 @@
         <section class="card live-card" id="live-builds" hidden aria-labelledby="live-title">
           <header class="card-head">
             <div>
-              <h2 id="live-title"><span class="status running">Running</span> Building now</h2>
+              <h2 id="live-title">Building now</h2>
               <p class="card-sub">Updates as each step starts and finishes</p>
             </div>
           </header>

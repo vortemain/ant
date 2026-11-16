@@ -1,0 +1,10 @@
+date_utc=2026-11-16T07:34:09Z
+ant_commit=c349210
+cpu=Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+cores=4
+os=Ubuntu 26.04.1 LTS Linux 7.0.0-1019-azure
+node=v24.22.2 npm=11.19.1
+java=openjdk version "25.0.5" 2026-10-20 LTS
+ant=Ant 0.1.0
+reps=3
+subject_npm=create-vite@6 react-ts; vite vite/6.4.6 linux-x64 node-v24.22.2

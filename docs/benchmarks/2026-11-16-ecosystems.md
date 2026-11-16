@@ -49,3 +49,25 @@ undo 0.036–0.047 s vs 1.30–1.62 s, edit 1.68–1.82 s vs 1.85–2.75 s, cold
 - Cold builds are slower with Ant when the native tool already has a warm
   daemon or cache; making Ant reuse the developer's existing Gradle daemon is
   open work.
+
+## After D-057: Ant reuses the developer's warm Gradle daemon
+
+Same script, run [43824665991](https://github.com/vortemain/ant/actions/runs/43824665991)
+on Ant commit `c349210` (raw data: [`benchmarks/ecosystems/results/2026-11-16-linux-ci-gradle-daemon/`](../../benchmarks/ecosystems/results/2026-11-16-linux-ci-gradle-daemon/)).
+
+| JetNews | Gradle | Ant |
+|---|---|---|
+| cold | 2.57 s | **2.47 s** (was 11.4 s: Ant now reuses the daemon Gradle left warm) |
+| no change | 1.01-1.19 s | **0.049-0.076 s** |
+| one-file edit | 1.65-2.31 s | **1.06-1.09 s** |
+| edit undone | 0.98-1.02 s | **0.030-0.060 s** |
+
+| Vite app | npm | Ant |
+|---|---|---|
+| cold | 2.35 s | 2.55 s |
+| no change | 2.10-2.14 s | **0.020-0.022 s** |
+| one-file edit | 2.12-2.15 s | 2.15-2.20 s |
+| edit undone | 2.12-2.17 s | **0.020-0.021 s** |
+
+With the daemon shared, Ant is no slower than Gradle on a first build and faster
+on every other JetNews scenario.

@@ -1,0 +1,21 @@
+subject,tool,scenario,rep,seconds,notes
+npm,native,cold,1,2.349,dependencies pre-fetched
+npm,native,no-change,1,2.095,
+npm,native,no-change,2,2.135,
+npm,native,no-change,3,2.107,
+npm,native,edit,1,2.128,src/App.tsx
+npm,native,revert,1,2.151,src/App.tsx
+npm,native,edit,2,2.119,src/App.tsx
+npm,native,revert,2,2.169,src/App.tsx
+npm,native,edit,3,2.154,src/App.tsx
+npm,native,revert,3,2.122,src/App.tsx
+npm,ant,cold,1,2.551,dependencies pre-fetched
+npm,ant,no-change,1,0.021,
+npm,ant,no-change,2,0.020,
+npm,ant,no-change,3,0.022,
+npm,ant,edit,1,2.189,src/App.tsx
+npm,ant,revert,1,0.020,src/App.tsx
+npm,ant,edit,2,2.195,src/App.tsx
+npm,ant,revert,2,0.021,src/App.tsx
+npm,ant,edit,3,2.147,src/App.tsx
+npm,ant,revert,3,0.020,src/App.tsx

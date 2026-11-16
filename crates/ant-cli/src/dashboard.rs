@@ -30,6 +30,9 @@ const APP_CSS: &str = include_str!("../dashboard/app.css");
 const APP_JS: &str = include_str!("../dashboard/app.js");
 /// The brand mark, straight from the repository's assets.
 const LOGO_SVG: &str = include_str!("../../../docs/assets/logo-mark.svg");
+/// The fine grain behind the glass surfaces (D-061), served same-origin
+/// because the CSP allows no `data:` images.
+const TEXTURE_SVG: &str = include_str!("../dashboard/texture.svg");
 
 /// Builds the dashboard lists.
 const SHOWN: usize = 200;
@@ -340,6 +343,13 @@ fn handle(
             "image/svg+xml",
             "",
             LOGO_SVG.as_bytes(),
+        ),
+        "texture.svg" => respond(
+            &mut stream,
+            "200 OK",
+            "image/svg+xml",
+            "",
+            TEXTURE_SVG.as_bytes(),
         ),
         "app.js" => respond(
             &mut stream,
@@ -821,7 +831,7 @@ mod tests {
             older.id = "100-9".to_owned();
             older.started_ms = 100;
             older.deliverables = vec![PathBuf::from("dist/app.exe")];
-            for _ in 0..12 {
+            for _ in 0..13 {
                 let (stream, _) = listener.accept().expect("accept");
                 let records = vec![record.clone(), older.clone()];
                 let live = vec![history::RunningBuild {
@@ -861,6 +871,12 @@ mod tests {
         let (head, logo) = get(address, &format!("/{token}/logo.svg"), &host);
         assert!(head.contains("image/svg+xml"), "{head}");
         assert!(String::from_utf8_lossy(&logo).contains("<svg"));
+        // The glass surfaces' grain (D-061) is same-origin: the CSP has no
+        // data: images, and the page loads nothing from elsewhere.
+        let (head, texture) = get(address, &format!("/{token}/texture.svg"), &host);
+        assert!(head.contains("image/svg+xml"), "{head}");
+        assert!(String::from_utf8_lossy(&texture).contains("feTurbulence"));
+        assert!(!APP_CSS.contains("http") && !APP_JS.contains("https://"));
         let (head, _) = get(address, "/", &host);
         assert!(head.starts_with("HTTP/1.1 404"), "no token: {head}");
         let (head, _) = get(address, &format!("/{token}/"), "evil.example:80");
