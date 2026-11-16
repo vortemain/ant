@@ -12,6 +12,7 @@ pub mod client;
 pub mod coordinator;
 pub mod gradle_cache;
 pub mod http;
+pub mod oidc;
 pub mod protocol;
 pub mod ui;
 pub mod worker;

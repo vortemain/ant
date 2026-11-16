@@ -368,6 +368,9 @@ impl ServerProfile {
         std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let profile = dir.join(format!("{}.json", self.name));
         let sealed = dir.join(sealed_name(&format!("{}.token", self.name)));
+        if let Ok(old) = std::fs::read(&sealed) {
+            crate::signing::forget_sealed(&old);
+        }
         for path in [&profile, &sealed] {
             let _ = std::fs::remove_file(path);
         }
@@ -472,7 +475,7 @@ impl Tunnel {
 /// tunnel alive while using the client).
 pub fn connect(name: &str) -> Result<(ant_remote::http::Coordinator, Tunnel), String> {
     let profile = ServerProfile::load(name)?;
-    let token = ant_remote::auth::Token::new(profile.token()?.trim())?;
+    let token = ant_remote::auth::Token::new(&bearer(&profile)?)?;
     if let Some(url) = &profile.url {
         let coordinator = ant_remote::http::Coordinator::new(url, token, false)?;
         let tunnel = Tunnel {
@@ -695,16 +698,235 @@ fn add(mut args: impl Iterator<Item = String>) -> Result<u8, String> {
 }
 
 const ADD_USAGE: &str = "usage: ant server add NAME --url https://HOST [--token-file FILE]   (the token is read from stdin without --token-file)";
-const LOGIN_USAGE: &str = "usage: ant login https://HOST [--name NAME] [--token-file FILE]   (the token is read from stdin without --token-file)";
+const LOGIN_USAGE: &str = "usage: ant login https://HOST [--name NAME] [--sso | --token-file FILE]   (--sso signs in with your team's identity provider; otherwise the token is read from stdin without --token-file)";
+
+/// A single-sign-on credential (D-063), stored sealed in place of a token.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SsoCredential {
+    id_token: String,
+    refresh_token: Option<String>,
+    token_endpoint: String,
+    client_id: String,
+    client_secret: Option<String>,
+}
+
+/// The bearer to present: the stored token, or for single sign-on a
+/// current ID token (refreshed and re-sealed when it is about to expire).
+fn bearer(profile: &ServerProfile) -> Result<String, String> {
+    let text = profile.token()?;
+    let text = text.trim();
+    if !text.starts_with('{') {
+        return Ok(text.to_owned());
+    }
+    let mut credential: SsoCredential =
+        serde_json::from_str(text).map_err(|_| "the stored sign-in is damaged".to_owned())?;
+    let now = crate::history::now_ms() / 1000;
+    let expiry = ant_remote::oidc::unverified_expiry(&credential.id_token).unwrap_or(0);
+    if expiry > now + 120 {
+        return Ok(credential.id_token);
+    }
+    let refresh = credential.refresh_token.clone().ok_or_else(|| {
+        format!(
+            "your sign-in to {} expired; sign in again with: ant login {} --sso",
+            profile.name, profile.target
+        )
+    })?;
+    let mut form = vec![
+        ("grant_type", "refresh_token".to_owned()),
+        ("refresh_token", refresh),
+        ("client_id", credential.client_id.clone()),
+    ];
+    if let Some(secret) = &credential.client_secret {
+        form.push(("client_secret", secret.clone()));
+    }
+    let answer = post_form(&credential.token_endpoint, &form)?;
+    credential.id_token = answer["id_token"]
+        .as_str()
+        .ok_or_else(|| {
+            format!(
+                "your sign-in to {} could not be renewed; sign in again with: ant login {} --sso",
+                profile.name, profile.target
+            )
+        })?
+        .to_owned();
+    if let Some(rotated) = answer["refresh_token"].as_str() {
+        credential.refresh_token = Some(rotated.to_owned());
+    }
+    let text = serde_json::to_string(&credential).map_err(|error| error.to_string())?;
+    profile.save(&text)?;
+    Ok(credential.id_token)
+}
+
+fn form_encode(pairs: &[(&str, String)]) -> String {
+    let encode = |text: &str| {
+        text.bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (byte as char).to_string()
+                }
+                _ => format!("%{byte:02X}"),
+            })
+            .collect::<String>()
+    };
+    pairs
+        .iter()
+        .map(|(key, value)| format!("{}={}", encode(key), encode(value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build(),
+    )
+}
+
+/// POST a form; the JSON answer whatever the status (OAuth errors are JSON).
+fn post_form(url: &str, pairs: &[(&str, String)]) -> Result<serde_json::Value, String> {
+    let mut response = http_agent()
+        .post(url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send(form_encode(pairs).as_bytes())
+        .map_err(|error| format!("cannot reach {url}: {error}"))?;
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| format!("cannot read {url}: {error}"))?;
+    serde_json::from_str(&text).map_err(|_| format!("{url} did not answer with JSON"))
+}
+
+/// `ant login URL --sso` (D-063): sign in with the team's identity provider
+/// using the device authorization grant (RFC 8628): open a link anywhere,
+/// enter the code shown here, and Ant receives an ID token.
+fn sso_register(name: &str, url: &str) -> Result<u8, String> {
+    valid_name(name)?;
+    let url = url.trim_end_matches('/').to_owned();
+    ant_remote::http::check_transport(&url, false)?;
+    let mut response = http_agent()
+        .get(&format!("{url}/v1/sso"))
+        .call()
+        .map_err(|error| format!("cannot reach {url}: {error}"))?;
+    if response.status().as_u16() != 200 {
+        return Err(format!(
+            "{url} has no single sign-on configured (ask for a client token instead)"
+        ));
+    }
+    let info: serde_json::Value = serde_json::from_str(
+        &response
+            .body_mut()
+            .read_to_string()
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|_| "the server's sign-in settings are not JSON".to_owned())?;
+    let text = |key: &str| info[key].as_str().map(str::to_owned);
+    let client_id = text("client_id").ok_or("the server names no client id")?;
+    let client_secret = text("client_secret");
+    let token_endpoint = text("token_endpoint").ok_or("the server names no token endpoint")?;
+    let device_endpoint = text("device_authorization_endpoint")
+        .ok_or("the identity provider offers no device sign-in (device_authorization_endpoint)")?;
+    let mut request = vec![
+        ("client_id", client_id.clone()),
+        ("scope", "openid email".to_owned()),
+    ];
+    if let Some(secret) = &client_secret {
+        request.push(("client_secret", secret.clone()));
+    }
+    let device = post_form(&device_endpoint, &request)?;
+    let device_code = device["device_code"]
+        .as_str()
+        .ok_or_else(|| {
+            format!(
+                "the identity provider refused device sign-in: {}",
+                device["error"]
+            )
+        })?
+        .to_owned();
+    let user_code = device["user_code"].as_str().unwrap_or("").to_owned();
+    let verify_at = device["verification_uri_complete"]
+        .as_str()
+        .or_else(|| device["verification_uri"].as_str())
+        .or_else(|| device["verification_url"].as_str())
+        .unwrap_or("")
+        .to_owned();
+    let mut interval = device["interval"].as_u64().unwrap_or(5).max(1);
+    let deadline =
+        Instant::now() + Duration::from_secs(device["expires_in"].as_u64().unwrap_or(900));
+    println!("To sign in to {name}, open {verify_at}");
+    println!("and enter the code:  {user_code}");
+    println!("Waiting for you to finish signing in…");
+    let tokens = loop {
+        if Instant::now() > deadline {
+            return Err("the sign-in code expired; run the command again".to_owned());
+        }
+        std::thread::sleep(Duration::from_secs(interval));
+        let mut poll = vec![
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:device_code".to_owned(),
+            ),
+            ("device_code", device_code.clone()),
+            ("client_id", client_id.clone()),
+        ];
+        if let Some(secret) = &client_secret {
+            poll.push(("client_secret", secret.clone()));
+        }
+        let answer = post_form(&token_endpoint, &poll)?;
+        match answer["error"].as_str() {
+            None => break answer,
+            Some("authorization_pending") => {}
+            Some("slow_down") => interval += 5,
+            Some(other) => return Err(format!("sign-in failed: {other}")),
+        }
+    };
+    let credential = SsoCredential {
+        id_token: tokens["id_token"]
+            .as_str()
+            .ok_or("the identity provider returned no ID token (is the openid scope allowed?)")?
+            .to_owned(),
+        refresh_token: tokens["refresh_token"].as_str().map(str::to_owned),
+        token_endpoint,
+        client_id,
+        client_secret,
+    };
+    let coordinator = ant_remote::http::Coordinator::new(
+        &url,
+        ant_remote::auth::Token::new(&credential.id_token)?,
+        false,
+    )?;
+    let summary = health_and_workers(&coordinator)
+        .map_err(|error| format!("{url} did not accept your sign-in: {error}"))?;
+    let workers: ant_remote::protocol::WorkerList =
+        coordinator.get_json("/v1/workers", "worker list")?;
+    let profile = ServerProfile {
+        name: name.to_owned(),
+        target: url.clone(),
+        ssh_port: None,
+        identity: None,
+        remote_port: 0,
+        deployed_ms: crate::history::now_ms(),
+        os: workers.workers.first().map(|worker| worker.os.clone()),
+        arch: None,
+        url: Some(url.clone()),
+    };
+    profile.save(&serde_json::to_string(&credential).map_err(|error| error.to_string())?)?;
+    println!("Signed in to {name} ({url}): {summary}");
+    println!("  Build there:  ant build --on {name}");
+    Ok(0)
+}
 
 /// `ant login URL`: [`add`] with the name taken from the host.
 pub fn login_command(args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let mut url = None;
     let mut name = None;
     let mut token_file = None;
+    let mut sso = false;
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--sso" => sso = true,
             "--name" => name = Some(args.next().ok_or(LOGIN_USAGE)?),
             "--token-file" => token_file = Some(PathBuf::from(args.next().ok_or(LOGIN_USAGE)?)),
             other if url.is_none() && !other.starts_with('-') => url = Some(other.to_owned()),
@@ -723,6 +945,9 @@ pub fn login_command(args: impl Iterator<Item = OsString>) -> Result<u8, String>
             host.split('.').next().unwrap_or("team").to_owned()
         }
     };
+    if sso {
+        return sso_register(&name, &url);
+    }
     register(&name, &url, token_file.as_deref())
 }
 

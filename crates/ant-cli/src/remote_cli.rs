@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const COORDINATOR_USAGE: &str = "usage: ant coordinator --data-dir DIR --client-token-file FILE --worker-token-file FILE [--viewer-token-file FILE] [--listen ADDR] [--allow-non-loopback] [--max-body-mb N]";
+const COORDINATOR_USAGE: &str = "usage: ant coordinator --data-dir DIR --client-token-file FILE --worker-token-file FILE [--viewer-token-file FILE] [--listen ADDR] [--allow-non-loopback] [--max-body-mb N] [--oidc-issuer URL --oidc-client-id ID [--oidc-client-secret-file FILE] [--oidc-allowed-domains a.com,b.com]]";
 const WORKER_USAGE: &str = "usage: ant worker --coordinator URL --token-file FILE --work-dir DIR [--id NAME] [--sandbox] [--task-cache] [--once] [--allow-insecure-http]";
 const REMOTE_USAGE: &str = "usage: ant remote run (--server NAME | --coordinator URL --token-file FILE) --plan PLAN.json [--workspace PATH] [--allow-insecure-http]";
 
@@ -77,6 +77,10 @@ pub fn coordinator_command(args: impl Iterator<Item = OsString>) -> Result<u8, S
             "--worker-token-file",
             "--viewer-token-file",
             "--max-body-mb",
+            "--oidc-issuer",
+            "--oidc-client-id",
+            "--oidc-client-secret-file",
+            "--oidc-allowed-domains",
         ],
         &["--allow-non-loopback"],
         COORDINATOR_USAGE,
@@ -103,6 +107,43 @@ pub fn coordinator_command(args: impl Iterator<Item = OsString>) -> Result<u8, S
         .get("--viewer-token-file")
         .map(|path| Token::from_file(&PathBuf::from(path)))
         .transpose()?;
+    // Single sign-on (D-063): ID tokens from this issuer act as client
+    // tokens; the client secret (for issuers that need one in the device
+    // flow) is read from a file like every other secret.
+    let oidc = match flags.get("--oidc-issuer") {
+        None => None,
+        Some(issuer) => {
+            let audience = flags
+                .get("--oidc-client-id")
+                .ok_or("--oidc-issuer needs --oidc-client-id")?
+                .to_owned();
+            let client_secret = flags
+                .get("--oidc-client-secret-file")
+                .map(|path| {
+                    std::fs::read_to_string(path)
+                        .map(|text| text.trim().to_owned())
+                        .map_err(|error| format!("cannot read {path}: {error}"))
+                })
+                .transpose()?;
+            let allowed_domains = flags
+                .get("--oidc-allowed-domains")
+                .map(|list| {
+                    list.split(',')
+                        .map(|domain| domain.trim().to_owned())
+                        .filter(|domain| !domain.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let verifier =
+                ant_remote::oidc::OidcVerifier::discover(ant_remote::oidc::OidcConfig {
+                    issuer: issuer.to_owned(),
+                    audience,
+                    allowed_domains,
+                    client_secret,
+                })?;
+            Some(std::sync::Arc::new(verifier))
+        }
+    };
     let config = CoordinatorConfig {
         listen,
         data_dir: PathBuf::from(flags.require("--data-dir", COORDINATOR_USAGE)?),
@@ -112,6 +153,7 @@ pub fn coordinator_command(args: impl Iterator<Item = OsString>) -> Result<u8, S
         max_body_bytes: max_body_mb * 1024 * 1024,
         allow_non_loopback: flags.has("--allow-non-loopback"),
         threads: 8,
+        oidc,
     };
     serve(config, |bound| {
         use std::io::Write as _;

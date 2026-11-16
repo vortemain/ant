@@ -23,6 +23,7 @@ version = "0.1.0"
 dependencies = [
  "ant-remote",
  "ant-sandbox-win",
+ "base64",
  "build-action",
  "build-adapter",
  "build-cache",
@@ -32,6 +33,7 @@ dependencies = [
  "ctrlc",
  "local-executor",
  "qrcode",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -43,11 +45,13 @@ dependencies = [
 name = "ant-remote"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "build-action",
  "build-adapter",
  "build-digest",
  "build-graph",
  "local-executor",
+ "ring",
  "serde",
  "serde_json",
  "tiny_http",

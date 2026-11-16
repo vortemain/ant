@@ -27,6 +27,8 @@ qrcode.workspace = true
 ureq.workspace = true
 # Plain SHA-256 for release checksums (SHA256SUMS), unlike Ant's domain-separated digests.
 sha2.workspace = true
+ring.workspace = true
+base64.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI credential decryption and the sandbox runner's own-token restriction

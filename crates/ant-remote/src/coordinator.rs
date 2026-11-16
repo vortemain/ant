@@ -57,6 +57,9 @@ pub struct CoordinatorConfig {
     /// travel in plain HTTP, so a public bind must sit behind a TLS proxy.
     pub allow_non_loopback: bool,
     pub threads: usize,
+    /// Single sign-on: ID tokens from this issuer act as client tokens
+    /// (D-063).
+    pub oidc: Option<Arc<crate::oidc::OidcVerifier>>,
 }
 
 const MAX_ATTEMPTS: u32 = 2;
@@ -376,25 +379,37 @@ fn handle(state: &State, mut request: tiny_http::Request) {
     let _ = request.respond(response);
 }
 
-fn authenticate(state: &State, request: &tiny_http::Request) -> Option<Role> {
+/// The caller's role, and for single sign-on the verified email (D-063).
+fn authenticate(state: &State, request: &tiny_http::Request) -> Option<(Role, Option<String>)> {
     let presented = request
         .headers()
         .iter()
         .find(|header| header.field.equiv("Authorization"))
         .map(|header| header.value.as_str().to_owned())?;
     if state.config.client_token.matches_header(&presented) {
-        Some(Role::Client)
+        Some((Role::Client, None))
     } else if state.config.worker_token.matches_header(&presented) {
-        Some(Role::Worker)
+        Some((Role::Worker, None))
     } else if state
         .config
         .viewer_token
         .as_ref()
         .is_some_and(|token| token.matches_header(&presented))
     {
-        Some(Role::Viewer)
+        Some((Role::Viewer, None))
     } else {
-        None
+        let oidc = state.config.oidc.as_ref()?;
+        let jwt = presented.strip_prefix("Bearer ")?.trim();
+        match oidc.verify(jwt, now_ms() / 1000) {
+            Ok(email) => Some((Role::Client, Some(email))),
+            Err(reason) => {
+                audit(
+                    state,
+                    serde_json::json!({ "event": "sso_rejected", "reason": reason }),
+                );
+                None
+            }
+        }
     }
 }
 
@@ -441,7 +456,13 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
             },
         );
     }
-    let Some(role) = authenticate(state, request) else {
+    if method == tiny_http::Method::Get && segments == ["v1", "sso"] {
+        return match &state.config.oidc {
+            Some(oidc) => json_reply(200, &oidc.public_info()),
+            None => error_reply(404, "single sign-on is not configured"),
+        };
+    }
+    let Some((role, user)) = authenticate(state, request) else {
         audit(
             state,
             serde_json::json!({
@@ -477,7 +498,7 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
         (tiny_http::Method::Put, ["v1", "blobs", digest]) => put_blob(state, request, digest),
         (tiny_http::Method::Get, ["v1", "blobs", digest]) => get_blob(state, digest),
         (tiny_http::Method::Post, ["v1", "jobs"]) => {
-            require(role, Role::Client).and_then(|_| submit(state, request))
+            require(role, Role::Client).and_then(|_| submit(state, request, user.as_deref()))
         }
         (tiny_http::Method::Get, ["v1", "jobs", id]) => {
             require_reader(role).and_then(|_| job_status(state, id))
@@ -489,7 +510,7 @@ fn route(state: &State, request: &mut tiny_http::Request) -> Reply {
             require_reader(role).and_then(|_| audit_tail(state))
         }
         (tiny_http::Method::Post, ["v1", "jobs", id, "cancel"]) => {
-            require(role, Role::Client).and_then(|_| cancel_job(state, id))
+            require(role, Role::Client).and_then(|_| cancel_job(state, id, user.as_deref()))
         }
         (tiny_http::Method::Post, ["v1", "jobs", id, "log"]) => {
             require(role, Role::Worker).and_then(|_| post_log(state, request, id))
@@ -794,7 +815,11 @@ fn get_blob(state: &State, digest: &str) -> Result<Reply, Reply> {
     }
 }
 
-fn submit(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Reply> {
+fn submit(
+    state: &State,
+    request: &mut tiny_http::Request,
+    user: Option<&str>,
+) -> Result<Reply, Reply> {
     let body = read_body(state, request)?;
     let spec: JobSpec = parse_json(&body)?;
     if spec.protocol_version != PROTOCOL_VERSION {
@@ -848,6 +873,7 @@ fn submit(state: &State, request: &mut tiny_http::Request) -> Result<Reply, Repl
             "job": job_id,
             "action": action,
             "role": "client",
+            "user": user,
             "from": request.remote_addr().map(|address| address.ip().to_string()),
         }),
     );
@@ -961,7 +987,7 @@ fn post_log(state: &State, request: &mut tiny_http::Request, id: &str) -> Result
 
 /// Stop a job (D-054): a queued job never starts; a running one is told to
 /// stop through its worker's next heartbeat. Finished jobs are left alone.
-fn cancel_job(state: &State, id: &str) -> Result<Reply, Reply> {
+fn cancel_job(state: &State, id: &str, user: Option<&str>) -> Result<Reply, Reply> {
     let mut jobs = state.jobs.lock().expect("jobs lock");
     let record = jobs
         .records
@@ -981,7 +1007,7 @@ fn cancel_job(state: &State, id: &str) -> Result<Reply, Reply> {
     drop(jobs);
     audit(
         state,
-        serde_json::json!({ "event": "job_cancelled", "job": id, "action": action, "role": "client" }),
+        serde_json::json!({ "event": "job_cancelled", "job": id, "action": action, "role": "client", "user": user }),
     );
     Ok((204, Vec::new(), "text/plain"))
 }

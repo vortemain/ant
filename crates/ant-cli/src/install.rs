@@ -97,7 +97,7 @@ pub fn install_command(args: impl Iterator<Item = OsString>) -> Result<u8, Strin
 
 /// `adb` from the Android SDK (env, then default install locations), else
 /// from `PATH`.
-fn find_adb() -> Option<PathBuf> {
+pub(crate) fn find_adb() -> Option<PathBuf> {
     let name = format!("adb{}", std::env::consts::EXE_SUFFIX);
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .filter(|value| !value.is_empty())
@@ -128,7 +128,7 @@ fn find_adb() -> Option<PathBuf> {
 }
 
 /// Serials of devices `adb devices` reports as ready (`device` state).
-fn connected_devices(adb: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn connected_devices(adb: &Path) -> Result<Vec<String>, String> {
     let output = Command::new(adb)
         .arg("devices")
         .output()
@@ -149,7 +149,11 @@ fn parse_devices(listing: &str) -> Vec<String> {
         .collect()
 }
 
-fn install_with_adb(adb: &Path, devices: &[String], apks: &[PathBuf]) -> Result<u8, String> {
+pub(crate) fn install_with_adb(
+    adb: &Path,
+    devices: &[String],
+    apks: &[PathBuf],
+) -> Result<u8, String> {
     let mut failed = false;
     for device in devices {
         for apk in apks {
@@ -187,14 +191,14 @@ fn install_with_adb(adb: &Path, devices: &[String], apks: &[PathBuf]) -> Result<
 
 /// This computer's address on its default route, found without sending
 /// anything (a UDP "connect" only picks the route).
-fn lan_address() -> Option<IpAddr> {
+pub(crate) fn lan_address() -> Option<IpAddr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
     let address = socket.local_addr().ok()?.ip();
     (!address.is_unspecified() && !address.is_loopback()).then_some(address)
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -213,7 +217,7 @@ pub fn terminal_qr(text: &str) -> Result<String, String> {
         .build())
 }
 
-fn html_escape(text: &str) -> String {
+pub(crate) fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
