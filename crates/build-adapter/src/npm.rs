@@ -371,14 +371,57 @@ fn single_package_plan(
         }
     };
     let framework = detect_framework(package);
+    // Local reuse (D-056): with a lockfile pinning node_modules and declared
+    // outputs to restore, this machine may reuse its own result, but only
+    // with the whole project declared (Vite reads index.html, vite.config.*,
+    // public/, .env* — not just src/). Never shared.
+    let lockfile = ["package-lock.json", "npm-shrinkwrap.json"]
+        .iter()
+        .any(|name| root.join(name).is_file());
+    let restorable = framework.is_some() || !outputs.is_empty();
+    let mut reusable = false;
+    if lockfile && restorable {
+        let mut excluded: Vec<PathBuf> = [
+            "node_modules",
+            ".git",
+            ".ant",
+            "dist",
+            ".next",
+            ".turbo",
+            ".cache",
+            "coverage",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        excluded.extend(framework.clone());
+        excluded.extend(outputs.iter().cloned());
+        let mut whole: BTreeMap<PathBuf, InputKind> = BTreeMap::new();
+        let mut has_symlink = false;
+        crate::cargo::declare_project(
+            root,
+            Path::new(""),
+            &excluded,
+            &mut whole,
+            &mut has_symlink,
+        )?;
+        if !has_symlink {
+            inputs = whole;
+            reusable = true;
+        }
+    }
     let id = package
         .get("name")
         .and_then(|name| name.as_str())
         .map(|name| name.to_owned())
         .unwrap_or_else(|| "build".to_owned());
+    let mut action = build_action(id, PathBuf::from("."), inputs, outputs, framework);
+    if reusable {
+        action.cache_policy = CachePolicy::Local;
+    }
     let mut file = PlanFile::new();
     file.actions.push(PlanAction {
-        action: build_action(id, PathBuf::from("."), inputs, outputs, framework),
+        action,
         dependencies: Vec::new(),
     });
     Ok((file, vec![PathBuf::from(".ant").join("tmp")]))
@@ -1371,5 +1414,59 @@ mod tests {
             PathBuf::from("packages").join("web").join("dist")
         );
         assert_eq!(action.outputs[0].kind, OutputKind::Tree);
+    }
+
+    #[test]
+    fn a_locked_vite_app_is_reusable_locally_with_the_whole_project_declared() {
+        let dir = std::env::temp_dir().join(format!("ant-npm-vite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (path, text) in [
+            (
+                "package.json",
+                r#"{"name":"web","scripts":{"build":"vite build"},"devDependencies":{"vite":"6.0.0"}}"#,
+            ),
+            ("package-lock.json", "{}"),
+            ("index.html", "<div id=app></div>"),
+            ("vite.config.ts", "export default {}"),
+            ("src/main.ts", ""),
+            ("public/icon.svg", ""),
+            ("node_modules/vite/package.json", "{}"),
+            ("dist/index.html", ""),
+        ] {
+            let full = dir.join(path);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("dir");
+            std::fs::write(full, text).expect("write");
+        }
+        let package: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).expect("read"))
+                .expect("json");
+        let (plan, _) = single_package_plan(&dir, &package, OutputsMode::None).expect("plan");
+        let action = &plan.actions[0].action;
+        let paths: Vec<&Path> = action
+            .inputs
+            .iter()
+            .map(|input| input.path.as_path())
+            .collect();
+        assert_eq!(action.cache_policy, CachePolicy::Local);
+        for wanted in [
+            "index.html",
+            "vite.config.ts",
+            "src",
+            "public",
+            "package-lock.json",
+        ] {
+            assert!(paths.contains(&Path::new(wanted)), "{wanted} in {paths:?}");
+        }
+        for unwanted in ["node_modules", "dist"] {
+            assert!(
+                !paths.contains(&Path::new(unwanted)),
+                "{unwanted} in {paths:?}"
+            );
+        }
+        // Without a lockfile node_modules is unpinned: never reused.
+        std::fs::remove_file(dir.join("package-lock.json")).expect("remove");
+        let (plan, _) = single_package_plan(&dir, &package, OutputsMode::None).expect("plan");
+        assert_eq!(plan.actions[0].action.cache_policy, CachePolicy::Never);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
