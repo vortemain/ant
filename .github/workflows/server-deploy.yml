@@ -78,17 +78,17 @@ jobs:
           cargo generate-lockfile --quiet
           ant="$GITHUB_WORKSPACE/target/release/ant"
           start=$(date +%s.%N)
-          "$ant" build --on ci 2>&1 | tee build1.txt
+          "$ant" build --on ci 2>&1 | tee "$RUNNER_TEMP/build1.txt"
           first=$(echo "$(date +%s.%N) - $start" | bc)
-          grep -q "on ci" build1.txt
+          grep -q "on ci" "$RUNNER_TEMP/build1.txt"
           # cargo's own output, streamed live from the server (D-049).
-          grep -q "Compiling hello" build1.txt
-          ./dist/hello | tee run1.txt
-          grep -q "Hello, world!" run1.txt
+          grep -q "Compiling hello" "$RUNNER_TEMP/build1.txt"
+          ./dist/hello | tee "$RUNNER_TEMP/run1.txt"
+          grep -q "Hello, world!" "$RUNNER_TEMP/run1.txt"
           # Built by the server's own toolchain, as the ant user, in a kept
           # workspace: cargo's target/ is still there for the next build.
-          sudo sh -c 'ls -d /var/lib/ant/worker/projects/*/target/release' | tee kept.txt
-          [ "$(wc -l < kept.txt)" = 1 ]
+          sudo sh -c 'ls -d /var/lib/ant/worker/projects/*/target/release' | tee "$RUNNER_TEMP/kept.txt"
+          [ "$(wc -l < "$RUNNER_TEMP/kept.txt")" = 1 ]
           sudo sh -c 'stat -c %U /var/lib/ant/worker/projects/*/target/release/hello' | grep -qx ant
           # Edit one file: only that change is sent, the build is incremental.
           sed -i 's/Hello, world!/Hello again from the server!/' src/main.rs
